@@ -6,7 +6,7 @@ A framework for building custom Nostr relays with middleware support. Built on t
 
 - Pluggable business logic via `EventProcessor` trait
 - Middleware-based message processing
-- Built-in NIPs: 09 (deletion), 40 (expiration), 42 (auth), 70 (protected events)
+- Built-in NIPs: 09 (deletion), 40 (expiration), 42 (auth for EVENT and REQ), 70 (protected events)
 - Database abstraction with async storage
 - Multi-tenant support via subdomain isolation
 - Custom per-connection state
@@ -63,7 +63,7 @@ The core trait for relay customization:
 ```rust
 #[async_trait]
 pub trait EventProcessor: Send + Sync + Debug + 'static {
-    /// Process incoming events - decide whether to accept, reject, or transform them
+    /// Process incoming events - decide whether to accept/reject and optionally create additional relay-signed events
     async fn handle_event(&self, event: Event, state: &mut NostrConnectionState) -> Result<Vec<StoreCommand>>;
     
     /// Control which stored events are visible to each connection (default: all visible)
@@ -72,7 +72,7 @@ pub trait EventProcessor: Send + Sync + Debug + 'static {
     /// Validate subscription filters before processing (default: all allowed) 
     fn verify_filters(&self, filters: &[Filter], authed_pubkey: Option<PublicKey>, state: &NostrConnectionState) -> Result<()> { Ok(()) }
     
-    /// Handle custom protocol messages beyond standard Nostr (default: standard handling)
+    /// Handle custom protocol messages - use middlewares for more control (default: standard handling)
     async fn handle_message(&self, message: ClientMessage, state: &mut NostrConnectionState) -> Result<Vec<RelayMessage>> { Ok(vec![]) }
 }
 ```
