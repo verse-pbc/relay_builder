@@ -2,7 +2,7 @@
 name = "nostr_relay_builder"
 version = "0.1.0"
 edition = "2021"
-authors = ["Daniel Cadenas <daniel@nos.social>"]
+authors = ["dcadenas@gmail.com"]
 description = "A framework for building custom Nostr relays with pluggable business logic and middleware support"
 license = "MIT"
 repository = "https://github.com/nostrosocial/nostr_relay_builder"
