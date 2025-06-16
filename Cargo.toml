@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["Daniel Cadenas <dcadenas@gmail.com>"]
 description = "A framework for building custom Nostr relays with pluggable business logic and middleware support"
 license = "MIT"
-repository = "https://github.com/nostrosocial/nostr_relay_builder"
+repository = "https://github.com/verse-pbc/nostr_relay_builder"
 keywords = ["nostr", "relay", "websocket", "middleware"]
 categories = ["network-programming", "web-programming::websocket"]
 readme = "README.md"
@@ -15,7 +15,7 @@ default = []
 axum = ["dep:axum", "axum-server", "tower-http", "tower"]
 
 [dependencies]
-websocket_builder = { path = "../websocket_builder" }
+websocket_builder = { git = "https://github.com/verse-pbc/websocket_builder" }
 nostr-sdk = { git = "https://github.com/verse-pbc/nostr", features = ["all-nips"] }
 nostr = { git = "https://github.com/verse-pbc/nostr", features = ["std"] }
 nostr-database = { git = "https://github.com/verse-pbc/nostr" }

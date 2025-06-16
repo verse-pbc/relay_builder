@@ -1,0 +1,16 @@
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 10%
+        base: auto
+    patch:
+      default:
+        target: 0%
+        informational: true
+
+ignore:
+  - "tests/**/*"
+  - "target/**/*"
+  - "examples/**/*"
