@@ -63,9 +63,16 @@ The core trait for relay customization:
 ```rust
 #[async_trait]
 pub trait EventProcessor: Send + Sync + Debug + 'static {
+    /// Process incoming events - decide whether to accept, reject, or transform them
     async fn handle_event(&self, event: Event, state: &mut NostrConnectionState) -> Result<Vec<StoreCommand>>;
+    
+    /// Control which stored events are visible to each connection (default: all visible)
     fn can_see_event(&self, event: &Event, state: &NostrConnectionState, relay_pubkey: &PublicKey) -> Result<bool> { Ok(true) }
+    
+    /// Validate subscription filters before processing (default: all allowed) 
     fn verify_filters(&self, filters: &[Filter], authed_pubkey: Option<PublicKey>, state: &NostrConnectionState) -> Result<()> { Ok(()) }
+    
+    /// Handle custom protocol messages beyond standard Nostr (default: standard handling)
     async fn handle_message(&self, message: ClientMessage, state: &mut NostrConnectionState) -> Result<Vec<RelayMessage>> { Ok(vec![]) }
 }
 ```
