@@ -21,7 +21,7 @@ use nostr_sdk::prelude::*;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{info, warn};
 
 /// Custom event processor that:
@@ -133,7 +133,6 @@ async fn main() -> Result<()> {
     config.websocket_config = WebSocketConfig {
         max_connections: Some(1000),
         max_connection_time: Some(3600), // 1 hour
-        channel_size: 500,
     };
 
     // Create the moderated processor
@@ -154,15 +153,13 @@ async fn main() -> Result<()> {
     };
 
     // Create cancellation token for graceful shutdown
+    let task_tracker = TaskTracker::new();
     let cancellation_token = CancellationToken::new();
     let shutdown_token = cancellation_token.clone();
 
     // Create crypto worker and database for middleware
-    let crypto_worker = Arc::new(CryptoWorker::new(
-        Arc::new(config.keys.clone()),
-        cancellation_token.clone(),
-    ));
-    let database = config.create_database(crypto_worker)?;
+    let crypto_sender = CryptoWorker::spawn(Arc::new(config.keys.clone()), &task_tracker);
+    let database = config.create_database(crypto_sender)?;
 
     let handlers = Arc::new(
         RelayBuilder::new(config.clone())

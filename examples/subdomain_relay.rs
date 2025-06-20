@@ -22,7 +22,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
-use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use tracing::{info, warn};
 
 /// Tenant configuration
@@ -338,12 +338,9 @@ async fn main() -> Result<()> {
     let metrics_counter = connection_counter.clone();
 
     // Create crypto worker and database for middleware
-    let cancellation_token = CancellationToken::new();
-    let crypto_worker = Arc::new(CryptoWorker::new(
-        Arc::new(keys.clone()),
-        cancellation_token,
-    ));
-    let database = config.create_database(crypto_worker)?;
+    let task_tracker = TaskTracker::new();
+    let crypto_sender = CryptoWorker::spawn(Arc::new(keys.clone()), &task_tracker);
+    let database = config.create_database(crypto_sender)?;
 
     // Build the relay handlers with connection counting
     let handlers = Arc::new(

@@ -12,7 +12,7 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use tracing::{info, warn};
 use tracing_subscriber::{fmt, EnvFilter};
 use websocket_builder::{InboundContext, Middleware, SendMessage};
@@ -41,7 +41,7 @@ impl Middleware for RateLimitMiddleware {
 
     async fn process_inbound(
         &self,
-        ctx: &mut InboundContext<'_, Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
+        ctx: &mut InboundContext<Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
     ) -> anyhow::Result<()> {
         let conn_id = ctx.connection_id.clone();
         let now = Instant::now();
@@ -109,7 +109,7 @@ impl Middleware for EventLoggerMiddleware {
 
     async fn process_inbound(
         &self,
-        ctx: &mut InboundContext<'_, Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
+        ctx: &mut InboundContext<Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
     ) -> anyhow::Result<()> {
         // Check if this is an event message
         if let Some(ClientMessage::Event(event)) = &ctx.message {
@@ -158,18 +158,14 @@ async fn main() -> Result<()> {
 
     // Configure the relay with custom WebSocket settings
     let websocket_config = WebSocketConfig {
-        channel_size: 500,               // Smaller channel for this example
         max_connections: Some(10),       // Limit to 10 concurrent connections
         max_connection_time: Some(3600), // 1 hour max connection time
     };
 
     // Create the crypto worker and database
-    let cancellation_token = CancellationToken::new();
-    let crypto_worker = Arc::new(CryptoWorker::new(
-        Arc::new(keys.clone()),
-        cancellation_token,
-    ));
-    let database = Arc::new(RelayDatabase::new("./data/custom_relay.db", crypto_worker)?);
+    let task_tracker = TaskTracker::new();
+    let crypto_sender = CryptoWorker::spawn(Arc::new(keys.clone()), &task_tracker);
+    let database = Arc::new(RelayDatabase::new("./data/custom_relay.db", crypto_sender)?);
 
     let config = RelayConfig::new("wss://localhost:8080", database.clone(), keys)
         .with_websocket_config(websocket_config);

@@ -30,7 +30,7 @@ use std::sync::{
     Arc,
 };
 use std::time::Duration;
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tower_http::services::ServeDir;
 use tracing::{error, info, warn};
 
@@ -368,7 +368,6 @@ async fn main() -> Result<()> {
     config.websocket_config = WebSocketConfig {
         max_connections: Some(10000),
         max_connection_time: Some(86400), // 24 hours
-        channel_size: 1000,
     };
 
     // Create production processor
@@ -391,15 +390,13 @@ async fn main() -> Result<()> {
     };
 
     // Create shared resources
-    let cancellation_token = CancellationToken::new();
+    let task_tracker = TaskTracker::new();
     let connection_counter = Arc::new(AtomicUsize::new(0));
+    let cancellation_token = CancellationToken::new();
 
     // Create crypto worker and database for middleware
-    let crypto_worker = Arc::new(CryptoWorker::new(
-        Arc::new(keys.clone()),
-        cancellation_token.clone(),
-    ));
-    let database = config.create_database(crypto_worker)?;
+    let crypto_sender = CryptoWorker::spawn(Arc::new(keys.clone()), &task_tracker);
+    let database = config.create_database(crypto_sender)?;
 
     // Build relay handlers with all production features
     let handlers = Arc::new(
