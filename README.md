@@ -25,22 +25,29 @@ nostr_relay_builder = { git = "https://github.com/verse-pbc/nostr_relay_builder"
 ## Basic Example
 
 ```rust
-use nostr_relay_builder::{RelayBuilder, RelayConfig, EventProcessor, NostrConnectionState, StoreCommand};
+use anyhow::Result;
+use axum::{routing::get, Router};
+use nostr_relay_builder::{
+    EventContext, EventProcessor, RelayBuilder, RelayConfig, RelayInfo,
+    Result as RelayResult, StoreCommand,
+};
 use nostr_sdk::prelude::*;
+use std::net::SocketAddr;
 
 #[derive(Debug, Clone)]
-struct MyEventProcessor;
+struct AcceptAllProcessor;
 
 #[async_trait::async_trait]
-impl EventProcessor for MyEventProcessor {
+impl EventProcessor for AcceptAllProcessor {
     async fn handle_event(
         &self,
         event: Event,
-        state: &mut NostrConnectionState,
-    ) -> Result<Vec<StoreCommand>> {
+        _custom_state: &mut (),
+        context: EventContext<'_>,
+    ) -> RelayResult<Vec<StoreCommand>> {
         Ok(vec![StoreCommand::SaveSignedEvent(
             Box::new(event),
-            state.subdomain().clone(),
+            context.subdomain.clone(),
         )])
     }
 }
@@ -48,11 +55,24 @@ impl EventProcessor for MyEventProcessor {
 #[tokio::main]
 async fn main() -> Result<()> {
     let keys = Keys::generate();
-    let config = RelayConfig::new("wss://localhost:8080", "./relay.db", keys);
+    let config = RelayConfig::new("ws://localhost:8080", "./relay.db", keys);
+    let relay_info = RelayInfo {
+        name: "My Relay".to_string(),
+        description: "A simple Nostr relay".to_string(),
+        ..Default::default()
+    };
     
-    RelayBuilder::new(config)
-        .run_server(MyEventProcessor)
-        .await
+    let processor = AcceptAllProcessor;
+    let handler = RelayBuilder::new(config)
+        .build_axum_handler(processor, relay_info)
+        .await?;
+    
+    let app = Router::new().route("/", get(handler));
+    let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    
+    axum::serve(listener, app.into_make_service()).await?;
+    Ok(())
 }
 ```
 
@@ -62,18 +82,37 @@ The core trait for relay customization:
 
 ```rust
 #[async_trait]
-pub trait EventProcessor: Send + Sync + Debug + 'static {
-    /// Process incoming events - decide whether to accept/reject and optionally create additional relay-signed events
-    async fn handle_event(&self, event: Event, state: &mut NostrConnectionState) -> Result<Vec<StoreCommand>>;
-    
-    /// Control which stored events are visible to each connection (default: all visible)
-    fn can_see_event(&self, event: &Event, state: &NostrConnectionState, relay_pubkey: &PublicKey) -> Result<bool> { Ok(true) }
-    
-    /// Validate subscription filters before processing (default: all allowed) 
-    fn verify_filters(&self, filters: &[Filter], authed_pubkey: Option<PublicKey>, state: &NostrConnectionState) -> Result<()> { Ok(()) }
-    
-    /// Handle custom protocol messages - use middlewares for more control (default: standard handling)
-    async fn handle_message(&self, message: ClientMessage, state: &mut NostrConnectionState) -> Result<Vec<RelayMessage>> { Ok(vec![]) }
+pub trait EventProcessor<T = ()>: Send + Sync + Debug + 'static
+where
+    T: Send + Sync + 'static,
+{
+    /// Process incoming events with custom state and event context
+    async fn handle_event(
+        &self,
+        event: Event,
+        custom_state: &mut T,
+        context: EventContext<'_>,
+    ) -> Result<Vec<StoreCommand>>;
+
+    /// Control which stored events are visible to each connection
+    fn can_see_event(
+        &self,
+        event: &Event,
+        custom_state: &T,
+        context: EventContext<'_>,
+    ) -> bool {
+        true
+    }
+
+    /// Handle non-event messages (REQ, CLOSE, AUTH, etc.)
+    async fn handle_message(
+        &self,
+        message: ClientMessage,
+        custom_state: &mut T,
+        context: EventContext<'_>,
+    ) -> Result<Vec<RelayMessage>> {
+        Ok(vec![])
+    }
 }
 ```
 
@@ -81,12 +120,13 @@ pub trait EventProcessor: Send + Sync + Debug + 'static {
 
 See `examples/` directory for complete implementations:
 
-- `minimal_relay.rs` - Basic relay in ~60 lines
-- `advanced_relay.rs` - With authentication and moderation
-- `private_relay.rs` - Access-controlled relay
+- `minimal_relay.rs` - Basic relay in ~80 lines - **Start here!**
+- `custom_middleware.rs` - Learn the middleware pattern
+- `private_relay.rs` - Access-controlled relay with authentication
+- `advanced_relay.rs` - With moderation and advanced features
 - `subdomain_relay.rs` - Multi-tenant with subdomain isolation
-- `custom_middleware.rs` - Custom protocol extensions
-- `custom_state_relay.rs` - Custom per-connection state
+- `custom_state_relay.rs` - Custom per-connection state management
+- `production_relay.rs` - Production-ready with monitoring (requires `axum` feature)
 
 ## Production Usage
 

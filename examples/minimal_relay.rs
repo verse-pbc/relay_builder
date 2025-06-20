@@ -39,7 +39,7 @@ async fn main() -> Result<()> {
     // Initialize logging
     tracing_subscriber::fmt::init();
 
-    // Create relay configuration with pessimistic persistence mode
+    // Create relay configuration
     let relay_url = "ws://localhost:8080";
     let db_path = "./minimal_relay_db";
     let relay_keys = Keys::generate();

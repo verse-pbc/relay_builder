@@ -1,0 +1,27 @@
+# Dockerfile for benchmarking minimal_relay
+FROM rust:1.75-slim as builder
+
+WORKDIR /app
+
+# Copy manifests
+COPY Cargo.toml Cargo.lock ./
+
+# Copy source code
+COPY src ./src
+COPY examples ./examples
+
+# Build minimal_relay example in release mode
+RUN cargo build --release --example minimal_relay --features axum
+
+# Runtime stage
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /app/target/release/examples/minimal_relay /usr/local/bin/minimal_relay
+
+EXPOSE 8080
+
+CMD ["minimal_relay"]
