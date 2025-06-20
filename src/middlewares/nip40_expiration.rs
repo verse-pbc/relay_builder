@@ -48,7 +48,7 @@ impl Middleware for Nip40ExpirationMiddleware {
 
     async fn process_inbound(
         &self,
-        ctx: &mut InboundContext<'_, Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
+        ctx: &mut InboundContext<Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
     ) -> anyhow::Result<()> {
         if let Some(ClientMessage::Event(event_cow)) = &ctx.message {
             let event_ref: &Event = event_cow.as_ref();
@@ -61,10 +61,18 @@ impl Middleware for Nip40ExpirationMiddleware {
                     );
 
                     let filter = Filter::new().id(event_ref.id);
-                    let delete_command =
-                        StoreCommand::DeleteEvents(filter, ctx.state.subdomain().clone());
+                    let delete_command = StoreCommand::DeleteEvents(
+                        filter,
+                        ctx.state.read().await.subdomain().clone(),
+                    );
 
-                    if let Err(e) = ctx.state.save_and_broadcast(delete_command).await {
+                    if let Err(e) = ctx
+                        .state
+                        .read()
+                        .await
+                        .save_and_broadcast(delete_command)
+                        .await
+                    {
                         error!(
                             target: "nip40",
                             "Failed to send delete command for expired event {}: {}", event_ref.id, e
@@ -79,7 +87,7 @@ impl Middleware for Nip40ExpirationMiddleware {
     /// Filters outgoing event messages, dropping events that have expired.
     async fn process_outbound(
         &self,
-        ctx: &mut OutboundContext<'_, Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
+        ctx: &mut OutboundContext<Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
     ) -> anyhow::Result<()> {
         if let Some(RelayMessage::Event { event, .. }) = &mut ctx.message {
             let event_ref: &Event = event.as_ref();
@@ -126,7 +134,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (mut state, _rx) =
+        let (state, _rx) =
             create_test_state_with_subscription_service(None, database.clone()).await;
         let middlewares: Vec<
             Arc<
@@ -138,12 +146,14 @@ mod tests {
             >,
         > = vec![Arc::new(middleware.clone())];
 
+        let state_arc = Arc::new(tokio::sync::RwLock::new(state));
+        let middlewares_arc = Arc::new(middlewares);
         let mut context = InboundContext::new(
             "test_connection_id".to_string(),
             Some(ClientMessage::Event(Cow::Owned(expired_event.clone()))),
             None,
-            &mut state,
-            &middlewares,
+            state_arc,
+            middlewares_arc,
             0,
         );
 
@@ -179,7 +189,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (mut state, _rx) =
+        let (state, _rx) =
             create_test_state_with_subscription_service(None, database.clone()).await;
         let middlewares: Vec<
             Arc<
@@ -191,12 +201,14 @@ mod tests {
             >,
         > = vec![Arc::new(middleware.clone())];
 
+        let state_arc = Arc::new(tokio::sync::RwLock::new(state));
+        let middlewares_arc = Arc::new(middlewares);
         let mut context = InboundContext::new(
             "test_connection_id".to_string(),
             Some(ClientMessage::Event(Cow::Owned(non_expired_event.clone()))),
             None,
-            &mut state,
-            &middlewares,
+            state_arc,
+            middlewares_arc,
             0,
         );
 
@@ -232,7 +244,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (mut state, _rx) =
+        let (state, _rx) =
             create_test_state_with_subscription_service(None, database.clone()).await;
         let middlewares: Vec<
             Arc<
@@ -244,14 +256,16 @@ mod tests {
             >,
         > = vec![Arc::new(middleware.clone())];
 
+        let state_arc = Arc::new(tokio::sync::RwLock::new(state));
+        let middlewares_arc = Arc::new(middlewares);
         let mut context = InboundContext::new(
             "test_connection_id".to_string(),
             Some(ClientMessage::Event(Cow::Owned(
                 no_expiration_event.clone(),
             ))),
             None,
-            &mut state,
-            &middlewares,
+            state_arc,
+            middlewares_arc,
             0,
         );
 

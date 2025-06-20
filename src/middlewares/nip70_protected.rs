@@ -23,7 +23,7 @@ impl Middleware for Nip70Middleware {
 
     async fn process_inbound(
         &self,
-        ctx: &mut InboundContext<'_, Self::State, ClientMessage<'static>, RelayMessage<'static>>,
+        ctx: &mut InboundContext<Self::State, ClientMessage<'static>, RelayMessage<'static>>,
     ) -> Result<(), anyhow::Error> {
         let Some(ClientMessage::Event(event)) = &ctx.message else {
             return ctx.next().await;
@@ -35,7 +35,7 @@ impl Middleware for Nip70Middleware {
         }
 
         // Protected events require authentication
-        let Some(auth_pubkey) = ctx.state.authed_pubkey else {
+        let Some(auth_pubkey) = ctx.state.read().await.authed_pubkey else {
             return Err(
                 Error::auth_required("this event may only be published by its author").into(),
             );
@@ -55,7 +55,7 @@ impl Middleware for Nip70Middleware {
 
     async fn process_outbound(
         &self,
-        ctx: &mut OutboundContext<'_, Self::State, ClientMessage<'static>, RelayMessage<'static>>,
+        ctx: &mut OutboundContext<Self::State, ClientMessage<'static>, RelayMessage<'static>>,
     ) -> Result<(), anyhow::Error> {
         // No special handling needed for outbound messages in NIP-70
         // Protected events can be sent to authenticated users

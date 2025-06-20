@@ -163,7 +163,7 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for Nip42Mid
 
     async fn process_inbound(
         &self,
-        ctx: &mut InboundContext<'_, Self::State, ClientMessage<'static>, RelayMessage<'static>>,
+        ctx: &mut InboundContext<Self::State, ClientMessage<'static>, RelayMessage<'static>>,
     ) -> Result<(), anyhow::Error> {
         match ctx.message.as_ref() {
             Some(ClientMessage::Auth(auth_event_cow)) => {
@@ -178,7 +178,14 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for Nip42Mid
                     connection_id_clone, auth_event_id
                 );
 
-                let Some(expected_challenge) = ctx.state.challenge.as_ref() else {
+                let (expected_challenge, connection_scope) = {
+                    let state_guard = ctx.state.read().await;
+                    let challenge = state_guard.challenge.as_ref().cloned();
+                    let scope = state_guard.subdomain().clone();
+                    (challenge, scope)
+                };
+
+                let Some(expected_challenge) = expected_challenge else {
                     let conn_id_err = ctx.connection_id.clone();
                     error!(
                         target: "auth",
@@ -192,7 +199,6 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for Nip42Mid
                     ))?;
                     return Err(Error::auth_required("No challenge found in state").into());
                 };
-                let expected_challenge_clone = expected_challenge.clone();
 
                 if auth_event.kind != Kind::Authentication {
                     let conn_id_err = ctx.connection_id.clone();
@@ -234,12 +240,12 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for Nip42Mid
 
                 match found_challenge_in_tag {
                     Some(tag_challenge_str) => {
-                        if tag_challenge_str != expected_challenge_clone {
+                        if tag_challenge_str != expected_challenge {
                             let conn_id_err = ctx.connection_id.clone();
                             error!(
                                 target: "auth",
                                 "[{}] Challenge mismatch for AUTH. Expected '{}', got '{}'. Event ID: {}.",
-                                conn_id_err, expected_challenge_clone, tag_challenge_str, auth_event_id
+                                conn_id_err, expected_challenge, tag_challenge_str, auth_event_id
                             );
                             ctx.send_message(RelayMessage::ok(
                                 auth_event_id,
@@ -277,13 +283,10 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for Nip42Mid
                     Some(tag_relay_url) => {
                         let client_relay_url = tag_relay_url.as_str_without_trailing_slash();
 
-                        // Get the connection's subdomain for validation
-                        let connection_scope = ctx.state.subdomain();
-
                         // Validate the relay URL against the current connection
-                        if !self.validate_relay_url(client_relay_url, connection_scope) {
+                        if !self.validate_relay_url(client_relay_url, &connection_scope) {
                             let conn_id_err = ctx.connection_id.clone();
-                            let subdomain_msg = match connection_scope {
+                            let subdomain_msg = match &connection_scope {
                                 Scope::Named { name, .. } => format!(" with subdomain '{}'", name),
                                 Scope::Default => String::new(),
                             };
@@ -338,8 +341,11 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for Nip42Mid
                 }
 
                 // Authentication successful
-                ctx.state.authed_pubkey = Some(auth_event_pubkey);
-                ctx.state.challenge = None;
+                {
+                    let mut state_write = ctx.state.write().await;
+                    state_write.authed_pubkey = Some(auth_event_pubkey);
+                    state_write.challenge = None;
+                }
                 debug!(
                     target: "auth",
                     "[{}] Successfully authenticated pubkey {} (event ID {}).",
@@ -354,21 +360,24 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for Nip42Mid
 
     async fn process_outbound(
         &self,
-        ctx: &mut OutboundContext<'_, Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
+        ctx: &mut OutboundContext<Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
     ) -> Result<(), anyhow::Error> {
         ctx.next().await
     }
 
     async fn on_connect(
         &self,
-        ctx: &mut ConnectionContext<'_, Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
+        ctx: &mut ConnectionContext<Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
     ) -> Result<(), anyhow::Error> {
         debug!(
             target: "auth",
             "[{}] New connection, sending auth challenge",
             ctx.connection_id
         );
-        let challenge_event = ctx.state.get_challenge_event();
+        let challenge_event = {
+            let mut state_write = ctx.state.write().await;
+            state_write.get_challenge_event()
+        };
         debug!(
             target: "auth",
             "[{}] Generated challenge event: {:?}",
@@ -383,12 +392,14 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for Nip42Mid
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::create_test_state;
+    use crate::test_utils::{
+        create_test_connection_context, create_test_inbound_context, create_test_state,
+    };
     use nostr_lmdb::Scope;
     use std::borrow::Cow;
     use std::sync::Arc;
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
-    use websocket_builder::{ConnectionContext, InboundContext, Middleware};
+    use websocket_builder::Middleware;
 
     fn create_middleware_chain() -> Vec<
         Arc<
@@ -421,22 +432,20 @@ mod tests {
             .build_with_ctx(&Instant::now(), keys.public_key());
         let auth_event = keys.sign_event(auth_event).await.unwrap();
 
-        let mut ctx = InboundContext::<
-            '_,
-            NostrConnectionState,
-            ClientMessage<'static>,
-            RelayMessage<'static>,
-        >::new(
+        let mut ctx = create_test_inbound_context(
             "test_conn".to_string(),
             Some(ClientMessage::Auth(Cow::Owned(auth_event.clone()))),
             None,
-            &mut state,
-            &[],
+            state,
+            vec![],
             0,
         );
 
         assert!(middleware.process_inbound(&mut ctx).await.is_ok());
-        assert_eq!(state.authed_pubkey, Some(keys.public_key()));
+        assert_eq!(
+            ctx.state.read().await.authed_pubkey,
+            Some(keys.public_key())
+        );
     }
 
     #[tokio::test]
@@ -444,7 +453,7 @@ mod tests {
         let keys = Keys::generate();
         let auth_url = "wss://test.relay".to_string();
         let middleware = Nip42Middleware::with_url(auth_url.clone());
-        let mut state = create_test_state(None);
+        let state = create_test_state(None);
 
         let auth_event = EventBuilder::new(Kind::Authentication, "")
             .tag(Tag::from_standardized(TagStandard::Relay(
@@ -453,22 +462,17 @@ mod tests {
             .build_with_ctx(&Instant::now(), keys.public_key());
         let auth_event = keys.sign_event(auth_event).await.unwrap();
 
-        let mut ctx = InboundContext::<
-            '_,
-            NostrConnectionState,
-            ClientMessage<'static>,
-            RelayMessage<'static>,
-        >::new(
+        let mut ctx = create_test_inbound_context(
             "test_conn".to_string(),
             Some(ClientMessage::Auth(Cow::Owned(auth_event.clone()))),
             None,
-            &mut state,
-            &[],
+            state,
+            vec![],
             0,
         );
 
         assert!(middleware.process_inbound(&mut ctx).await.is_err());
-        assert_eq!(state.authed_pubkey, None);
+        assert_eq!(ctx.state.read().await.authed_pubkey, None);
     }
 
     #[tokio::test]
@@ -490,22 +494,17 @@ mod tests {
             .build_with_ctx(&Instant::now(), keys.public_key());
         let auth_event = keys.sign_event(auth_event).await.unwrap();
 
-        let mut ctx = InboundContext::<
-            '_,
-            NostrConnectionState,
-            ClientMessage<'static>,
-            RelayMessage<'static>,
-        >::new(
+        let mut ctx = create_test_inbound_context(
             "test_conn".to_string(),
             Some(ClientMessage::Auth(Cow::Owned(auth_event.clone()))),
             None,
-            &mut state,
-            &[],
+            state,
+            vec![],
             0,
         );
 
         assert!(middleware.process_inbound(&mut ctx).await.is_err());
-        assert_eq!(state.authed_pubkey, None);
+        assert_eq!(ctx.state.read().await.authed_pubkey, None);
     }
 
     #[tokio::test]
@@ -525,22 +524,17 @@ mod tests {
             .build_with_ctx(&Instant::now(), keys.public_key());
         let auth_event = keys.sign_event(auth_event).await.unwrap();
 
-        let mut ctx = InboundContext::<
-            '_,
-            NostrConnectionState,
-            ClientMessage<'static>,
-            RelayMessage<'static>,
-        >::new(
+        let mut ctx = create_test_inbound_context(
             "test_conn".to_string(),
             Some(ClientMessage::Auth(Cow::Owned(auth_event.clone()))),
             None,
-            &mut state,
-            &[],
+            state,
+            vec![],
             0,
         );
 
         assert!(middleware.process_inbound(&mut ctx).await.is_err());
-        assert_eq!(state.authed_pubkey, None);
+        assert_eq!(ctx.state.read().await.authed_pubkey, None);
     }
 
     #[tokio::test]
@@ -561,22 +555,17 @@ mod tests {
             .build_with_ctx(&Instant::now(), keys.public_key());
         let auth_event = wrong_keys.sign_event(auth_event).await.unwrap();
 
-        let mut ctx = InboundContext::<
-            '_,
-            NostrConnectionState,
-            ClientMessage<'static>,
-            RelayMessage<'static>,
-        >::new(
+        let mut ctx = create_test_inbound_context(
             "test_conn".to_string(),
             Some(ClientMessage::Auth(Cow::Owned(auth_event.clone()))),
             None,
-            &mut state,
-            &[],
+            state,
+            vec![],
             0,
         );
 
         assert!(middleware.process_inbound(&mut ctx).await.is_err());
-        assert_eq!(state.authed_pubkey, None);
+        assert_eq!(ctx.state.read().await.authed_pubkey, None);
     }
 
     #[tokio::test]
@@ -603,41 +592,31 @@ mod tests {
             .build(keys.public_key());
         let auth_event = keys.sign_event(auth_event).await.unwrap();
 
-        let mut ctx = InboundContext::<
-            '_,
-            NostrConnectionState,
-            ClientMessage<'static>,
-            RelayMessage<'static>,
-        >::new(
+        let mut ctx = create_test_inbound_context(
             "test_conn".to_string(),
             Some(ClientMessage::Auth(Cow::Owned(auth_event.clone()))),
             None,
-            &mut state,
-            &[],
+            state,
+            vec![],
             0,
         );
 
         assert!(middleware.process_inbound(&mut ctx).await.is_err());
-        assert_eq!(state.authed_pubkey, None);
+        assert_eq!(ctx.state.read().await.authed_pubkey, None);
     }
 
     #[tokio::test]
     async fn test_on_connect_sends_challenge() {
         let auth_url = "wss://test.relay".to_string();
         let middleware = Nip42Middleware::with_url(auth_url);
-        let mut state = create_test_state(None);
+        let state = create_test_state(None);
         let chain = create_middleware_chain();
 
-        let mut ctx = ConnectionContext::new(
-            "test_conn".to_string(),
-            None,
-            &mut state,
-            chain.as_slice(),
-            0,
-        );
+        let mut ctx =
+            create_test_connection_context("test_conn".to_string(), None, state, chain, 0);
 
         assert!(middleware.on_connect(&mut ctx).await.is_ok());
-        assert!(state.challenge.is_some());
+        assert!(ctx.state.read().await.challenge.is_some());
     }
 
     #[tokio::test]
@@ -682,17 +661,12 @@ mod tests {
             .unwrap_or("No relay URL found");
         println!("Auth event relay URL: {}", client_url);
 
-        let mut ctx = InboundContext::<
-            '_,
-            NostrConnectionState,
-            ClientMessage<'static>,
-            RelayMessage<'static>,
-        >::new(
+        let mut ctx = create_test_inbound_context(
             "test_conn".to_string(),
             Some(ClientMessage::Auth(Cow::Owned(auth_event.clone()))),
             None,
-            &mut state,
-            &[],
+            state,
+            vec![],
             0,
         );
 
@@ -704,7 +678,10 @@ mod tests {
         }
 
         assert!(result.is_ok());
-        assert_eq!(state.authed_pubkey, Some(keys.public_key()));
+        assert_eq!(
+            ctx.state.read().await.authed_pubkey,
+            Some(keys.public_key())
+        );
     }
 
     #[tokio::test]
@@ -731,22 +708,17 @@ mod tests {
             .build_with_ctx(&Instant::now(), keys.public_key());
         let auth_event = keys.sign_event(auth_event).await.unwrap();
 
-        let mut ctx = InboundContext::<
-            '_,
-            NostrConnectionState,
-            ClientMessage<'static>,
-            RelayMessage<'static>,
-        >::new(
+        let mut ctx = create_test_inbound_context(
             "test_conn".to_string(),
             Some(ClientMessage::Auth(Cow::Owned(auth_event.clone()))),
             None,
-            &mut state,
-            &[],
+            state,
+            vec![],
             0,
         );
 
         assert!(middleware.process_inbound(&mut ctx).await.is_err());
-        assert_eq!(state.authed_pubkey, None);
+        assert_eq!(ctx.state.read().await.authed_pubkey, None);
     }
 
     #[tokio::test]
@@ -773,21 +745,16 @@ mod tests {
             .build_with_ctx(&Instant::now(), keys.public_key());
         let auth_event = keys.sign_event(auth_event).await.unwrap();
 
-        let mut ctx = InboundContext::<
-            '_,
-            NostrConnectionState,
-            ClientMessage<'static>,
-            RelayMessage<'static>,
-        >::new(
+        let mut ctx = create_test_inbound_context(
             "test_conn".to_string(),
             Some(ClientMessage::Auth(Cow::Owned(auth_event.clone()))),
             None,
-            &mut state,
-            &[],
+            state,
+            vec![],
             0,
         );
 
         assert!(middleware.process_inbound(&mut ctx).await.is_err());
-        assert_eq!(state.authed_pubkey, None);
+        assert_eq!(ctx.state.read().await.authed_pubkey, None);
     }
 }

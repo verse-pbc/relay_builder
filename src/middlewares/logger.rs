@@ -38,12 +38,15 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for LoggerMi
 
     async fn process_inbound(
         &self,
-        ctx: &mut InboundContext<'_, Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
+        ctx: &mut InboundContext<Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
     ) -> Result<(), anyhow::Error> {
         // Extract subdomain from connection state
-        let subdomain = match &ctx.state.subdomain {
-            Scope::Named { name, .. } => Some(name.as_str()),
-            Scope::Default => None,
+        let subdomain = {
+            let state_guard = ctx.state.read().await;
+            match &state_guard.subdomain {
+                Scope::Named { name, .. } => Some(name.to_string()),
+                Scope::Default => None,
+            }
         };
 
         // Create a span with connection ID and subdomain to ensure logs always have context
@@ -99,12 +102,15 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for LoggerMi
 
     async fn process_outbound(
         &self,
-        ctx: &mut OutboundContext<'_, Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
+        ctx: &mut OutboundContext<Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
     ) -> Result<(), anyhow::Error> {
         // Extract subdomain from connection state
-        let subdomain = match &ctx.state.subdomain {
-            Scope::Named { name, .. } => Some(name.as_str()),
-            Scope::Default => None,
+        let subdomain = {
+            let state_guard = ctx.state.read().await;
+            match &state_guard.subdomain {
+                Scope::Named { name, .. } => Some(name.to_string()),
+                Scope::Default => None,
+            }
         };
 
         // Create a span with connection ID and subdomain to ensure logs always have context
@@ -161,14 +167,17 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for LoggerMi
         ctx.next().await
     }
 
-    async fn on_disconnect<'a>(
-        &'a self,
-        ctx: &mut DisconnectContext<'a, Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
+    async fn on_disconnect(
+        &self,
+        ctx: &mut DisconnectContext<Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
     ) -> Result<(), anyhow::Error> {
         // Extract subdomain from connection state
-        let subdomain = match &ctx.state.subdomain {
-            Scope::Named { name, .. } => Some(name.as_str()),
-            Scope::Default => None,
+        let subdomain = {
+            let state_guard = ctx.state.read().await;
+            match &state_guard.subdomain {
+                Scope::Named { name, .. } => Some(name.to_string()),
+                Scope::Default => None,
+            }
         };
 
         // Create a span with connection ID and subdomain to ensure logs always have context
@@ -188,12 +197,15 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for LoggerMi
 
     async fn on_connect(
         &self,
-        ctx: &mut ConnectionContext<'_, Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
+        ctx: &mut ConnectionContext<Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
     ) -> Result<(), anyhow::Error> {
         // Extract subdomain from connection state
-        let subdomain = match &ctx.state.subdomain {
-            Scope::Named { name, .. } => Some(name.as_str()),
-            Scope::Default => None,
+        let subdomain = {
+            let state_guard = ctx.state.read().await;
+            match &state_guard.subdomain {
+                Scope::Named { name, .. } => Some(name.to_string()),
+                Scope::Default => None,
+            }
         };
 
         // Create a span with connection ID and subdomain to ensure logs always have context
@@ -215,6 +227,7 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for LoggerMi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::*;
     use std::sync::Arc;
 
     fn create_test_state() -> NostrConnectionState<()> {
@@ -236,14 +249,14 @@ mod tests {
     #[tokio::test]
     async fn test_inbound_message_logging() {
         let chain = create_middleware_chain();
-        let mut state = create_test_state();
+        let state = create_test_state();
 
-        let mut ctx = InboundContext::new(
+        let mut ctx = create_test_inbound_context(
             "test_connection".to_string(),
             Some(ClientMessage::close(SubscriptionId::new("test_sub"))),
             None,
-            &mut state,
-            chain.as_slice(),
+            state,
+            chain.clone(),
             0,
         );
 
@@ -254,14 +267,14 @@ mod tests {
     #[tokio::test]
     async fn test_outbound_message_logging() {
         let chain = create_middleware_chain();
-        let mut state = create_test_state();
+        let state = create_test_state();
 
-        let mut ctx = OutboundContext::new(
+        let mut ctx = create_test_outbound_context(
             "test_connection".to_string(),
             RelayMessage::notice("test notice".to_string()),
             None,
-            &mut state,
-            chain.as_slice(),
+            state,
+            chain.clone(),
             0,
         );
 

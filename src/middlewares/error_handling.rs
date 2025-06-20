@@ -44,7 +44,7 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for ErrorHan
 
     async fn process_inbound(
         &self,
-        ctx: &mut InboundContext<'_, Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
+        ctx: &mut InboundContext<Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
     ) -> Result<(), anyhow::Error> {
         let client_message_id = match &ctx.message {
             Some(ClientMessage::Event(event)) => ClientMessageId::Event(event.id),
@@ -81,7 +81,7 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for ErrorHan
 
     async fn process_outbound(
         &self,
-        ctx: &mut OutboundContext<'_, Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
+        ctx: &mut OutboundContext<Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
     ) -> Result<(), anyhow::Error> {
         ctx.next().await
     }
@@ -91,7 +91,6 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for ErrorHan
 async fn handle_inbound_error<T: Clone + Send + Sync + std::fmt::Debug + 'static>(
     error: &Error,
     ctx: &mut InboundContext<
-        '_,
         NostrConnectionState<T>,
         ClientMessage<'static>,
         RelayMessage<'static>,

@@ -84,15 +84,16 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for MetricsM
 
     async fn process_inbound(
         &self,
-        ctx: &mut InboundContext<'_, Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
+        ctx: &mut InboundContext<Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
     ) -> Result<(), anyhow::Error> {
         // Track event processing start time and increment counter
         if let Some(ClientMessage::Event(event)) = ctx.message.as_ref() {
             if let Some(handler) = &self.handler {
                 // Only track timing if the handler wants it
                 if handler.should_track_latency() {
-                    ctx.state.event_start_time = Some(Instant::now());
-                    ctx.state.event_kind = Some(event.as_ref().kind.as_u16());
+                    let mut state = ctx.state.write().await;
+                    state.event_start_time = Some(Instant::now());
+                    state.event_kind = Some(event.as_ref().kind.as_u16());
                 }
                 handler.increment_inbound_events_processed();
             }
@@ -104,14 +105,14 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for MetricsM
 
     async fn process_outbound(
         &self,
-        ctx: &mut OutboundContext<'_, Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
+        ctx: &mut OutboundContext<Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
     ) -> Result<(), anyhow::Error> {
         // Track event processing latency for OK responses
         if let Some(RelayMessage::Ok { .. }) = ctx.message.as_ref() {
-            if let (Some(start_time), Some(kind)) = (
-                ctx.state.event_start_time.take(),
-                ctx.state.event_kind.take(),
-            ) {
+            let mut state = ctx.state.write().await;
+            if let (Some(start_time), Some(kind)) =
+                (state.event_start_time.take(), state.event_kind.take())
+            {
                 let latency_ms = start_time.elapsed().as_secs_f64() * 1000.0;
                 if let Some(handler) = &self.handler {
                     handler.record_event_latency(kind as u32, latency_ms);
@@ -125,7 +126,7 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for MetricsM
 
     async fn on_connect(
         &self,
-        ctx: &mut ConnectionContext<'_, Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
+        ctx: &mut ConnectionContext<Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
     ) -> Result<(), anyhow::Error> {
         if let Some(handler) = &self.handler {
             handler.increment_active_connections();
@@ -135,9 +136,9 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for MetricsM
         ctx.next().await
     }
 
-    async fn on_disconnect<'a>(
-        &'a self,
-        ctx: &mut DisconnectContext<'a, Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
+    async fn on_disconnect(
+        &self,
+        ctx: &mut DisconnectContext<Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
     ) -> Result<(), anyhow::Error> {
         if let Some(handler) = &self.handler {
             handler.decrement_active_connections();
@@ -152,6 +153,7 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for MetricsM
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+    use tokio::sync::RwLock;
 
     #[derive(Debug, Default)]
     struct TestMetricsHandler {
@@ -201,14 +203,16 @@ mod tests {
                 >,
             >];
 
-        let mut state = create_test_state();
+        let state = create_test_state();
+        let state_arc = Arc::new(RwLock::new(state));
+        let chain_arc = Arc::new(chain.clone());
 
         // Test connection
         let mut ctx = ConnectionContext::new(
             "test_connection".to_string(),
             None,
-            &mut state,
-            chain.as_slice(),
+            state_arc.clone(),
+            chain_arc.clone(),
             0,
         );
 
@@ -216,13 +220,8 @@ mod tests {
         assert_eq!(*connections.lock().unwrap(), 1);
 
         // Test disconnection
-        let mut ctx = DisconnectContext::new(
-            "test_connection".to_string(),
-            None,
-            &mut state,
-            chain.as_slice(),
-            0,
-        );
+        let mut ctx =
+            DisconnectContext::new("test_connection".to_string(), None, state_arc, chain_arc, 0);
 
         chain[0].on_disconnect(&mut ctx).await.unwrap();
         assert_eq!(*connections.lock().unwrap(), 0);

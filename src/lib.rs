@@ -29,7 +29,7 @@ pub mod test_utils;
 pub mod utils;
 
 pub use config::{RelayConfig, ScopeConfig, WebSocketConfig};
-pub use crypto_worker::{CryptoWorker, CryptoWorkerMetricsSnapshot};
+pub use crypto_worker::{CryptoSender, CryptoWorker};
 pub use database::{NostrDatabase, RelayDatabase};
 pub use error::{Error, Result};
 pub use event_processor::{EventContext, EventProcessor, PublicRelayProcessor};

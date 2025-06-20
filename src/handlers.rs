@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
+use websocket_builder::AxumWebSocketExt;
 
 /// Helper struct for automatic connection counting
 struct ConnectionCounter {
@@ -358,7 +359,7 @@ where
                     crate::state::CURRENT_REQUEST_HOST
                         .scope(host, async move {
                             if let Err(e) = ws_handler
-                                .start(socket, real_ip.clone(), cancellation_token)
+                                .start_axum(socket, real_ip.clone(), cancellation_token)
                                 .await
                             {
                                 error!("WebSocket error for connection {}: {}", real_ip, e);
@@ -443,7 +444,7 @@ where
                             crate::state::CURRENT_REQUEST_HOST
                                 .scope(host, async move {
                                     if let Err(e) = ws_handler
-                                        .start(socket, real_ip.clone(), cancellation_token)
+                                        .start_axum(socket, real_ip.clone(), cancellation_token)
                                         .await
                                     {
                                         error!("WebSocket error for connection {}: {}", real_ip, e);

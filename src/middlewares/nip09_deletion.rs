@@ -168,15 +168,20 @@ impl Middleware for Nip09Middleware {
 
     async fn process_inbound(
         &self,
-        ctx: &mut InboundContext<'_, Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
+        ctx: &mut InboundContext<Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
     ) -> Result<(), anyhow::Error> {
         let Some(ClientMessage::Event(event_cow)) = &ctx.message else {
             return ctx.next().await;
         };
 
         if event_cow.kind == Kind::EventDeletion {
+            let state_snapshot = {
+                let state_guard = ctx.state.read().await;
+                state_guard.clone()
+            };
+
             if let Err(e) = self
-                .handle_deletion_request(event_cow.as_ref(), ctx.state)
+                .handle_deletion_request(event_cow.as_ref(), &state_snapshot)
                 .await
             {
                 error!(
@@ -204,7 +209,7 @@ impl Middleware for Nip09Middleware {
 
     async fn process_outbound(
         &self,
-        ctx: &mut OutboundContext<'_, Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
+        ctx: &mut OutboundContext<Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
     ) -> Result<(), anyhow::Error> {
         ctx.next().await
     }
@@ -214,13 +219,14 @@ impl Middleware for Nip09Middleware {
 mod tests {
     use super::*;
     use crate::test_utils::{
-        create_test_event, create_test_state_with_subscription_service, setup_test,
+        create_test_event, create_test_inbound_context,
+        create_test_state_with_subscription_service, setup_test,
     };
     use nostr_lmdb::Scope;
     use std::borrow::Cow;
     use std::time::Duration;
     use tokio::time::sleep;
-    use websocket_builder::{InboundContext, Middleware};
+    use websocket_builder::Middleware;
 
     #[tokio::test]
     async fn test_delete_event_with_matching_pubkey() {
@@ -241,14 +247,14 @@ mod tests {
             create_test_event(&keys, 5, vec![Tag::event(event_to_delete.id)]).await;
 
         // Process deletion request
-        let (mut state, _rx) =
+        let (state, _rx) =
             create_test_state_with_subscription_service(None, database.clone()).await;
-        let mut ctx = InboundContext::new(
+        let mut ctx = create_test_inbound_context(
             "test".to_string(),
             Some(ClientMessage::Event(Cow::Owned(deletion_request.clone()))),
             None,
-            &mut state,
-            &[],
+            state,
+            vec![],
             0,
         );
 
@@ -284,14 +290,14 @@ mod tests {
             create_test_event(&keys1, 5, vec![Tag::event(event_to_delete.id)]).await;
 
         // Process deletion request
-        let (mut state, _rx) =
+        let (state, _rx) =
             create_test_state_with_subscription_service(None, database.clone()).await;
-        let mut ctx = InboundContext::new(
+        let mut ctx = create_test_inbound_context(
             "test".to_string(),
             Some(ClientMessage::Event(Cow::Owned(deletion_request.clone()))),
             None,
-            &mut state,
-            &[],
+            state,
+            vec![],
             0,
         );
 
@@ -327,14 +333,14 @@ mod tests {
             create_test_event(&keys, 5, vec![Tag::parse(vec!["a", &addr]).unwrap()]).await;
 
         // Process deletion request
-        let (mut state, _rx) =
+        let (state, _rx) =
             create_test_state_with_subscription_service(None, database.clone()).await;
-        let mut ctx = InboundContext::new(
+        let mut ctx = create_test_inbound_context(
             "test".to_string(),
             Some(ClientMessage::Event(Cow::Owned(deletion_request.clone()))),
             None,
-            &mut state,
-            &[],
+            state,
+            vec![],
             0,
         );
 
@@ -365,14 +371,14 @@ mod tests {
         sleep(Duration::from_millis(30)).await;
 
         // Process the event
-        let (mut state, _rx) =
+        let (state, _rx) =
             create_test_state_with_subscription_service(None, database.clone()).await;
-        let mut ctx = InboundContext::new(
+        let mut ctx = create_test_inbound_context(
             "test".to_string(),
             Some(ClientMessage::Event(Cow::Owned(event.clone()))),
             None,
-            &mut state,
-            &[],
+            state,
+            vec![],
             0,
         );
 
@@ -404,14 +410,14 @@ mod tests {
         let deletion_event =
             create_test_event(&keys, 5, vec![Tag::parse(vec!["a", &addr]).unwrap()]).await;
 
-        let (mut state, _rx) =
+        let (state, _rx) =
             create_test_state_with_subscription_service(None, database.clone()).await;
-        let mut ctx = InboundContext::new(
+        let mut ctx = create_test_inbound_context(
             "test".to_string(),
             Some(ClientMessage::Event(Cow::Owned(deletion_event.clone()))),
             None,
-            &mut state,
-            &[],
+            state,
+            vec![],
             0,
         );
 

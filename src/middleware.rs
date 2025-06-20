@@ -67,8 +67,10 @@ where
     async fn handle_event(
         &self,
         event: Event,
-        connection_state: &mut NostrConnectionState<T>,
-    ) -> Result<Vec<RelayMessage<'static>>, Error> {
+        state: Arc<tokio::sync::RwLock<NostrConnectionState<T>>>,
+        message_sender: Option<websocket_builder::MessageSender<RelayMessage<'static>>>,
+    ) -> Result<(), Error> {
+        let mut connection_state = state.write().await;
         connection_state.event_start_time = Some(std::time::Instant::now());
         connection_state.event_kind = Some(event.kind.as_u16());
 
@@ -93,24 +95,26 @@ where
             .subscription_service()
             .ok_or_else(|| Error::internal("No subscription service available"))?;
 
+        // Process commands - always pass MessageSender so database can send OK after persistence
         for command in commands {
-            // Route all commands through the subscription service to utilize buffering and proper logging
             subscription_service
-                .save_and_broadcast(command)
+                .save_and_broadcast(command, message_sender.clone())
                 .await
                 .map_err(|e| Error::database(e.to_string()))?;
         }
 
-        Ok(vec![RelayMessage::ok(event.id, true, "")])
+        // Database layer will send OK after persistence
+        Ok(())
     }
 
     /// Handle subscription with optimized event filtering
     async fn handle_subscription(
         &self,
-        connection_state: &mut NostrConnectionState<T>,
+        state: Arc<tokio::sync::RwLock<NostrConnectionState<T>>>,
         subscription_id: String,
         filters: Vec<Filter>,
-    ) -> Result<Vec<RelayMessage<'static>>, Error> {
+    ) -> Result<(), Error> {
+        let connection_state = state.write().await;
         // First verify filters are allowed
         let context = EventContext {
             authed_pubkey: connection_state.authed_pubkey.as_ref(),
@@ -128,6 +132,11 @@ where
         let processor = Arc::clone(&self.processor);
         let relay_pubkey = self.relay_pubkey;
 
+        // Get subscription service and process
+        let subscription_service = connection_state
+            .subscription_service()
+            .ok_or_else(|| Error::internal("No subscription service available"))?;
+
         // Create filter function with cloned state - no async needed
         let filter_fn =
             move |event: &Event, scope: &nostr_lmdb::Scope, auth_pk: Option<&PublicKey>| -> bool {
@@ -143,11 +152,6 @@ where
                     .unwrap_or(false)
             };
 
-        // Get subscription service and process
-        let subscription_service = connection_state
-            .subscription_service()
-            .ok_or_else(|| Error::internal("No subscription service available"))?;
-
         subscription_service
             .handle_req(
                 SubscriptionId::new(subscription_id),
@@ -159,7 +163,7 @@ where
             .await?;
 
         // Subscription service sends messages directly
-        Ok(vec![])
+        Ok(())
     }
 }
 
@@ -176,7 +180,6 @@ where
     async fn on_connect(
         &self,
         ctx: &mut websocket_builder::ConnectionContext<
-            '_,
             Self::State,
             Self::IncomingMessage,
             Self::OutgoingMessage,
@@ -187,6 +190,8 @@ where
         // Initialize the subscription service for this connection
         if let Some(ref sender) = ctx.sender {
             ctx.state
+                .write()
+                .await
                 .setup_connection(self.database.clone(), sender.clone())
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to setup connection: {}", e))?;
@@ -200,22 +205,24 @@ where
 
     async fn process_inbound(
         &self,
-        ctx: &mut InboundContext<'_, Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
+        ctx: &mut InboundContext<Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
     ) -> anyhow::Result<()> {
         let Some(message) = ctx.message.take() else {
             return ctx.next().await;
         };
-        let state = &mut ctx.state;
 
         match message {
             ClientMessage::Event(boxed_event) => {
                 // Handle EVENT message
-                match self.handle_event(boxed_event.into_owned(), state).await {
-                    Ok(responses) => {
-                        for response in responses {
-                            ctx.send_message(response)?;
-                        }
-                    }
+                match self
+                    .handle_event(
+                        boxed_event.into_owned(),
+                        ctx.state.clone(),
+                        ctx.sender.clone(),
+                    )
+                    .await
+                {
+                    Ok(()) => {}
                     Err(e) => {
                         error!("Event processing error: {}", e);
                         // Propagate the error up the chain so ErrorHandlingMiddleware can format it properly
@@ -230,6 +237,7 @@ where
                 filter,
             } => {
                 // First check if processor wants to handle it
+                let mut state_guard = ctx.state.write().await;
                 let processor_response = self
                     .processor
                     .handle_message(
@@ -237,9 +245,10 @@ where
                             subscription_id: subscription_id.clone(),
                             filter: filter.clone(),
                         },
-                        state,
+                        &mut *state_guard,
                     )
                     .await?;
+                drop(state_guard);
 
                 if !processor_response.is_empty() {
                     // Processor handled it
@@ -250,17 +259,13 @@ where
                     // Use generic subscription handling
                     match self
                         .handle_subscription(
-                            state,
+                            ctx.state.clone(),
                             subscription_id.to_string(),
                             vec![filter.into_owned()],
                         )
                         .await
                     {
-                        Ok(messages) => {
-                            for msg in messages {
-                                ctx.send_message(msg)?;
-                            }
-                        }
+                        Ok(()) => {}
                         Err(e) => {
                             error!("Subscription error: {}", e);
                             // Propagate the error up the chain so ErrorHandlingMiddleware can format it properly
@@ -273,17 +278,25 @@ where
 
             ClientMessage::Close(subscription_id) => {
                 // Handle CLOSE message
-                if let Some(subscription_service) = state.subscription_service() {
-                    let subscription_id = subscription_id.into_owned();
-                    let _ = subscription_service.remove_subscription(subscription_id.clone());
-                    debug!("Closed subscription: {}", subscription_id);
+                {
+                    let state = ctx.state.read().await;
+                    if let Some(subscription_service) = state.subscription_service() {
+                        let subscription_id = subscription_id.into_owned();
+                        let _ = subscription_service.remove_subscription(subscription_id.clone());
+                        debug!("Closed subscription: {}", subscription_id);
+                    }
                 }
                 ctx.next().await
             }
 
             // Delegate all other messages to processor
             message => {
-                let responses = self.processor.handle_message(message, state).await?;
+                let mut state_guard = ctx.state.write().await;
+                let responses = self
+                    .processor
+                    .handle_message(message, &mut *state_guard)
+                    .await?;
+                drop(state_guard);
                 for response in responses {
                     ctx.send_message(response)?;
                 }
@@ -294,7 +307,7 @@ where
 
     async fn process_outbound(
         &self,
-        ctx: &mut OutboundContext<'_, Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
+        ctx: &mut OutboundContext<Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
     ) -> anyhow::Result<()> {
         let Some(message) = ctx.message.take() else {
             return ctx.next().await;
@@ -302,19 +315,22 @@ where
 
         // For broadcast events, check visibility before sending
         if let RelayMessage::Event { event, .. } = &message {
-            let state = &mut ctx.state;
-            let subdomain = state.subdomain().clone();
-            let authed_pubkey = state.authed_pubkey;
-            let context = EventContext {
-                authed_pubkey: authed_pubkey.as_ref(),
-                subdomain: &subdomain,
-                relay_pubkey: &self.relay_pubkey,
+            let should_filter = {
+                let state = ctx.state.read().await;
+                let subdomain = state.subdomain().clone();
+                let authed_pubkey = state.authed_pubkey;
+                let context = EventContext {
+                    authed_pubkey: authed_pubkey.as_ref(),
+                    subdomain: &subdomain,
+                    relay_pubkey: &self.relay_pubkey,
+                };
+
+                !self
+                    .processor
+                    .can_see_event(event, &state.custom, context)?
             };
 
-            if !self
-                .processor
-                .can_see_event(event, &state.custom, context)?
-            {
+            if should_filter {
                 return ctx.next().await; // Filter out
             }
         }
