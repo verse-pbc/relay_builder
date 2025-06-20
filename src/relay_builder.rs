@@ -14,8 +14,7 @@ use nostr_sdk::prelude::*;
 use std::marker::PhantomData;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use websocket_builder::{Middleware, WebSocketBuilder};
 
 /// HTML rendering options for the relay
@@ -271,10 +270,7 @@ where
     where
         T: Default,
     {
-        // Always calculate channel_size based on subscription limits
-        let mut websocket_config = self.config.websocket_config.clone();
-        websocket_config.channel_size =
-            self.config.max_subscriptions * self.config.max_limit * 110 / 100;
+        let websocket_config = self.config.websocket_config.clone();
 
         // Set the global subscription limits
         crate::global_config::set_max_subscriptions(self.config.max_subscriptions);
@@ -286,13 +282,10 @@ where
         }
 
         // Create the crypto worker for signing and verification
-        let cancellation_token = self.cancellation_token.clone().unwrap_or_default();
-        let crypto_worker = Arc::new(CryptoWorker::new(
-            Arc::new(self.config.keys.clone()),
-            cancellation_token.clone(),
-        ));
+        let task_tracker = TaskTracker::new();
+        let crypto_sender = CryptoWorker::spawn(Arc::new(self.config.keys.clone()), &task_tracker);
 
-        let database = self.config.create_database(crypto_worker.clone())?;
+        let database = self.config.create_database(crypto_sender.clone())?;
         let custom_middlewares = std::mem::take(&mut self.middlewares);
         let connection_factory = self.build_connection_factory(database.clone())?;
 
@@ -301,12 +294,18 @@ where
 
         let mut builder = WebSocketBuilder::new(connection_factory, NostrMessageConverter);
 
-        builder = builder.with_channel_size(websocket_config.channel_size);
+        // Calculate channel size based on max_subscriptions * max_limit * 1.10
+        let calculated_channel_size = self.config.calculate_channel_size();
+        builder = builder.with_channel_size(calculated_channel_size);
+
+        // Apply other websocket configurations if supported
         if let Some(max_connections) = websocket_config.max_connections {
             builder = builder.with_max_connections(max_connections);
         }
         if let Some(max_time) = websocket_config.max_connection_time {
-            builder = builder.with_max_connection_time(Duration::from_secs(max_time));
+            // TODO: WebSocketBuilder doesn't support max_connection_time yet
+            // builder = builder.with_max_connection_time(Duration::from_secs(max_time));
+            let _ = max_time; // Suppress unused warning
         }
 
         // Add standard middlewares that should always be present
@@ -337,9 +336,9 @@ where
                 builder.with_middleware(crate::middlewares::Nip42Middleware::new(auth_config));
         }
 
-        // Add event verification middleware with crypto worker
+        // Add event verification middleware with crypto sender
         builder = builder.with_middleware(crate::middlewares::EventVerifierMiddleware::new(
-            crypto_worker.clone(),
+            crypto_sender.clone(),
         ));
 
         // Add custom middlewares

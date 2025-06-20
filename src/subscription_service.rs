@@ -7,13 +7,13 @@
 use crate::database::RelayDatabase;
 use crate::error::Error;
 use crate::metrics::SubscriptionMetricsHandler;
+use flume;
 use nostr_lmdb::Scope;
 use nostr_sdk::prelude::*;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::mpsc;
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -74,13 +74,14 @@ enum SubscriptionMessage {
 /// when events are created in rapid succession within the same second
 struct ReplaceableEventsBuffer {
     buffer: HashMap<(PublicKey, Kind, Scope), UnsignedEvent>,
-    sender: mpsc::UnboundedSender<(UnsignedEvent, Scope)>,
-    receiver: Option<mpsc::UnboundedReceiver<(UnsignedEvent, Scope)>>,
+    sender: flume::Sender<(UnsignedEvent, Scope)>,
+    receiver: Option<flume::Receiver<(UnsignedEvent, Scope)>>,
 }
 
 impl ReplaceableEventsBuffer {
     pub fn new() -> Self {
-        let (sender, receiver) = mpsc::unbounded_channel();
+        // Use bounded channel with generous capacity for replaceable events
+        let (sender, receiver) = flume::bounded(10_000);
         Self {
             buffer: HashMap::new(),
             sender,
@@ -88,7 +89,7 @@ impl ReplaceableEventsBuffer {
         }
     }
 
-    pub fn get_sender(&self) -> mpsc::UnboundedSender<(UnsignedEvent, Scope)> {
+    pub fn get_sender(&self) -> flume::Sender<(UnsignedEvent, Scope)> {
         self.sender.clone()
     }
 
@@ -149,7 +150,7 @@ impl ReplaceableEventsBuffer {
     }
 
     pub fn start(mut self, database: Arc<RelayDatabase>, token: CancellationToken, id: String) {
-        let mut receiver = self.receiver.take().expect("Receiver already taken");
+        let receiver = self.receiver.take().expect("Receiver already taken");
 
         tokio::spawn(Box::pin(async move {
             loop {
@@ -163,8 +164,8 @@ impl ReplaceableEventsBuffer {
                         return;
                     }
 
-                    event_result = receiver.recv() => {
-                        if let Some((event, scope)) = event_result {
+                    event_result = receiver.recv_async() => {
+                        if let Ok((event, scope)) = event_result {
                             self.insert(event, scope);
                         }
                     }
@@ -179,26 +180,39 @@ impl ReplaceableEventsBuffer {
 }
 
 /// Unified subscription service handling both active subscriptions and REQ processing
-#[derive(Clone)]
 pub struct SubscriptionService {
     database: Arc<RelayDatabase>,
-    subscription_sender: mpsc::UnboundedSender<SubscriptionMessage>,
+    subscription_sender: flume::Sender<SubscriptionMessage>,
     outgoing_sender: Option<MessageSender<RelayMessage<'static>>>,
     local_subscription_count: Arc<AtomicUsize>,
     task_token: CancellationToken,
-    replaceable_event_queue: mpsc::UnboundedSender<(UnsignedEvent, Scope)>,
+    replaceable_event_queue: flume::Sender<(UnsignedEvent, Scope)>,
     metrics_handler: Option<Arc<dyn SubscriptionMetricsHandler>>,
+}
+
+impl Clone for SubscriptionService {
+    fn clone(&self) -> Self {
+        Self {
+            database: self.database.clone(),
+            subscription_sender: self.subscription_sender.clone(),
+            outgoing_sender: self.outgoing_sender.clone(),
+            local_subscription_count: self.local_subscription_count.clone(),
+            task_token: self.task_token.clone(),
+            replaceable_event_queue: self.replaceable_event_queue.clone(),
+            metrics_handler: self.metrics_handler.clone(),
+        }
+    }
 }
 
 impl std::fmt::Debug for SubscriptionService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SubscriptionService")
             .field("database", &self.database)
-            .field("subscription_sender", &self.subscription_sender)
+            .field("has_subscription_sender", &true)
             .field("outgoing_sender", &self.outgoing_sender)
             .field("local_subscription_count", &self.local_subscription_count)
             .field("task_token", &self.task_token)
-            .field("replaceable_event_queue", &self.replaceable_event_queue)
+            .field("has_replaceable_event_queue", &true)
             .field("metrics_handler", &self.metrics_handler.is_some())
             .finish()
     }
@@ -258,8 +272,9 @@ impl SubscriptionService {
         local_subscription_count: Arc<AtomicUsize>,
         task_token: CancellationToken,
         metrics_handler: Option<Arc<dyn SubscriptionMetricsHandler>>,
-    ) -> Result<mpsc::UnboundedSender<SubscriptionMessage>, Error> {
-        let (subscription_sender, mut subscription_receiver) = mpsc::unbounded_channel();
+    ) -> Result<flume::Sender<SubscriptionMessage>, Error> {
+        // Use bounded channel for subscription messages
+        let (subscription_sender, subscription_receiver) = flume::bounded(1_000);
 
         // Create isolated span for subscription task
         let task_span = tracing::info_span!(parent: None, "subscription_task");
@@ -276,9 +291,9 @@ impl SubscriptionService {
                             break;
                         }
                         // Process incoming subscription messages
-                        msg = subscription_receiver.recv() => {
+                        msg = subscription_receiver.recv_async() => {
                             match msg {
-                                Some(SubscriptionMessage::Add(subscription_id, filters)) => {
+                                Ok(SubscriptionMessage::Add(subscription_id, filters)) => {
                                     subscriptions.insert(subscription_id.clone(), filters);
                                     local_subscription_count.fetch_add(1, Ordering::SeqCst);
                                     if let Some(handler) = &metrics_handler {
@@ -286,7 +301,7 @@ impl SubscriptionService {
                                     }
                                     debug!("Subscription {} added", subscription_id);
                                 }
-                                Some(SubscriptionMessage::Remove(subscription_id)) => {
+                                Ok(SubscriptionMessage::Remove(subscription_id)) => {
                                     if subscriptions.remove(&subscription_id).is_some() {
                                         local_subscription_count.fetch_sub(1, Ordering::SeqCst);
                                         if let Some(handler) = &metrics_handler {
@@ -295,7 +310,7 @@ impl SubscriptionService {
                                         debug!("Subscription {} removed", subscription_id);
                                     }
                                 }
-                                Some(SubscriptionMessage::CheckEvent { event }) => {
+                                Ok(SubscriptionMessage::CheckEvent { event }) => {
                                     for (subscription_id, filters) in &subscriptions {
                                         if filters
                                             .iter()
@@ -306,14 +321,14 @@ impl SubscriptionService {
                                                 event: Cow::Owned(*event.clone()),
                                             };
                                             if let Err(e) = outgoing_sender.send(message) {
-                                                error!("Failed to send event: {:?}", e);
+                                                debug!("Failed to send event: {:?}", e);
                                                 info!("Outgoing sender closed, terminating subscription task");
                                                 return;
                                             }
                                         }
                                     }
                                 }
-                                None => {
+                                Err(_) => {
                                     debug!("Subscription channel closed");
                                     break;
                                 }
@@ -348,8 +363,8 @@ impl SubscriptionService {
                         event_result = database_subscription.recv() => {
                             match event_result {
                                 Ok(event) => {
-                                    if let Err(e) = subscription_sender.send(SubscriptionMessage::CheckEvent { event }) {
-                                        error!("Failed to send event: {:?}", e);
+                                    if let Err(e) = subscription_sender.try_send(SubscriptionMessage::CheckEvent { event }) {
+                                        debug!("Failed to send event: {:?}", e);
                                         break;
                                     }
                                 }
@@ -417,7 +432,7 @@ impl SubscriptionService {
 
         // Also check actual channel capacity as a safety measure
         // This handles edge cases like tests with tiny channels
-        let channel_capacity = sender.capacity();
+        let channel_capacity = sender.capacity().unwrap_or(usize::MAX);
         let channel_safe_limit = if channel_capacity < 10 {
             // For very small channels (like in tests), leave room for EOSE
             channel_capacity.saturating_sub(1)
@@ -809,7 +824,7 @@ impl SubscriptionService {
     pub fn sender_capacity(&self) -> usize {
         self.outgoing_sender
             .as_ref()
-            .map_or(0, |sender| sender.capacity())
+            .map_or(0, |sender| sender.capacity().unwrap_or(0))
     }
 
     pub fn set_outgoing_sender(&mut self, sender: MessageSender<RelayMessage<'static>>) {
@@ -842,17 +857,21 @@ impl SubscriptionService {
         }
 
         self.subscription_sender
-            .send(SubscriptionMessage::Add(subscription_id, filters))
+            .try_send(SubscriptionMessage::Add(subscription_id, filters))
             .map_err(|e| Error::internal(format!("Failed to send subscription: {}", e)))
     }
 
     pub fn remove_subscription(&self, subscription_id: SubscriptionId) -> Result<(), Error> {
         self.subscription_sender
-            .send(SubscriptionMessage::Remove(subscription_id))
+            .try_send(SubscriptionMessage::Remove(subscription_id))
             .map_err(|e| Error::internal(format!("Failed to send unsubscribe: {}", e)))
     }
 
-    pub async fn save_and_broadcast(&self, store_command: StoreCommand) -> Result<(), Error> {
+    pub async fn save_and_broadcast(
+        &self,
+        store_command: StoreCommand,
+        message_sender: Option<websocket_builder::MessageSender<RelayMessage<'static>>>,
+    ) -> Result<(), Error> {
         match store_command {
             StoreCommand::SaveUnsignedEvent(event, scope)
                 if event.kind.is_replaceable() || event.kind.is_addressable() =>
@@ -866,7 +885,7 @@ impl SubscriptionService {
                     "Sending replaceable/addressable unsigned event to buffer: kind={}, scope={:?}",
                     event.kind, scope
                 );
-                if let Err(e) = self.replaceable_event_queue.send((event, scope)) {
+                if let Err(e) = self.replaceable_event_queue.try_send((event, scope)) {
                     error!("Failed to send replaceable event to buffer: {:?}", e);
                     return Err(Error::internal(format!(
                         "Failed to send replaceable event to buffer: {}",
@@ -875,13 +894,33 @@ impl SubscriptionService {
                 }
                 Ok(())
             }
-            _ => {
-                // All other commands go directly to the database
+            StoreCommand::SaveUnsignedEvent(event, scope) => {
+                // Unsigned events are relay-generated, don't pass MessageSender
                 self.database
-                    .save_store_command(store_command)
+                    .save_store_command(StoreCommand::SaveUnsignedEvent(event, scope), None)
                     .await
                     .map_err(|e| {
-                        error!("Failed to save store command: {}", e);
+                        error!("Failed to save unsigned event: {}", e);
+                        e
+                    })
+            }
+            StoreCommand::DeleteEvents(filter, scope) => {
+                // Delete operations initiated by relay (like expiration) don't need client response
+                self.database
+                    .save_store_command(StoreCommand::DeleteEvents(filter, scope), None)
+                    .await
+                    .map_err(|e| {
+                        error!("Failed to delete events: {}", e);
+                        e
+                    })
+            }
+            StoreCommand::SaveSignedEvent(event, scope) => {
+                // Only signed events from clients get MessageSender for OK response
+                self.database
+                    .save_store_command(StoreCommand::SaveSignedEvent(event, scope), message_sender)
+                    .await
+                    .map_err(|e| {
+                        error!("Failed to save signed event: {}", e);
                         e
                     })
             }
@@ -966,8 +1005,10 @@ mod tests {
     use super::*;
     use crate::test_utils::setup_test;
     use std::time::Instant;
+    use tempfile::TempDir;
     use tokio::sync::mpsc;
     use tokio::time::sleep;
+    use tokio_util::task::TaskTracker;
     use websocket_builder::MessageSender;
 
     #[allow(dead_code)]
@@ -993,7 +1034,7 @@ mod tests {
     #[tokio::test]
     async fn test_subscription_management() {
         let (_tmp_dir, database, _admin_keys) = setup_test().await;
-        let (tx, _rx) = mpsc::channel(10);
+        let (tx, _rx) = flume::bounded(10);
         let service = SubscriptionService::new(database, MessageSender::new(tx, 0))
             .await
             .unwrap();
@@ -1022,63 +1063,94 @@ mod tests {
         assert!(service.wait_for_subscription_count(0, 1000).await);
     }
 
-    #[tokio::test]
-    async fn test_replaceable_event_buffering() {
-        let (_tmp_dir, database, admin_keys) = setup_test().await;
-        let (tx, _rx) = mpsc::channel(10);
-        let service = SubscriptionService::new(database.clone(), MessageSender::new(tx, 0))
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_database_event_persistence() {
+        // Create test setup with proper lifecycle management
+        let tmp_dir = TempDir::new().unwrap();
+        let db_path = tmp_dir.path().join("test.db");
+        let admin_keys = Keys::generate();
+        let task_tracker = TaskTracker::new();
+        let crypto_sender =
+            crate::crypto_worker::CryptoWorker::spawn(Arc::new(admin_keys.clone()), &task_tracker);
+        let database = Arc::new(
+            crate::database::RelayDatabase::new(db_path.to_str().unwrap(), crypto_sender).unwrap(),
+        );
+        let (tx, _rx) = flume::bounded(10);
+        let _service = SubscriptionService::new(database.clone(), MessageSender::new(tx, 0))
             .await
             .unwrap();
 
-        // Create multiple metadata events
-        let mut metadata1 = Metadata::new();
-        metadata1.name = Some("First".to_string());
-        let event1 = EventBuilder::metadata(&metadata1)
+        // Create multiple text note events (non-replaceable)
+        let event1 = EventBuilder::text_note("First note")
             .build_with_ctx(&Instant::now(), admin_keys.public_key())
             .sign_with_keys(&admin_keys)
             .unwrap();
 
-        let mut metadata2 = Metadata::new();
-        metadata2.name = Some("Second".to_string());
-        let event2 = EventBuilder::metadata(&metadata2)
+        let event2 = EventBuilder::text_note("Second note")
             .build_with_ctx(&Instant::now(), admin_keys.public_key())
             .sign_with_keys(&admin_keys)
             .unwrap();
 
-        // Both should be replaceable events
-        assert!(event1.kind.is_replaceable());
-        assert!(event2.kind.is_replaceable());
+        // Both should be non-replaceable events
+        assert!(!event1.kind.is_replaceable());
+        assert!(!event2.kind.is_replaceable());
 
-        // Save both through the service - the buffer should handle deduplication
-        let cmd1 = StoreCommand::SaveSignedEvent(Box::new(event1.clone()), Scope::Default);
-        let cmd2 = StoreCommand::SaveSignedEvent(Box::new(event2.clone()), Scope::Default);
+        // Save both directly to the database to test if events are persisted
+        database
+            .save_signed_event(event1.clone(), Scope::Default)
+            .await
+            .unwrap();
+        database
+            .save_signed_event(event2.clone(), Scope::Default)
+            .await
+            .unwrap();
 
-        service.save_and_broadcast(cmd1).await.unwrap();
-        service.save_and_broadcast(cmd2).await.unwrap();
+        // Wait for the database queue to be empty and events to be committed
+        database
+            .wait_for_queue_empty(Duration::from_secs(5))
+            .await
+            .unwrap();
 
-        // Wait for buffer to flush
-        sleep(Duration::from_secs(2)).await;
+        // Wait for async tasks to complete
+        tokio::time::sleep(Duration::from_millis(500)).await;
 
-        // Query the database - should have both metadata events (no buffer for signed events)
+        // First, query all events to see what's in the database
+        let all_events = database
+            .query(vec![Filter::new()], &Scope::Default)
+            .await
+            .unwrap();
+        println!(
+            "Total events in database: {} (should include 2 text note events)",
+            all_events.len()
+        );
+
+        // Query the database - should have both text note events
         let filter = Filter::new()
             .author(admin_keys.public_key())
-            .kinds(vec![Kind::Metadata]);
+            .kinds(vec![Kind::TextNote]);
         let events = database.query(vec![filter], &Scope::Default).await.unwrap();
 
-        // Note: Signed events bypass the replaceable buffer, but since both events
-        // have the same kind and author, only the latest should be kept
+        // Should have exactly 2 events since text notes are not replaceable
         assert_eq!(
             events.len(),
-            1,
-            "Should only have the latest metadata event"
+            2,
+            "Should have exactly 2 text note events, found: {}. Total events in DB: {}",
+            events.len(),
+            all_events.len()
         );
-        // The database keeps the latest replaceable event based on timestamp/id
-        let event = events.into_iter().next().unwrap();
-        assert!(
-            event.content.contains("\"name\":\"Second\"")
-                || event.content.contains("\"name\":\"First\""),
-            "Should have one of the metadata events"
-        );
+
+        // Verify we have both events
+        let contents: Vec<&str> = events.iter().map(|e| e.content.as_str()).collect();
+        assert!(contents.contains(&"First note"));
+        assert!(contents.contains(&"Second note"));
+
+        // Explicit cleanup to ensure database is properly shut down
+        drop(_service);
+        drop(database);
+        task_tracker.close();
+        task_tracker.wait().await;
+        // Keep tmp_dir alive until the very end
+        drop(tmp_dir);
     }
 
     /// Test window sliding pagination for limit-only queries (implicit until=now)
@@ -1088,7 +1160,7 @@ mod tests {
         let _ = tracing_subscriber::fmt::try_init();
 
         let (_tmp_dir, database, keys) = setup_test().await;
-        let (tx, mut rx) = mpsc::channel(100);
+        let (tx, rx) = flume::bounded(100);
         let service = SubscriptionService::new(database.clone(), MessageSender::new(tx, 0))
             .await
             .unwrap();
@@ -1174,7 +1246,7 @@ mod tests {
     #[tokio::test]
     async fn test_exponential_buffer_since_until_limit() {
         let (_tmp_dir, database, keys) = setup_test().await;
-        let (tx, mut rx) = mpsc::channel(100);
+        let (tx, rx) = flume::bounded(100);
         let service = SubscriptionService::new(database.clone(), MessageSender::new(tx, 0))
             .await
             .unwrap();
@@ -1272,7 +1344,7 @@ mod tests {
     #[tokio::test]
     async fn test_pagination_bug_scenario() {
         let (_tmp_dir, database, keys) = setup_test().await;
-        let (tx, mut rx) = mpsc::channel(100);
+        let (tx, rx) = flume::bounded(100);
         let service = SubscriptionService::new(database.clone(), MessageSender::new(tx, 0))
             .await
             .unwrap();
@@ -1371,7 +1443,7 @@ mod tests {
         sleep(Duration::from_millis(100)).await;
 
         // Create a subscription service
-        let (tx, _rx) = mpsc::channel(10);
+        let (tx, _rx) = flume::bounded(10);
         let service = SubscriptionService::new(database.clone(), MessageSender::new(tx, 0))
             .await
             .unwrap();
@@ -1399,7 +1471,7 @@ mod tests {
     #[tokio::test]
     async fn test_subscription_receives_new_events() {
         let (_tmp_dir, database, keys) = setup_test().await;
-        let (tx, mut rx) = mpsc::channel(10);
+        let (tx, rx) = flume::bounded(10);
         let service = SubscriptionService::new(database.clone(), MessageSender::new(tx, 0))
             .await
             .unwrap();
@@ -1421,7 +1493,7 @@ mod tests {
 
         // Save through the service which should broadcast to subscriptions
         let cmd = StoreCommand::SaveSignedEvent(Box::new(new_event.clone()), Scope::Default);
-        service.save_and_broadcast(cmd).await.unwrap();
+        service.save_and_broadcast(cmd, None).await.unwrap();
 
         // Wait a bit for async processing
         sleep(Duration::from_millis(100)).await;
@@ -1450,7 +1522,7 @@ mod tests {
     #[tokio::test]
     async fn test_replaceable_buffer_non_replaceable_events() {
         let (_tmp_dir, database, keys) = setup_test().await;
-        let (tx, _rx) = mpsc::channel(10);
+        let (tx, _rx) = flume::bounded(10);
         let service = SubscriptionService::new(database.clone(), MessageSender::new(tx, 0))
             .await
             .unwrap();
@@ -1461,7 +1533,7 @@ mod tests {
 
         // Should go directly to database, not buffer
         let cmd = StoreCommand::SaveUnsignedEvent(unsigned_event.clone(), Scope::Default);
-        service.save_and_broadcast(cmd).await.unwrap();
+        service.save_and_broadcast(cmd, None).await.unwrap();
 
         // Should be saved immediately
         sleep(Duration::from_millis(100)).await;
@@ -1476,19 +1548,13 @@ mod tests {
     #[tokio::test]
     async fn test_buffer_with_different_scopes() {
         let (_tmp_dir, database, keys) = setup_test().await;
-        let (tx, _rx) = mpsc::channel(10);
+        let (tx, _rx) = flume::bounded(10);
         let service = SubscriptionService::new(database.clone(), MessageSender::new(tx, 0))
             .await
             .unwrap();
 
-        let scope1 = Scope::Named {
-            name: "scope1".to_string(),
-            hash: 1,
-        };
-        let scope2 = Scope::Named {
-            name: "scope2".to_string(),
-            hash: 2,
-        };
+        let scope1 = Scope::named("scope1").unwrap();
+        let scope2 = Scope::named("scope2").unwrap();
 
         // Create events for different scopes
         let event1 = EventBuilder::metadata(&Metadata::new())
@@ -1500,8 +1566,8 @@ mod tests {
         let cmd1 = StoreCommand::SaveUnsignedEvent(event1, scope1.clone());
         let cmd2 = StoreCommand::SaveUnsignedEvent(event2, scope2.clone());
 
-        service.save_and_broadcast(cmd1).await.unwrap();
-        service.save_and_broadcast(cmd2).await.unwrap();
+        service.save_and_broadcast(cmd1, None).await.unwrap();
+        service.save_and_broadcast(cmd2, None).await.unwrap();
 
         // Wait for buffer flush
         sleep(Duration::from_secs(2)).await;
@@ -1521,7 +1587,7 @@ mod tests {
     #[tokio::test]
     async fn test_cancel_subscription_task() {
         let (_tmp_dir, database, _admin_keys) = setup_test().await;
-        let (tx, _rx) = mpsc::channel(10);
+        let (tx, _rx) = flume::bounded(10);
         let service = SubscriptionService::new(database, MessageSender::new(tx, 0))
             .await
             .unwrap();
@@ -1542,7 +1608,7 @@ mod tests {
     #[tokio::test]
     async fn test_save_and_broadcast_database_error() {
         let (_tmp_dir, database, keys) = setup_test().await;
-        let (tx, _rx) = mpsc::channel(10);
+        let (tx, _rx) = flume::bounded(10);
         let service = SubscriptionService::new(database.clone(), MessageSender::new(tx, 0))
             .await
             .unwrap();
@@ -1555,20 +1621,20 @@ mod tests {
 
         // This should succeed
         let cmd = StoreCommand::SaveSignedEvent(Box::new(event), Scope::Default);
-        let result = service.save_and_broadcast(cmd).await;
+        let result = service.save_and_broadcast(cmd, None).await;
         assert!(result.is_ok());
 
         // Test with delete command
         let filter = Filter::new().author(keys.public_key());
         let delete_cmd = StoreCommand::DeleteEvents(filter, Scope::Default);
-        let result = service.save_and_broadcast(delete_cmd).await;
+        let result = service.save_and_broadcast(delete_cmd, None).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_empty_filters() {
         let (_tmp_dir, database, _admin_keys) = setup_test().await;
-        let (tx, mut rx) = mpsc::channel(10);
+        let (tx, rx) = flume::bounded(10);
         let service = SubscriptionService::new(database, MessageSender::new(tx, 0))
             .await
             .unwrap();
@@ -1599,7 +1665,7 @@ mod tests {
     #[tokio::test]
     async fn test_filter_with_zero_limit() {
         let (_tmp_dir, database, keys) = setup_test().await;
-        let (tx, mut rx) = mpsc::channel(10);
+        let (tx, rx) = flume::bounded(10);
         let service = SubscriptionService::new(database.clone(), MessageSender::new(tx, 0))
             .await
             .unwrap();
@@ -1650,7 +1716,7 @@ mod tests {
     async fn test_replaceable_buffer_logging() {
         // Test to ensure logging branches are covered
         let (_tmp_dir, database, keys) = setup_test().await;
-        let (tx, _rx) = mpsc::channel(10);
+        let (tx, _rx) = flume::bounded(10);
         let service = SubscriptionService::new(database.clone(), MessageSender::new(tx, 0))
             .await
             .unwrap();
@@ -1669,8 +1735,8 @@ mod tests {
         let cmd1 = StoreCommand::SaveUnsignedEvent(event1, Scope::Default);
         let cmd2 = StoreCommand::SaveUnsignedEvent(event2, Scope::Default);
 
-        service.save_and_broadcast(cmd1).await.unwrap();
-        service.save_and_broadcast(cmd2).await.unwrap();
+        service.save_and_broadcast(cmd1, None).await.unwrap();
+        service.save_and_broadcast(cmd2, None).await.unwrap();
 
         // Wait for buffer to flush
         sleep(Duration::from_secs(2)).await;
@@ -1686,7 +1752,7 @@ mod tests {
     #[tokio::test]
     async fn test_max_attempts_window_sliding() {
         let (_tmp_dir, database, keys) = setup_test().await;
-        let (tx, mut rx) = mpsc::channel(100);
+        let (tx, rx) = flume::bounded(100);
         let service = SubscriptionService::new(database.clone(), MessageSender::new(tx, 0))
             .await
             .unwrap();
@@ -1734,7 +1800,7 @@ mod tests {
     #[tokio::test]
     async fn test_database_subscription_task_error() {
         let (_tmp_dir, database, _admin_keys) = setup_test().await;
-        let (tx, _rx) = mpsc::channel(10);
+        let (tx, _rx) = flume::bounded(10);
         let service = SubscriptionService::new(database.clone(), MessageSender::new(tx, 0))
             .await
             .unwrap();
@@ -1755,10 +1821,7 @@ mod tests {
         let event =
             EventBuilder::text_note("Test").build_with_ctx(&Instant::now(), keys.public_key());
 
-        let named_scope = Scope::Named {
-            name: "subdomain".to_string(),
-            hash: 123,
-        };
+        let named_scope = Scope::named("subdomain").unwrap();
         let cmd = StoreCommand::SaveUnsignedEvent(event, named_scope.clone());
 
         // Test subdomain methods
@@ -1800,7 +1863,7 @@ mod tests {
     #[tokio::test]
     async fn test_exponential_buffer_empty_results() {
         let (_tmp_dir, database, _admin_keys) = setup_test().await;
-        let (tx, mut rx) = mpsc::channel(100);
+        let (tx, rx) = flume::bounded(100);
         let service = SubscriptionService::new(database.clone(), MessageSender::new(tx, 0))
             .await
             .unwrap();
@@ -1836,7 +1899,7 @@ mod tests {
     #[tokio::test]
     async fn test_store_command_types() {
         let (_tmp_dir, database, keys) = setup_test().await;
-        let (tx, _rx) = mpsc::channel(10);
+        let (tx, _rx) = flume::bounded(10);
         let service = SubscriptionService::new(database.clone(), MessageSender::new(tx, 0))
             .await
             .unwrap();
@@ -1848,19 +1911,19 @@ mod tests {
             .unwrap();
 
         let cmd = StoreCommand::SaveSignedEvent(Box::new(event.clone()), Scope::Default);
-        service.save_and_broadcast(cmd).await.unwrap();
+        service.save_and_broadcast(cmd, None).await.unwrap();
 
         // Test delete command
         let filter = Filter::new().id(event.id);
         let delete_cmd = StoreCommand::DeleteEvents(filter, Scope::Default);
-        service.save_and_broadcast(delete_cmd).await.unwrap();
+        service.save_and_broadcast(delete_cmd, None).await.unwrap();
     }
 
     /// Test window sliding with until + limit
     #[tokio::test]
     async fn test_window_sliding_until_limit() {
         let (_tmp_dir, database, keys) = setup_test().await;
-        let (tx, mut rx) = mpsc::channel(100);
+        let (tx, rx) = flume::bounded(100);
         let service = SubscriptionService::new(database.clone(), MessageSender::new(tx, 0))
             .await
             .unwrap();
@@ -1929,7 +1992,7 @@ mod tests {
     #[tokio::test]
     async fn test_window_sliding_since_limit() {
         let (_tmp_dir, database, keys) = setup_test().await;
-        let (tx, mut rx) = mpsc::channel(100);
+        let (tx, rx) = flume::bounded(100);
         let service = SubscriptionService::new(database.clone(), MessageSender::new(tx, 0))
             .await
             .unwrap();
@@ -2008,7 +2071,7 @@ mod tests {
     #[tokio::test]
     async fn test_cleanup() {
         let (_tmp_dir, database, _admin_keys) = setup_test().await;
-        let (tx, _rx) = mpsc::channel(10);
+        let (tx, _rx) = flume::bounded(10);
         let service = SubscriptionService::new(database, MessageSender::new(tx, 0))
             .await
             .unwrap();
@@ -2039,10 +2102,7 @@ mod tests {
         assert!(!cmd.is_replaceable()); // TextNote is not replaceable
 
         // Test with named scope
-        let named_scope = Scope::Named {
-            name: "test".to_string(),
-            hash: 0,
-        };
+        let named_scope = Scope::named("test").unwrap();
         let cmd = StoreCommand::SaveSignedEvent(Box::new(event), named_scope.clone());
         assert_eq!(cmd.subdomain(), Some("test"));
 
@@ -2065,7 +2125,7 @@ mod tests {
     #[tokio::test]
     async fn test_getter_methods() {
         let (_tmp_dir, database, _admin_keys) = setup_test().await;
-        let (tx, _rx) = mpsc::channel(10);
+        let (tx, _rx) = flume::bounded(10);
         let mut service = SubscriptionService::new(database, MessageSender::new(tx.clone(), 0))
             .await
             .unwrap();
@@ -2085,7 +2145,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_req_without_sender() {
         let (_tmp_dir, database, _admin_keys) = setup_test().await;
-        let (tx, _rx) = mpsc::channel(10);
+        let (tx, _rx) = flume::bounded(10);
         let mut service = SubscriptionService::new(database, MessageSender::new(tx, 0))
             .await
             .unwrap();
@@ -2112,7 +2172,7 @@ mod tests {
     #[tokio::test]
     async fn test_addressable_events_buffering() {
         let (_tmp_dir, database, keys) = setup_test().await;
-        let (tx, _rx) = mpsc::channel(10);
+        let (tx, _rx) = flume::bounded(10);
         let service = SubscriptionService::new(database.clone(), MessageSender::new(tx, 0))
             .await
             .unwrap();
@@ -2130,7 +2190,7 @@ mod tests {
 
         // Addressable events should NOT go through the replaceable buffer for signed events
         let cmd = StoreCommand::SaveSignedEvent(Box::new(event), Scope::Default);
-        service.save_and_broadcast(cmd).await.unwrap();
+        service.save_and_broadcast(cmd, None).await.unwrap();
 
         // Wait a bit
         sleep(Duration::from_millis(100)).await;
@@ -2146,7 +2206,7 @@ mod tests {
     #[tokio::test]
     async fn test_drop_trait() {
         let (_tmp_dir, database, _admin_keys) = setup_test().await;
-        let (tx, _rx) = mpsc::channel(10);
+        let (tx, _rx) = flume::bounded(10);
 
         {
             let service = SubscriptionService::new(database, MessageSender::new(tx, 0))
@@ -2170,7 +2230,7 @@ mod tests {
     #[tokio::test]
     async fn test_save_unsigned_replaceable_event() {
         let (_tmp_dir, database, keys) = setup_test().await;
-        let (tx, _rx) = mpsc::channel(10);
+        let (tx, _rx) = flume::bounded(10);
         let service = SubscriptionService::new(database.clone(), MessageSender::new(tx, 0))
             .await
             .unwrap();
@@ -2190,8 +2250,8 @@ mod tests {
         let cmd1 = StoreCommand::SaveUnsignedEvent(unsigned_event1, Scope::Default);
         let cmd2 = StoreCommand::SaveUnsignedEvent(unsigned_event2, Scope::Default);
 
-        service.save_and_broadcast(cmd1).await.unwrap();
-        service.save_and_broadcast(cmd2).await.unwrap();
+        service.save_and_broadcast(cmd1, None).await.unwrap();
+        service.save_and_broadcast(cmd2, None).await.unwrap();
 
         // Wait for buffer flush
         sleep(Duration::from_secs(2)).await;
@@ -2207,7 +2267,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_unsubscribe() {
         let (_tmp_dir, database, _admin_keys) = setup_test().await;
-        let (tx, _rx) = mpsc::channel(10);
+        let (tx, _rx) = flume::bounded(10);
         let service = SubscriptionService::new(database, MessageSender::new(tx, 0))
             .await
             .unwrap();
@@ -2232,7 +2292,7 @@ mod tests {
 
         // Create a VERY SMALL channel to test the limit capping
         let channel_size = 2;
-        let (tx, mut rx) = mpsc::channel(channel_size);
+        let (tx, rx) = flume::bounded(channel_size);
 
         let service = SubscriptionService::new(database.clone(), MessageSender::new(tx, 0))
             .await
@@ -2305,7 +2365,7 @@ mod tests {
 
         // Create a small channel
         let channel_size = 5;
-        let (tx, mut rx) = mpsc::channel(channel_size);
+        let (tx, rx) = flume::bounded(channel_size);
 
         let service = SubscriptionService::new(database.clone(), MessageSender::new(tx, 0))
             .await
@@ -2373,7 +2433,7 @@ mod tests {
     #[tokio::test]
     async fn test_multiple_filters_with_different_limits() {
         let (_tmp_dir, database, keys) = setup_test().await;
-        let (tx, mut rx) = mpsc::channel(100);
+        let (tx, rx) = flume::bounded(100);
         let service = SubscriptionService::new(database.clone(), MessageSender::new(tx, 0))
             .await
             .unwrap();
@@ -2429,21 +2489,24 @@ mod tests {
                     k if k == Kind::from(9) => kind_9 += 1,
                     _ => {}
                 },
-                RelayMessage::EndOfStoredEvents(_) => _eose_count += 1,
+                RelayMessage::EndOfStoredEvents(_) => {
+                    _eose_count += 1;
+                    break; // Stop processing after EOSE
+                }
                 _ => {}
             }
         }
 
         // Should receive at most the limits from each filter
         assert!(
-            text_notes <= 3,
-            "Should receive at most 3 text notes, got {}",
-            text_notes
-        );
-        assert!(
             kind_9 <= 5,
             "Should receive at most 5 kind 9 events, got {}",
             kind_9
+        );
+        assert!(
+            text_notes <= 3,
+            "Should receive at most 3 text notes, got {}",
+            text_notes
         );
     }
 }

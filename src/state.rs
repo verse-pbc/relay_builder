@@ -143,7 +143,7 @@ impl<T> NostrConnectionState<T> {
         };
 
         for event in events {
-            if let Err(e) = service.save_and_broadcast(event).await {
+            if let Err(e) = service.save_and_broadcast(event, None).await {
                 error!("Failed to save event: {}", e);
                 return Err(e);
             }
@@ -158,7 +158,7 @@ impl<T> NostrConnectionState<T> {
             return Err(Error::internal("No subscription service available"));
         };
 
-        service.save_and_broadcast(command).await
+        service.save_and_broadcast(command, None).await
     }
 
     /// Remove a subscription
