@@ -1,19 +1,17 @@
-//! Unified crypto worker for signing and verification operations
+//! Background crypto worker for CPU-intensive operations
 //!
-//! This module provides a unified worker that handles both event signing and verification
-//! operations using a pool of long-lived tokio::spawn_blocking tasks processing a shared queue.
+//! Offloads signature verification and signing to dedicated threads
+//! to avoid blocking the async runtime.
 
 use crate::error::{Error, Result};
 use nostr_sdk::prelude::*;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::oneshot;
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tokio_util::task::TaskTracker;
+use tracing::{debug, error, info};
 
 /// Operations that can be performed by the crypto worker
+#[derive(Debug)]
 enum CryptoOperation {
     Sign {
         event: UnsignedEvent,
@@ -25,152 +23,15 @@ enum CryptoOperation {
     },
 }
 
-#[derive(Debug)]
-pub struct CryptoWorker {
-    // Channel to send requests to workers
+/// Handle for sending crypto operations to worker pool
+#[derive(Clone, Debug)]
+pub struct CryptoSender {
     tx: flume::Sender<CryptoOperation>,
-    // Handles to the spawn_blocking tasks
-    #[allow(dead_code)]
-    handles: Vec<JoinHandle<()>>,
-    // Metrics for monitoring
-    metrics: Arc<CryptoWorkerMetrics>,
 }
 
-// Note: Using flume channel because:
-// 1. It supports both async and blocking operations
-// 2. Multi-consumer support (multiple workers can recv from same channel)
-// 3. No need for Arc<Mutex<>> wrapper
-// 4. Efficient implementation
-
-#[derive(Default, Debug)]
-struct CryptoWorkerMetrics {
-    queued_operations: AtomicUsize,
-    completed_signs: AtomicU64,
-    completed_verifies: AtomicU64,
-    failed_operations: AtomicU64,
-}
-
-#[derive(Debug, Clone)]
-pub struct CryptoWorkerMetricsSnapshot {
-    pub queued_operations: usize,
-    pub completed_signs: u64,
-    pub completed_verifies: u64,
-    pub failed_operations: u64,
-}
-
-impl CryptoWorker {
-    pub fn new(keys: Arc<Keys>, cancellation_token: CancellationToken) -> Self {
-        let cpu_count = std::env::var("CRYPTO_WORKER_THREADS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_else(|| {
-                std::thread::available_parallelism()
-                    .map(|n| n.get())
-                    .unwrap_or(4)
-            });
-
-        let queue_multiplier = std::env::var("CRYPTO_WORKER_QUEUE_MULTIPLIER")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(10);
-
-        info!(
-            "Starting crypto worker with {} threads, queue size {}",
-            cpu_count,
-            cpu_count * queue_multiplier
-        );
-
-        // Use bounded channel for natural backpressure
-        let (tx, rx) = flume::bounded(cpu_count * queue_multiplier);
-        let metrics = Arc::new(CryptoWorkerMetrics::default());
-        let mut handles = Vec::new();
-
-        // Spawn long-lived workers using spawn_blocking
-        for i in 0..cpu_count {
-            let rx = rx.clone();
-            let worker_keys = Arc::clone(&keys);
-            let cancel = cancellation_token.clone();
-            let metrics = Arc::clone(&metrics);
-
-            let handle = tokio::task::spawn_blocking(move || {
-                debug!("Crypto worker {} started", i);
-
-                // Create a runtime for async operations in this blocking thread
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("Failed to create crypto runtime");
-
-                runtime.block_on(async {
-                    loop {
-                        // Check cancellation
-                        if cancel.is_cancelled() {
-                            debug!("Crypto worker {} shutting down", i);
-                            break;
-                        }
-
-                        // Try to get work (blocking recv with timeout to check cancellation)
-                        let op = match rx.recv_timeout(Duration::from_millis(100)) {
-                            Ok(op) => op,
-                            Err(flume::RecvTimeoutError::Timeout) => continue, // Check cancellation
-                            Err(flume::RecvTimeoutError::Disconnected) => break, // Channel closed
-                        };
-
-                        // Update metrics
-                        metrics.queued_operations.fetch_sub(1, Ordering::Relaxed);
-
-                        // Process the operation
-                        match op {
-                            CryptoOperation::Sign { event, response } => {
-                                let result = worker_keys.sign_event(event).await.map_err(|e| {
-                                    Error::internal(format!("Failed to sign event: {}", e))
-                                });
-
-                                if result.is_ok() {
-                                    metrics.completed_signs.fetch_add(1, Ordering::Relaxed);
-                                } else {
-                                    metrics.failed_operations.fetch_add(1, Ordering::Relaxed);
-                                }
-
-                                let _ = response.send(result);
-                            }
-                            CryptoOperation::Verify { event, response } => {
-                                let result = event.verify().map_err(|e| {
-                                    Error::internal(format!("Event verification failed: {}", e))
-                                });
-
-                                if result.is_ok() {
-                                    metrics.completed_verifies.fetch_add(1, Ordering::Relaxed);
-                                } else {
-                                    metrics.failed_operations.fetch_add(1, Ordering::Relaxed);
-                                }
-
-                                let _ = response.send(result);
-                            }
-                        }
-                    }
-                });
-
-                debug!("Crypto worker {} stopped", i);
-            });
-
-            handles.push(handle);
-        }
-
-        Self {
-            tx,
-            handles,
-            metrics,
-        }
-    }
-
+impl CryptoSender {
     pub async fn sign_event(&self, event: UnsignedEvent) -> Result<Event> {
         let (response_tx, response_rx) = oneshot::channel();
-
-        // Update metrics
-        self.metrics
-            .queued_operations
-            .fetch_add(1, Ordering::Relaxed);
 
         self.tx
             .send_async(CryptoOperation::Sign {
@@ -179,7 +40,7 @@ impl CryptoWorker {
             })
             .await
             .map_err(|_| {
-                warn!("Crypto worker queue full, rejecting sign operation");
+                error!("Crypto worker queue full, rejecting sign operation");
                 Error::internal(
                     "Crypto worker unavailable - queue may be full or workers shut down",
                 )
@@ -193,11 +54,6 @@ impl CryptoWorker {
     pub async fn verify_event(&self, event: Event) -> Result<()> {
         let (response_tx, response_rx) = oneshot::channel();
 
-        // Update metrics
-        self.metrics
-            .queued_operations
-            .fetch_add(1, Ordering::Relaxed);
-
         self.tx
             .send_async(CryptoOperation::Verify {
                 event,
@@ -205,7 +61,7 @@ impl CryptoWorker {
             })
             .await
             .map_err(|_| {
-                warn!("Crypto worker queue full, rejecting verify operation");
+                error!("Crypto worker queue full, rejecting verify operation");
                 Error::internal(
                     "Crypto worker unavailable - queue may be full or workers shut down",
                 )
@@ -215,35 +71,114 @@ impl CryptoWorker {
             Error::internal("Crypto worker dropped before completing verification operation")
         })?
     }
-
-    /// Get current metrics
-    pub fn metrics(&self) -> CryptoWorkerMetricsSnapshot {
-        CryptoWorkerMetricsSnapshot {
-            queued_operations: self.metrics.queued_operations.load(Ordering::Relaxed),
-            completed_signs: self.metrics.completed_signs.load(Ordering::Relaxed),
-            completed_verifies: self.metrics.completed_verifies.load(Ordering::Relaxed),
-            failed_operations: self.metrics.failed_operations.load(Ordering::Relaxed),
-        }
-    }
 }
 
-impl Drop for CryptoWorker {
-    fn drop(&mut self) {
-        // Close channel to signal workers to stop accepting new work
-        // Workers will process remaining items before exiting
-        drop(self.tx.clone());
+/// Namespace for spawning crypto workers
+///
+/// These workers handle signature verification and signing operations.
+/// Can be configured via CRYPTO_WORKER_THREADS environment variable.
+#[derive(Debug)]
+pub struct CryptoWorker;
+
+impl CryptoWorker {
+    /// Spawn crypto workers and return sender
+    /// The workers will be tracked by the provided TaskTracker
+    pub fn spawn(keys: Arc<Keys>, task_tracker: &TaskTracker) -> CryptoSender {
+        let cpu_count = std::env::var("CRYPTO_WORKER_THREADS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(3);
+
+        let queue_multiplier = std::env::var("CRYPTO_WORKER_QUEUE_MULTIPLIER")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(100); // Increased for better batching
+
+        info!(
+            "Starting {} crypto workers with queue size {}",
+            cpu_count,
+            cpu_count * queue_multiplier
+        );
+
+        // Use bounded channel for natural backpressure
+        let (tx, rx) = flume::bounded(cpu_count * queue_multiplier);
+
+        // Spawn long-lived workers using spawn_blocking
+        for i in 0..cpu_count {
+            let rx = rx.clone();
+            let worker_keys = Arc::clone(&keys);
+
+            task_tracker.spawn_blocking(move || {
+                debug!("Crypto worker {} started", i);
+
+                // Process operations in batches for better performance
+                loop {
+                    // Block until at least one operation is available
+                    let first_op = match rx.recv() {
+                        Ok(op) => op,
+                        Err(_) => {
+                            debug!("Crypto worker {} shutting down - channel closed", i);
+                            break;
+                        }
+                    };
+
+                    // Drain all currently available operations
+                    let mut batch = vec![first_op];
+                    batch.extend(rx.drain());
+
+                    debug!(
+                        "Crypto worker {} processing batch of {} operations",
+                        i,
+                        batch.len()
+                    );
+
+                    // Process the batch
+                    for op in batch {
+                        match op {
+                            CryptoOperation::Sign { event, response } => {
+                                // Sign synchronously using sign_with_keys
+                                let result = event.sign_with_keys(&worker_keys).map_err(|e| {
+                                    error!("Failed to sign event: {:?}", e);
+                                    Error::internal(format!("Failed to sign event: {}", e))
+                                });
+
+                                if let Err(result) = response.send(result) {
+                                    error!("Failed to send sign response: {:?}", result);
+                                }
+                            }
+                            CryptoOperation::Verify { event, response } => {
+                                // Verification is synchronous - no async needed
+                                let result = event.verify().map_err(|e| {
+                                    debug!("Event verification failed: {:?}", e);
+                                    Error::protocol(format!("Invalid event signature: {}", e))
+                                });
+
+                                if let Err(result) = response.send(result) {
+                                    error!("Failed to send verify response: {:?}", result);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                debug!("Crypto worker {} stopped", i);
+            });
+        }
+
+        CryptoSender { tx }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn test_sign_event() {
         let keys = Arc::new(Keys::generate());
-        let cancellation_token = CancellationToken::new();
-        let worker = CryptoWorker::new(Arc::clone(&keys), cancellation_token.clone());
+        let task_tracker = TaskTracker::new();
+        let sender = CryptoWorker::spawn(Arc::clone(&keys), &task_tracker);
 
         // Create test event
         let unsigned_event = UnsignedEvent::new(
@@ -255,26 +190,24 @@ mod tests {
         );
 
         // Sign the event
-        let signed_event = worker.sign_event(unsigned_event).await.unwrap();
+        let signed_event = sender.sign_event(unsigned_event).await.unwrap();
 
-        // Verify the signature
+        // Verify the signature is valid
         assert!(signed_event.verify().is_ok());
         assert_eq!(signed_event.pubkey, keys.public_key());
+        assert_eq!(signed_event.content, "Test message");
 
-        // Check metrics
-        let metrics = worker.metrics();
-        assert_eq!(metrics.completed_signs, 1);
-        assert_eq!(metrics.failed_operations, 0);
-
-        // Cleanup
-        cancellation_token.cancel();
+        // Cleanup - drop sender and wait for workers
+        drop(sender);
+        task_tracker.close();
+        task_tracker.wait().await;
     }
 
     #[tokio::test]
     async fn test_verify_event() {
         let keys = Arc::new(Keys::generate());
-        let cancellation_token = CancellationToken::new();
-        let worker = CryptoWorker::new(Arc::clone(&keys), cancellation_token.clone());
+        let task_tracker = TaskTracker::new();
+        let sender = CryptoWorker::spawn(Arc::clone(&keys), &task_tracker);
 
         // Create and sign event
         let unsigned_event = UnsignedEvent::new(
@@ -282,27 +215,28 @@ mod tests {
             Timestamp::now(),
             Kind::TextNote,
             vec![],
-            "Test message",
+            "Test verification",
         );
         let signed_event = keys.sign_event(unsigned_event).await.unwrap();
 
-        // Verify the event
-        worker.verify_event(signed_event).await.unwrap();
+        // Verify the event through crypto worker
+        let result = sender.verify_event(signed_event.clone()).await;
+        assert!(result.is_ok());
 
-        // Check metrics
-        let metrics = worker.metrics();
-        assert_eq!(metrics.completed_verifies, 1);
-        assert_eq!(metrics.failed_operations, 0);
+        // Also verify directly to ensure correctness
+        assert!(signed_event.verify().is_ok());
 
         // Cleanup
-        cancellation_token.cancel();
+        drop(sender);
+        task_tracker.close();
+        task_tracker.wait().await;
     }
 
     #[tokio::test]
     async fn test_invalid_event_verification() {
         let keys = Arc::new(Keys::generate());
-        let cancellation_token = CancellationToken::new();
-        let worker = CryptoWorker::new(Arc::clone(&keys), cancellation_token.clone());
+        let task_tracker = TaskTracker::new();
+        let sender = CryptoWorker::spawn(Arc::clone(&keys), &task_tracker);
 
         // Create an event with invalid signature by modifying content after signing
         let unsigned = UnsignedEvent::new(
@@ -310,35 +244,32 @@ mod tests {
             Timestamp::now(),
             Kind::TextNote,
             vec![],
-            "Test",
+            "Original content",
         );
-
         let mut event = keys.sign_event(unsigned).await.unwrap();
 
-        // Modify content to make signature invalid
+        // Tamper with the event
         event.content = "Modified content".to_string();
 
         // Verify should fail
-        let result = worker.verify_event(event).await;
+        let result = sender.verify_event(event).await;
         assert!(result.is_err());
-
-        // Check metrics
-        let metrics = worker.metrics();
-        assert_eq!(metrics.completed_verifies, 0);
-        assert_eq!(metrics.failed_operations, 1);
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid event signature"));
 
         // Cleanup
-        cancellation_token.cancel();
+        drop(sender);
+        task_tracker.close();
+        task_tracker.wait().await;
     }
 
     #[tokio::test]
     async fn test_concurrent_operations() {
         let keys = Arc::new(Keys::generate());
-        let cancellation_token = CancellationToken::new();
-        let worker = Arc::new(CryptoWorker::new(
-            Arc::clone(&keys),
-            cancellation_token.clone(),
-        ));
+        let task_tracker = TaskTracker::new();
+        let sender = CryptoWorker::spawn(Arc::clone(&keys), &task_tracker);
 
         // Spawn multiple concurrent operations
         let mut sign_handles = vec![];
@@ -346,7 +277,7 @@ mod tests {
 
         // Spawn signing tasks
         for i in 0..50 {
-            let worker_clone = Arc::clone(&worker);
+            let sender_clone = sender.clone();
             let keys_clone = Arc::clone(&keys);
 
             let handle = tokio::spawn(async move {
@@ -358,7 +289,7 @@ mod tests {
                     format!("Test message {}", i),
                 );
 
-                worker_clone.sign_event(unsigned_event).await
+                sender_clone.sign_event(unsigned_event).await
             });
 
             sign_handles.push(handle);
@@ -366,7 +297,7 @@ mod tests {
 
         // Spawn verification tasks
         for i in 0..50 {
-            let worker_clone = Arc::clone(&worker);
+            let sender_clone = sender.clone();
             let keys_clone = Arc::clone(&keys);
 
             let handle = tokio::spawn(async move {
@@ -375,56 +306,45 @@ mod tests {
                     Timestamp::now(),
                     Kind::TextNote,
                     vec![],
-                    format!("Test verify {}", i),
+                    format!("Verify message {}", i),
                 );
                 let signed_event = keys_clone.sign_event(unsigned_event).await.unwrap();
 
-                worker_clone.verify_event(signed_event).await
+                sender_clone.verify_event(signed_event).await
             });
 
             verify_handles.push(handle);
         }
 
-        // Wait for all signing operations
-        let sign_results: Vec<_> = futures_util::future::join_all(sign_handles).await;
-        let verify_results: Vec<_> = futures_util::future::join_all(verify_handles).await;
-
-        // Verify all signing operations succeeded
-        for result in sign_results {
+        // Wait for all operations to complete
+        for handle in sign_handles {
+            let result = handle.await.unwrap();
             assert!(result.is_ok());
-            assert!(result.unwrap().is_ok());
+            // Verify the signed event is valid
+            assert!(result.unwrap().verify().is_ok());
         }
 
-        // Verify all verification operations succeeded
-        for result in verify_results {
+        for handle in verify_handles {
+            let result = handle.await.unwrap();
             assert!(result.is_ok());
-            assert!(result.unwrap().is_ok());
         }
-
-        // Check metrics
-        let metrics = worker.metrics();
-        assert_eq!(metrics.completed_signs, 50);
-        assert_eq!(metrics.completed_verifies, 50);
-        assert_eq!(metrics.failed_operations, 0);
-        assert_eq!(metrics.queued_operations, 0); // Should be drained
 
         // Cleanup
-        cancellation_token.cancel();
+        drop(sender);
+        task_tracker.close();
+        task_tracker.wait().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_graceful_shutdown() {
         let keys = Arc::new(Keys::generate());
-        let cancellation_token = CancellationToken::new();
-        let worker = Arc::new(CryptoWorker::new(
-            Arc::clone(&keys),
-            cancellation_token.clone(),
-        ));
+        let task_tracker = TaskTracker::new();
+        let sender = CryptoWorker::spawn(Arc::clone(&keys), &task_tracker);
 
         // Queue some operations
         let mut handles = vec![];
         for i in 0..10 {
-            let worker_clone = Arc::clone(&worker);
+            let sender_clone = sender.clone();
             let keys_clone = Arc::clone(&keys);
 
             let handle = tokio::spawn(async move {
@@ -436,55 +356,55 @@ mod tests {
                     format!("Shutdown test {}", i),
                 );
 
-                worker_clone.sign_event(unsigned_event).await
+                sender_clone.sign_event(unsigned_event).await
             });
 
             handles.push(handle);
         }
 
-        // Give some time for operations to start
+        // Give operations time to start
         tokio::time::sleep(Duration::from_millis(10)).await;
 
-        // Cancel and drop the worker
-        cancellation_token.cancel();
-        drop(worker);
+        // Cancel and drop the sender
+        drop(sender);
+        task_tracker.close();
+        task_tracker.wait().await;
 
-        // Use timeout to prevent hanging
-        let results = tokio::time::timeout(
-            Duration::from_secs(5),
-            futures_util::future::join_all(handles),
-        )
-        .await
-        .unwrap_or_else(|_| vec![]);
+        // Check results - some may have completed, some may have failed
+        let mut successes = 0;
+        let mut failures = 0;
 
-        // Count successes
-        let successes = results
-            .iter()
-            .filter(|r| r.is_ok() && r.as_ref().unwrap().is_ok())
-            .count();
-        println!("Completed {} operations before shutdown", successes);
+        for handle in handles {
+            match handle.await {
+                Ok(Ok(_)) => successes += 1,
+                Ok(Err(_)) => failures += 1,
+                Err(_) => failures += 1, // JoinError
+            }
+        }
 
-        // At least some should have completed or been cancelled
-        assert!(successes > 0 || results.is_empty());
+        // At least some operations should have completed
+        assert!(successes > 0, "Some operations should have completed");
+        assert_eq!(
+            successes + failures,
+            10,
+            "All operations should be accounted for"
+        );
     }
 
     #[tokio::test]
     async fn test_backpressure() {
-        // Use smaller queue for testing
-        std::env::set_var("CRYPTO_WORKER_THREADS", "2");
+        // Set up a small queue to test backpressure
+        std::env::set_var("CRYPTO_WORKER_THREADS", "1");
         std::env::set_var("CRYPTO_WORKER_QUEUE_MULTIPLIER", "2");
 
         let keys = Arc::new(Keys::generate());
-        let cancellation_token = CancellationToken::new();
-        let worker = Arc::new(CryptoWorker::new(
-            Arc::clone(&keys),
-            cancellation_token.clone(),
-        ));
+        let task_tracker = TaskTracker::new();
+        let sender = CryptoWorker::spawn(Arc::clone(&keys), &task_tracker);
 
         // Try to overflow the queue
         let mut handles = vec![];
         for i in 0..10 {
-            let worker_clone = Arc::clone(&worker);
+            let sender_clone = sender.clone();
             let keys_clone = Arc::clone(&keys);
 
             let handle = tokio::spawn(async move {
@@ -498,32 +418,31 @@ mod tests {
 
                 // Add small delay to simulate slow processing
                 tokio::time::sleep(Duration::from_millis(10)).await;
-                worker_clone.sign_event(unsigned_event).await
+                sender_clone.sign_event(unsigned_event).await
             });
 
             handles.push(handle);
         }
 
-        // Wait for results
-        let results: Vec<_> = futures_util::future::join_all(handles).await;
+        // Wait for all operations
+        let mut successes = 0;
+        let mut _failures = 0;
 
-        // Should handle backpressure gracefully
-        let successes = results
-            .iter()
-            .filter(|r| r.is_ok() && r.as_ref().unwrap().is_ok())
-            .count();
-        let failures = results.len() - successes;
+        for handle in handles {
+            match handle.await.unwrap() {
+                Ok(_) => successes += 1,
+                Err(_) => _failures += 1,
+            }
+        }
 
-        println!(
-            "Backpressure test: {} successes, {} failures",
-            successes, failures
-        );
-
-        // Some operations should succeed
+        // With a queue size of 2 and slow processing, some operations might fail
+        // But we should have at least some successes
         assert!(successes > 0);
 
         // Cleanup
-        cancellation_token.cancel();
+        drop(sender);
+        task_tracker.close();
+        task_tracker.wait().await;
         std::env::remove_var("CRYPTO_WORKER_THREADS");
         std::env::remove_var("CRYPTO_WORKER_QUEUE_MULTIPLIER");
     }

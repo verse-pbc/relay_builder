@@ -1,6 +1,6 @@
 //! Configuration options for the relay builder
 
-use crate::crypto_worker::CryptoWorker;
+use crate::crypto_worker::CryptoSender;
 use crate::database::RelayDatabase;
 use crate::error::Error;
 use nostr_lmdb::Scope;
@@ -62,24 +62,12 @@ impl ScopeConfig {
 }
 
 /// WebSocket server configuration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct WebSocketConfig {
-    /// Channel size for message passing
-    pub channel_size: usize,
     /// Maximum number of concurrent connections
     pub max_connections: Option<usize>,
     /// Maximum connection time in seconds
     pub max_connection_time: Option<u64>,
-}
-
-impl Default for WebSocketConfig {
-    fn default() -> Self {
-        Self {
-            channel_size: 27500, // Default: 50 subscriptions * 500 max_limit * 1.10
-            max_connections: None,
-            max_connection_time: None,
-        }
-    }
 }
 
 /// Database configuration - either a path or an existing database instance
@@ -130,6 +118,7 @@ pub struct RelayConfig {
     pub max_subscriptions: usize,
     /// Maximum limit value allowed in subscription filters
     pub max_limit: usize,
+    // Note: WebSocket channel_size is calculated as: max_subscriptions * max_limit * 1.10
 }
 
 impl RelayConfig {
@@ -152,13 +141,18 @@ impl RelayConfig {
         }
     }
 
-    /// Create database instance from configuration with a provided crypto worker
+    /// Create database instance from configuration with a provided crypto sender
     pub fn create_database(
         &self,
-        crypto_worker: Arc<CryptoWorker>,
+        crypto_sender: CryptoSender,
     ) -> Result<Arc<RelayDatabase>, Error> {
         match &self.database {
-            DatabaseConfig::Path(path) => Ok(Arc::new(RelayDatabase::new(path, crypto_worker)?)),
+            DatabaseConfig::Path(path) => Ok(Arc::new(RelayDatabase::with_config(
+                path,
+                crypto_sender,
+                self.websocket_config.max_connections,
+                Some(self.max_subscriptions),
+            )?)),
             DatabaseConfig::Instance(db) => Ok(db.clone()),
         }
     }
@@ -237,6 +231,12 @@ impl RelayConfig {
         self.max_subscriptions = max_subscriptions;
         self.max_limit = max_limit;
         self
+    }
+
+    /// Calculate the WebSocket channel size based on subscription limits
+    /// Formula: max_subscriptions * max_limit * 1.10 (10% buffer)
+    pub fn calculate_channel_size(&self) -> usize {
+        (self.max_subscriptions as f64 * self.max_limit as f64 * 1.10) as usize
     }
 }
 
