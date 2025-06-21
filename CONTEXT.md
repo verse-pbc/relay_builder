@@ -229,7 +229,7 @@ See `examples/production_relay.rs` for:
 - Metrics collection via metrics middleware
 - Error recovery with error_handling middleware
 - Rate limiting patterns
-- NIP-42 authentication setup
+- NIP-42 authentication setup, for both inbound and outbound events
 - Proper logging configuration
 
 ## Error Handling
@@ -242,7 +242,7 @@ Common patterns:
 ## Dependencies
 
 Core dependencies from Cargo.toml:
-- `websocket_builder` from GitHub (not a workspace dependency)
+- `websocket_builder` the abstraction that provides the middleware system
 - `nostr-sdk`, `nostr`, `nostr-database`, `nostr-lmdb` from verse-pbc/nostr fork
 - `tokio` with full features
 - `async-trait = "0.1.82"`
