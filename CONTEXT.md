@@ -218,18 +218,15 @@ cargo bench
 
 ## Performance Tips
 
-- The `can_see_event` method is synchronous for zero-allocation performance
-- Use generic state types to avoid runtime lookups
-- Batch StoreCommands when possible
-- Signature verification is handled automatically by the framework
+- The `can_see_event` method is synchronous, it's a hot path so keep it efficient if possible but of course, depends on your use case.
 
 ## Production Deployment
 
 See `examples/production_relay.rs` for:
 - Metrics collection via metrics middleware
 - Error recovery with error_handling middleware
-- Rate limiting patterns
-- NIP-42 authentication setup, for both inbound and outbound events
+- Rate limiting patterns would need to be added. We will add a middleware for this in the future and grow the collection from community usage.
+- NIP-42 authentication setup is optional, enabled by a builder flag, for both inbound and outbound events
 - Proper logging configuration
 
 ## Error Handling
