@@ -587,11 +587,6 @@ impl RelayDatabase {
                 Error::database(format!("Failed to query events: {}", e))
             })?;
 
-            debug!(
-                "Fetched {} events for filter for scope: {:?}",
-                events.len(),
-                scope
-            );
             all_events.extend(events);
         }
 
