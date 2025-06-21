@@ -5,11 +5,11 @@ A framework for building custom Nostr relays with middleware support. Built on t
 ## Technology Stack
 
 - **Language**: Rust (edition 2021)
-- **Async Runtime**: Tokio with full features
-- **WebSocket**: websocket_builder from GitHub
+- **Async Runtime**: Tokio
+- **WebSocket**: Tungstenite based websocket_builder for stateful connection middleware pipelines
 - **Database**: LMDB via a nostr-lmdb fork that provides multitenant support
-- **Web Framework**: Axum (optional feature)
-- **Nostr**: Custom fork from verse-pbc/nostr
+- **Web Framework**: Axum
+- **Nostr**: Custom fork of nostr-lmdb library for multitenancy and batched writes
 
 ## Project Structure
 
