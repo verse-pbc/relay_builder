@@ -15,7 +15,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `cargo test` - Run all tests (unit and integration)
 - `cargo test -- --nocapture` - Run tests with println! output visible
 - `cargo test --lib` - Run only library unit tests
-- `cargo test --test <test_name>` - Run specific integration test
+- `cargo test --test <test_name>` - Run specific integration test (e.g., `cargo test --test logic_integration`)
 
 ### Code Quality
 - `cargo fmt` - Format code according to Rust standards
@@ -40,21 +40,17 @@ nostr_relay_builder is a Rust framework for building custom Nostr relays with a 
 
 ### Core Design Principles
 
-1. **Two-Level Architecture**:
-   - **EventProcessor**: High-level trait for business logic (most users should use this)
-   - **Middleware**: Low-level trait for protocol extensions (advanced use cases)
-
-2. **Builder Pattern**: `RelayBuilder` provides fluent API for relay construction
-
-3. **Async-First**: Built on Tokio with fully async message processing
-
-4. **State Management**: Supports custom per-connection state via generics
+1. **EventProcessor Trait**: High-level trait for business logic - most users should implement this
+2. **Middleware Pattern**: Low-level WebSocket middleware from `websocket_builder` for protocol extensions
+3. **Builder Pattern**: `RelayBuilder` provides fluent API for relay construction
+4. **Async-First**: Built on Tokio with fully async message processing
+5. **State Management**: Supports custom per-connection state via generics
 
 ### Key Components
 
 - `src/relay_builder.rs` - Main builder for constructing relays
-- `src/event_processor.rs` - High-level business logic trait
-- `src/middleware.rs` - Low-level middleware infrastructure
+- `src/event_processor.rs` - Core trait for business logic implementation
+- `src/middleware.rs` - Relay middleware that bridges EventProcessor to WebSocket
 - `src/state.rs` - Connection state management with generic support
 - `src/database.rs` - Async database abstraction layer
 - `src/subscription_service.rs` - Nostr subscription and filtering
@@ -75,7 +71,7 @@ Built-in middleware in `src/middlewares/`:
 ### Multi-Tenant Support
 
 - `src/subdomain.rs` - Subdomain isolation for multi-tenant deployments
-- Each subdomain gets isolated event storage and subscriptions
+- Each subdomain gets isolated event storage and subscriptions using `Scope`
 
 ### Database Architecture
 
@@ -87,8 +83,8 @@ Built-in middleware in `src/middlewares/`:
 ### Example Progression
 
 Examples in `examples/` directory (require `--features axum`):
-1. `minimal_relay.rs` - Start here! ~80 lines for basic relay
-2. `custom_middleware.rs` - Learn middleware pattern
+1. `minimal_relay.rs` - Start here! Basic relay implementation
+2. `custom_middleware.rs` - Learn WebSocket middleware pattern
 3. `private_relay.rs` - Add authentication and access control
 4. `advanced_relay.rs` - Moderation and advanced features
 5. `subdomain_relay.rs` - Multi-tenant with subdomain isolation
@@ -101,22 +97,38 @@ Examples in `examples/` directory (require `--features axum`):
 ```rust
 #[async_trait]
 impl EventProcessor for MyRelay {
-    async fn process_event(&self, event: &Event) -> Result<ProcessEventResponse> {
+    async fn handle_event(
+        &self,
+        event: Event,
+        custom_state: &mut (),
+        context: EventContext<'_>,
+    ) -> Result<Vec<StoreCommand>> {
         // Business logic here
-        Ok(ProcessEventResponse::Accept)
+        Ok(vec![StoreCommand::SaveSignedEvent(
+            Box::new(event),
+            context.subdomain.clone(),
+        )])
     }
 }
 ```
 
-#### Middleware Implementation
+#### WebSocket Middleware Implementation (Advanced)
+
+Check https://github.com/verse-pbc/websocket_builder for internals
+
 ```rust
 #[async_trait]
-impl Middleware for MyMiddleware {
-    async fn process_event(&self, event: ProcessEventRequest, next: Next<'_, ProcessEventRequest>) -> Result<ProcessEventResponse> {
-        // Pre-processing
-        let response = next.run(event).await?;
-        // Post-processing
-        Ok(response)
+impl<T> Middleware for MyMiddleware<T> {
+    type State = NostrConnectionState<T>;
+    type IncomingMessage = ClientMessage<'static>;
+    type OutgoingMessage = RelayMessage<'static>;
+
+    async fn process_inbound(
+        &self,
+        ctx: &mut InboundContext<Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
+    ) -> Result<(), anyhow::Error> {
+        // Process incoming messages
+        ctx.next().await
     }
 }
 ```
@@ -132,15 +144,15 @@ impl Middleware for MyMiddleware {
 
 ### Dependencies
 
-- Built on `websocket_builder` from same monorepo
+- Built on `websocket_builder` (workspace dependency)
 - Requires Rust 1.87.0 (specified in `rust-toolchain.toml`)
 - Core deps: nostr-sdk, tokio, async-trait, tracing
 - Optional: axum for web server integration
 
-### Production Usage
+### Production Examples
 
-This framework is used by:
-- `groups_relay` - NIP-29 group chat relay
-- `profile_aggregator` - Profile data aggregation service
-
-Both are in the same monorepo under `relay_repos/`.
+This framework can be used to build:
+- Group chat relays (NIP-29)
+- Private/paid relays with access control
+- Profile aggregation services
+- Specialized event-type relays

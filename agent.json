@@ -1,0 +1,10 @@
+{
+  "model": "claude-sonnet-4",
+  "mcpServers": {
+    "nostr": {
+      "type": "stdio", 
+      "command": "npx",
+      "args": ["-y", "@nostrbook/mcp@latest"]
+    }
+  }
+}
