@@ -9,6 +9,7 @@ repository = "https://github.com/verse-pbc/nostr_relay_builder"
 keywords = ["nostr", "relay", "websocket", "middleware"]
 categories = ["network-programming", "web-programming::websocket"]
 readme = "README.md"
+exclude = ["assets/", "*.json", ".github/"]
 
 [features]
 default = []

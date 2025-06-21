@@ -3,6 +3,7 @@
   "title": "Nostr Relay Builder",
   "description": "A flexible Rust framework for building custom Nostr relays with middleware-based architecture",
   "uri": "git+https://github.com/verse-pbc/nostr_relay_builder.git",
+  "image": "https://raw.githubusercontent.com/verse-pbc/nostr_relay_builder/main/assets/banner.png",
   "commands": ["cargo"],
   "tech": ["rust", "nostr", "websocket", "tokio", "async", "lmdb", "axum"]
 }
