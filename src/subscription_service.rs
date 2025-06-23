@@ -2383,6 +2383,11 @@ mod tests {
                 .unwrap();
         }
 
+        // Wait longer for database writes to complete
+        database
+            .wait_for_queue_empty(Duration::from_secs(2))
+            .await
+            .unwrap();
         sleep(Duration::from_millis(100)).await;
 
         // Create filter WITHOUT limit (unbounded query)
