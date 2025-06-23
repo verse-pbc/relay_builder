@@ -286,6 +286,20 @@ impl RelayDatabase {
         Self::with_config(db_path_param, crypto_sender, None, None)
     }
 
+    /// Create a new relay database with a provided TaskTracker
+    ///
+    /// # Arguments
+    /// * `db_path_param` - Path where the database should be stored
+    /// * `crypto_sender` - Crypto sender for signing unsigned events
+    /// * `task_tracker` - TaskTracker for managing background tasks
+    pub fn with_task_tracker(
+        db_path_param: impl AsRef<std::path::Path>,
+        crypto_sender: CryptoSender,
+        task_tracker: TaskTracker,
+    ) -> Result<Self, Error> {
+        Self::with_config_and_tracker(db_path_param, crypto_sender, None, None, Some(task_tracker))
+    }
+
     /// Create a new relay database with broadcast channel configuration
     ///
     /// # Arguments
@@ -298,6 +312,23 @@ impl RelayDatabase {
         crypto_sender: CryptoSender,
         max_connections: Option<usize>,
         max_subscriptions: Option<usize>,
+    ) -> Result<Self, Error> {
+        Self::with_config_and_tracker(
+            db_path_param,
+            crypto_sender,
+            max_connections,
+            max_subscriptions,
+            None,
+        )
+    }
+
+    /// Internal constructor that supports all options
+    fn with_config_and_tracker(
+        db_path_param: impl AsRef<std::path::Path>,
+        crypto_sender: CryptoSender,
+        max_connections: Option<usize>,
+        max_subscriptions: Option<usize>,
+        task_tracker: Option<TaskTracker>,
     ) -> Result<Self, Error> {
         let db_path = db_path_param.as_ref().to_path_buf();
 
@@ -369,7 +400,7 @@ impl RelayDatabase {
         let (broadcast_sender, _) = broadcast::channel(broadcast_capacity);
 
         // Create task tracker for worker lifecycle management
-        let task_tracker = TaskTracker::new();
+        let task_tracker = task_tracker.unwrap_or_default();
 
         info!("Starting single database worker per queue (LMDB limitation)");
 

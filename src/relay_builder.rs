@@ -108,6 +108,8 @@ pub struct RelayBuilder<T = ()> {
     /// HTML rendering option for browser requests
     #[cfg(feature = "axum")]
     html_option: HtmlOption,
+    /// Optional shared TaskTracker for all background tasks
+    task_tracker: Option<TaskTracker>,
     _phantom: PhantomData<T>,
 }
 
@@ -127,6 +129,7 @@ where
             subscription_metrics_handler: None,
             #[cfg(feature = "axum")]
             html_option: HtmlOption::Default,
+            task_tracker: None,
             _phantom: PhantomData,
         }
     }
@@ -175,6 +178,13 @@ where
         self
     }
 
+    /// Set a shared TaskTracker for all background tasks
+    #[must_use]
+    pub fn with_task_tracker(mut self, tracker: TaskTracker) -> Self {
+        self.task_tracker = Some(tracker);
+        self
+    }
+
     /// Transform the builder to use a different state type
     pub fn with_custom_state<U>(self) -> RelayBuilder<U>
     where
@@ -190,6 +200,7 @@ where
             subscription_metrics_handler: None,
             #[cfg(feature = "axum")]
             html_option: self.html_option,
+            task_tracker: self.task_tracker,
             _phantom: PhantomData,
         }
     }
@@ -282,10 +293,12 @@ where
         }
 
         // Create the crypto worker for signing and verification
-        let task_tracker = TaskTracker::new();
+        let task_tracker = self.task_tracker.take().unwrap_or_default();
         let crypto_sender = CryptoWorker::spawn(Arc::new(self.config.keys.clone()), &task_tracker);
 
-        let database = self.config.create_database(crypto_sender.clone())?;
+        let database = self
+            .config
+            .create_database_with_tracker(crypto_sender.clone(), Some(task_tracker.clone()))?;
         let custom_middlewares = std::mem::take(&mut self.middlewares);
         let connection_factory = self.build_connection_factory(database.clone())?;
 

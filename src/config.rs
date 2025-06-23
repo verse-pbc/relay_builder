@@ -146,13 +146,32 @@ impl RelayConfig {
         &self,
         crypto_sender: CryptoSender,
     ) -> Result<Arc<RelayDatabase>, Error> {
+        self.create_database_with_tracker(crypto_sender, None)
+    }
+
+    /// Create database instance from configuration with a provided crypto sender and optional TaskTracker
+    pub fn create_database_with_tracker(
+        &self,
+        crypto_sender: CryptoSender,
+        task_tracker: Option<tokio_util::task::TaskTracker>,
+    ) -> Result<Arc<RelayDatabase>, Error> {
         match &self.database {
-            DatabaseConfig::Path(path) => Ok(Arc::new(RelayDatabase::with_config(
-                path,
-                crypto_sender,
-                self.websocket_config.max_connections,
-                Some(self.max_subscriptions),
-            )?)),
+            DatabaseConfig::Path(path) => {
+                if let Some(tracker) = task_tracker {
+                    Ok(Arc::new(RelayDatabase::with_task_tracker(
+                        path,
+                        crypto_sender,
+                        tracker,
+                    )?))
+                } else {
+                    Ok(Arc::new(RelayDatabase::with_config(
+                        path,
+                        crypto_sender,
+                        self.websocket_config.max_connections,
+                        Some(self.max_subscriptions),
+                    )?))
+                }
+            }
             DatabaseConfig::Instance(db) => Ok(db.clone()),
         }
     }
