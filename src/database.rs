@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio_util::task::TaskTracker;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Maximum number of events that can be queued for writing.
 /// This provides backpressure to prevent unbounded memory growth.
@@ -818,6 +818,18 @@ impl RelayDatabase {
 
 impl Drop for RelayDatabase {
     fn drop(&mut self) {
+        // Check if channels are still open - this indicates shutdown() was not called
+        let has_open_channels = self.save_signed_sender.is_some()
+            || self.save_unsigned_sender.is_some()
+            || self.delete_sender.is_some();
+
+        if has_open_channels {
+            warn!(
+                "RelayDatabase dropped without calling shutdown() - this may cause data loss! \
+                Call database.shutdown().await before dropping to ensure all pending writes complete."
+            );
+        }
+
         // Drop all senders to signal shutdown
         if let Some(sender) = self.save_signed_sender.take() {
             drop(sender);
