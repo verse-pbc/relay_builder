@@ -286,7 +286,8 @@ async fn main() -> Result<()> {
             .with_middleware(Nip09Middleware::new(database.clone()))
             .with_middleware(Nip40ExpirationMiddleware::new())
             .with_middleware(Nip70Middleware)
-            .build_handlers(processor, relay_info)
+            .with_event_processor(processor)
+            .build_handlers(relay_info)
             .await?,
     );
 

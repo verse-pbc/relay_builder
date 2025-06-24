@@ -468,7 +468,8 @@ async fn main() -> Result<()> {
     let handlers = Arc::new(
         RelayBuilder::<UserSession>::new(config.clone())
             .with_state_factory(UserSession::default)
-            .build_handlers(processor, relay_info)
+            .with_event_processor(processor)
+            .build_handlers(relay_info)
             .await?,
     );
 

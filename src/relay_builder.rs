@@ -4,17 +4,19 @@ use crate::config::RelayConfig;
 use crate::crypto_worker::CryptoWorker;
 use crate::database::RelayDatabase;
 use crate::error::Error;
-use crate::event_processor::EventProcessor;
+use crate::event_processor::{DefaultRelayProcessor, EventContext, EventProcessor};
 use crate::message_converter::NostrMessageConverter;
 use crate::metrics::SubscriptionMetricsHandler;
 use crate::middleware::RelayMiddleware;
 use crate::middlewares::MetricsHandler;
 use crate::state::{GenericNostrConnectionFactory, NostrConnectionState};
+use async_trait::async_trait;
 use nostr_sdk::prelude::*;
 use std::marker::PhantomData;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tracing::warn;
 use websocket_builder::{Middleware, WebSocketBuilder};
 
 /// HTML rendering options for the relay
@@ -50,6 +52,20 @@ impl std::fmt::Debug for HtmlOption {
 /// # Type Parameters
 /// - `T`: The custom state type. Must implement `Clone + Send + Sync + Debug + Default`.
 ///
+/// # Default Middleware
+/// By default, the builder automatically adds these middlewares:
+/// - `LoggerMiddleware` - Request/response logging
+/// - `ErrorHandlingMiddleware` - Global error handling
+/// - `EventVerifierMiddleware` - Cryptographic signature verification
+///
+/// Additional middlewares are added when configured:
+/// - `MetricsMiddleware` - When `with_metrics()` is called
+/// - `Nip42Middleware` - When `enable_auth` is true in config
+///
+/// # Bare Mode
+/// Use `.bare()` to disable automatic middleware and have full control over the
+/// middleware stack. WARNING: This disables signature verification unless manually added!
+///
 /// # Example
 /// ```rust,no_run
 /// use nostr_relay_builder::{RelayBuilder, EventProcessor, EventContext, RelayConfig};
@@ -77,9 +93,10 @@ impl std::fmt::Debug for HtmlOption {
 /// # let keys = Keys::generate();
 /// # let config = RelayConfig::new("ws://localhost:8080", "./data", keys);
 /// let builder = RelayBuilder::<MyState>::new(config)
-///     .with_state_factory(|| MyState::default());
+///     .with_state_factory(|| MyState::default())
+///     .with_event_processor(MyProcessor);
 ///
-/// let handler = builder.build_handler(MyProcessor).await?;
+/// let handler = builder.build_handler().await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -110,6 +127,10 @@ pub struct RelayBuilder<T = ()> {
     html_option: HtmlOption,
     /// Optional shared TaskTracker for all background tasks
     task_tracker: Option<TaskTracker>,
+    /// Bare mode - skip all default middlewares
+    bare_mode: bool,
+    /// Event processor - defaults to DefaultRelayProcessor
+    event_processor: Arc<dyn EventProcessor<T>>,
     _phantom: PhantomData<T>,
 }
 
@@ -130,6 +151,8 @@ where
             #[cfg(feature = "axum")]
             html_option: HtmlOption::Default,
             task_tracker: None,
+            bare_mode: false,
+            event_processor: Arc::new(DefaultRelayProcessor::default()),
             _phantom: PhantomData,
         }
     }
@@ -185,6 +208,32 @@ where
         self
     }
 
+    /// Enable bare mode - skip automatic middleware (logger, error handling, event verification)
+    ///
+    /// WARNING: This mode skips critical security features like signature verification.
+    /// You must manually add these middlewares if needed.
+    ///
+    /// Middlewares that are still added when explicitly configured:
+    /// - MetricsMiddleware (if with_metrics is called)
+    /// - Nip42Middleware (if enable_auth is true in config)
+    #[must_use]
+    pub fn bare(mut self) -> Self {
+        self.bare_mode = true;
+        self
+    }
+
+    /// Set a custom event processor for handling relay business logic
+    ///
+    /// If not set, uses DefaultRelayProcessor which accepts all valid events.
+    #[must_use]
+    pub fn with_event_processor<P>(mut self, processor: P) -> Self
+    where
+        P: EventProcessor<T> + 'static,
+    {
+        self.event_processor = Arc::new(processor);
+        self
+    }
+
     /// Transform the builder to use a different state type
     pub fn with_custom_state<U>(self) -> RelayBuilder<U>
     where
@@ -201,6 +250,8 @@ where
             #[cfg(feature = "axum")]
             html_option: self.html_option,
             task_tracker: self.task_tracker,
+            bare_mode: self.bare_mode,
+            event_processor: Arc::new(DefaultRelayProcessor::default()), // Reset to default processor
             _phantom: PhantomData,
         }
     }
@@ -274,10 +325,7 @@ where
     }
 
     /// Build a WebSocket server with all configured middlewares
-    pub async fn build_server<L: EventProcessor<T>>(
-        mut self,
-        processor: L,
-    ) -> Result<RelayWebSocketHandler<T>, Error>
+    pub async fn build_server(mut self) -> Result<RelayWebSocketHandler<T>, Error>
     where
         T: Default,
     {
@@ -302,8 +350,61 @@ where
         let custom_middlewares = std::mem::take(&mut self.middlewares);
         let connection_factory = self.build_connection_factory(database.clone())?;
 
-        let relay_middleware =
-            RelayMiddleware::new(processor, self.config.keys.public_key(), database);
+        // Create a wrapper to use Arc<dyn EventProcessor<T>> with RelayMiddleware
+        struct DynProcessor<T>(Arc<dyn EventProcessor<T>>);
+
+        #[async_trait]
+        impl<T> EventProcessor<T> for DynProcessor<T>
+        where
+            T: Send + Sync + std::fmt::Debug + 'static,
+        {
+            fn can_see_event(
+                &self,
+                event: &Event,
+                custom_state: &T,
+                context: EventContext<'_>,
+            ) -> Result<bool, Error> {
+                self.0.can_see_event(event, custom_state, context)
+            }
+
+            fn verify_filters(
+                &self,
+                filters: &[Filter],
+                custom_state: &T,
+                context: EventContext<'_>,
+            ) -> Result<(), Error> {
+                self.0.verify_filters(filters, custom_state, context)
+            }
+
+            async fn handle_event(
+                &self,
+                event: Event,
+                custom_state: &mut T,
+                context: EventContext<'_>,
+            ) -> Result<Vec<crate::subscription_service::StoreCommand>, Error> {
+                self.0.handle_event(event, custom_state, context).await
+            }
+
+            async fn handle_message(
+                &self,
+                message: ClientMessage<'static>,
+                state: &mut NostrConnectionState<T>,
+            ) -> Result<Vec<RelayMessage<'static>>, Error> {
+                self.0.handle_message(message, state).await
+            }
+        }
+
+        impl<T> std::fmt::Debug for DynProcessor<T> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("DynProcessor").finish()
+            }
+        }
+
+        let relay_middleware = RelayMiddleware::new(
+            DynProcessor(self.event_processor.clone()),
+            self.config.keys.public_key(),
+            database,
+        );
 
         let mut builder = WebSocketBuilder::new(connection_factory, NostrMessageConverter);
 
@@ -321,9 +422,16 @@ where
             let _ = max_time; // Suppress unused warning
         }
 
-        // Add standard middlewares that should always be present
-        builder = builder.with_middleware(crate::middlewares::LoggerMiddleware::new());
-        builder = builder.with_middleware(crate::middlewares::ErrorHandlingMiddleware::new());
+        // Add standard middlewares unless in bare mode
+        if !self.bare_mode {
+            builder = builder.with_middleware(crate::middlewares::LoggerMiddleware::new());
+            builder = builder.with_middleware(crate::middlewares::ErrorHandlingMiddleware::new());
+        } else {
+            warn!(
+                "⚠️  BARE MODE ENABLED: Relay is running without default middleware! \
+                Signature verification, error handling, and logging are disabled unless manually added."
+            );
+        }
 
         // Add metrics middleware if handler is provided
         if let Some(metrics_handler) = self.metrics_handler.clone() {
@@ -349,10 +457,12 @@ where
                 builder.with_middleware(crate::middlewares::Nip42Middleware::new(auth_config));
         }
 
-        // Add event verification middleware with crypto sender
-        builder = builder.with_middleware(crate::middlewares::EventVerifierMiddleware::new(
-            crypto_sender.clone(),
-        ));
+        // Add event verification middleware unless in bare mode
+        if !self.bare_mode {
+            builder = builder.with_middleware(crate::middlewares::EventVerifierMiddleware::new(
+                crypto_sender.clone(),
+            ));
+        }
 
         // Add custom middlewares
         for middleware in custom_middlewares {
@@ -366,21 +476,17 @@ where
     }
 
     /// Alias for build_server - builds a WebSocket handler
-    pub async fn build_handler<L: EventProcessor<T>>(
-        self,
-        processor: L,
-    ) -> Result<RelayWebSocketHandler<T>, Error>
+    pub async fn build_handler(self) -> Result<RelayWebSocketHandler<T>, Error>
     where
         T: Default,
     {
-        self.build_server(processor).await
+        self.build_server().await
     }
 
     /// Build handlers for framework integration
     #[cfg(feature = "axum")]
-    pub async fn build_handlers<L: EventProcessor<T>>(
+    pub async fn build_handlers(
         self,
-        processor: L,
         relay_info: crate::handlers::RelayInfo,
     ) -> Result<crate::handlers::RelayHandlers<T>, Error>
     where
@@ -389,7 +495,7 @@ where
         let cancellation_token = self.cancellation_token.clone();
         let connection_counter = self.connection_counter.clone();
         let scope_config = self.config.scope_config.clone();
-        let handler = self.build_handler(processor).await?;
+        let handler = self.build_handler().await?;
         Ok(crate::handlers::RelayHandlers::new(
             handler,
             relay_info,
@@ -401,9 +507,8 @@ where
 
     /// Build handlers with an Axum root handler
     #[cfg(feature = "axum")]
-    pub async fn build_axum_handler<L: EventProcessor<T>>(
+    pub async fn build_axum_handler(
         self,
-        processor: L,
         relay_info: crate::handlers::RelayInfo,
     ) -> Result<
         impl Fn(
@@ -421,7 +526,7 @@ where
         T: Default,
     {
         let html_option = self.html_option.clone();
-        let handlers = Arc::new(self.build_handlers(processor, relay_info).await?);
+        let handlers = Arc::new(self.build_handlers(relay_info).await?);
 
         Ok(
             move |ws: Option<axum::extract::ws::WebSocketUpgrade>,

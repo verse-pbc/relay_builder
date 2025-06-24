@@ -32,7 +32,7 @@ pub use config::{RelayConfig, ScopeConfig, WebSocketConfig};
 pub use crypto_worker::{CryptoSender, CryptoWorker};
 pub use database::{NostrDatabase, RelayDatabase};
 pub use error::{Error, Result};
-pub use event_processor::{EventContext, EventProcessor, PublicRelayProcessor};
+pub use event_processor::{DefaultRelayProcessor, EventContext, EventProcessor};
 #[cfg(feature = "axum")]
 pub use handlers::{RelayHandlers, RelayInfo};
 pub use message_converter::NostrMessageConverter;

@@ -349,7 +349,8 @@ async fn main() -> Result<()> {
             .with_middleware(Nip40ExpirationMiddleware::new())
             .with_middleware(Nip70Middleware)
             .with_connection_counter(connection_counter)
-            .build_handlers(processor, relay_info)
+            .with_event_processor(processor)
+            .build_handlers(relay_info)
             .await?,
     );
 

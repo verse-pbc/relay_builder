@@ -164,7 +164,14 @@ where
         event: Event,
         custom_state: &mut T,
         context: EventContext<'_>,
-    ) -> Result<Vec<StoreCommand>>;
+    ) -> Result<Vec<StoreCommand>> {
+        // Default implementation: store all valid events
+        let _ = custom_state; // Unused in default implementation
+        Ok(vec![StoreCommand::SaveSignedEvent(
+            Box::new(event),
+            context.subdomain.clone(),
+        )])
+    }
 
     /// Handle non-event messages with full connection state access.
     ///
@@ -220,23 +227,24 @@ where
     }
 }
 
-/// Simple public relay processor - stores all valid events
-#[derive(Debug, Clone, Default)]
-pub struct PublicRelayProcessor;
+/// Default relay processor - uses all trait default implementations
+#[derive(Debug, Clone)]
+pub struct DefaultRelayProcessor<T = ()> {
+    _phantom: std::marker::PhantomData<T>,
+}
+
+impl<T> Default for DefaultRelayProcessor<T> {
+    fn default() -> Self {
+        Self {
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
 
 #[async_trait]
-impl EventProcessor<()> for PublicRelayProcessor {
-    async fn handle_event(
-        &self,
-        event: Event,
-        _custom_state: &mut (),
-        context: EventContext<'_>,
-    ) -> Result<Vec<StoreCommand>> {
-        // Note: Event verification is already done by EventVerifierMiddleware
-        // Simply store the event
-        Ok(vec![StoreCommand::SaveSignedEvent(
-            Box::new(event),
-            context.subdomain.clone(),
-        )])
-    }
+impl<T> EventProcessor<T> for DefaultRelayProcessor<T>
+where
+    T: Send + Sync + std::fmt::Debug + 'static,
+{
+    // Uses all default implementations from the trait
 }

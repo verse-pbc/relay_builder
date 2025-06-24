@@ -7,32 +7,9 @@
 
 use anyhow::Result;
 use axum::{routing::get, Router};
-use nostr_relay_builder::{
-    EventContext, EventProcessor, RelayBuilder, RelayConfig, RelayInfo, Result as RelayResult,
-    StoreCommand,
-};
+use nostr_relay_builder::{RelayBuilder, RelayConfig, RelayInfo};
 use nostr_sdk::prelude::*;
 use std::net::SocketAddr;
-
-/// Simple event processor that accepts all events
-#[derive(Debug, Clone)]
-struct AcceptAllProcessor;
-
-#[async_trait::async_trait]
-impl EventProcessor for AcceptAllProcessor {
-    async fn handle_event(
-        &self,
-        event: Event,
-        _custom_state: &mut (),
-        context: EventContext<'_>,
-    ) -> RelayResult<Vec<StoreCommand>> {
-        // Accept all events
-        Ok(vec![StoreCommand::SaveSignedEvent(
-            Box::new(event),
-            context.subdomain.clone(),
-        )])
-    }
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -57,10 +34,9 @@ async fn main() -> Result<()> {
         icon: None,
     };
 
-    // Build the relay with default HTML page
-    let processor = AcceptAllProcessor;
-    let root_handler = RelayBuilder::new(config.clone())
-        .build_axum_handler(processor, relay_info)
+    // Build the relay - uses DefaultRelayProcessor which accepts all valid events
+    let root_handler = RelayBuilder::<()>::new(config.clone())
+        .build_axum_handler(relay_info)
         .await?;
 
     // Create HTTP server
