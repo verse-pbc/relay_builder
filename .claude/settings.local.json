@@ -10,7 +10,8 @@
       "Bash(cargo fmt:*)",
       "Bash(cargo check:*)",
       "Bash(cargo test)",
-      "Bash(bash -c \"grep -n 'build_relay_service' /Users/daniel/code/nos/groups/relay_repos/nostr_relay_builder/src/relay_builder.rs\")"
+      "Bash(bash -c \"grep -n 'build_relay_service' /Users/daniel/code/nos/groups/relay_repos/nostr_relay_builder/src/relay_builder.rs\")",
+      "Bash(cargo update:*)"
     ],
     "deny": []
   }

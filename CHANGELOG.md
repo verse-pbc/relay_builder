@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2025-06-24
+
+### Changed
+- **BREAKING**: Renamed `RelayHandlers` to `RelayService` for better clarity
+- **BREAKING**: Removed deprecated builder methods: `build_server()`, `build_handler()`, `build_handlers()`, `build_axum_handler()`
+- **BREAKING**: Simplified API with three main build methods:
+  - `build()` - Returns the WebSocket handler
+  - `build_axum()` - Returns an Axum-compatible handler function
+  - `build_relay_service()` - Returns the full RelayService with handler and relay info
+- Reorganized examples with numbered format (01-09) for progressive learning
+- Improved documentation structure with tutorial moved to examples/README.md
+
+### Added
+- New example: `05_protocol_features.rs` demonstrating NIPs 09, 40, and 70
+- Comprehensive tutorial in examples/README.md covering all library features
+
+### Removed
+- Removed complex example files: `advanced_relay.rs`, `private_relay.rs`
+- Removed outdated `TUTORIAL.md` file
+
 ## [0.2.0] - 2025-06-21
 
 ### Added
