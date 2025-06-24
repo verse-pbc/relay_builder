@@ -96,7 +96,7 @@ impl std::fmt::Debug for HtmlOption {
 ///     .with_state_factory(|| MyState::default())
 ///     .with_event_processor(MyProcessor);
 ///
-/// let handler = builder.build_handler().await?;
+/// let handler = builder.build().await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -132,6 +132,7 @@ pub struct RelayBuilder<T = ()> {
     /// Event processor - defaults to DefaultRelayProcessor
     event_processor: Arc<dyn EventProcessor<T>>,
     /// Relay information for NIP-11
+    #[cfg(feature = "axum")]
     relay_info: Option<crate::handlers::RelayInfo>,
     _phantom: PhantomData<T>,
 }
@@ -155,6 +156,7 @@ where
             task_tracker: None,
             bare_mode: false,
             event_processor: Arc::new(DefaultRelayProcessor::default()),
+            #[cfg(feature = "axum")]
             relay_info: None,
             _phantom: PhantomData,
         }
@@ -238,6 +240,7 @@ where
     }
 
     /// Set relay information for NIP-11 responses
+    #[cfg(feature = "axum")]
     #[must_use]
     pub fn with_relay_info(mut self, relay_info: crate::handlers::RelayInfo) -> Self {
         self.relay_info = Some(relay_info);
@@ -262,6 +265,7 @@ where
             task_tracker: self.task_tracker,
             bare_mode: self.bare_mode,
             event_processor: Arc::new(DefaultRelayProcessor::default()), // Reset to default processor
+            #[cfg(feature = "axum")]
             relay_info: self.relay_info,
             _phantom: PhantomData,
         }

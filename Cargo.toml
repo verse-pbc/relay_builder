@@ -63,6 +63,7 @@ required-features = ["axum"]
 
 [[example]]
 name = "02_bare_mode"
+required-features = ["axum"]
 
 [[example]]
 name = "03_spam_filter"
