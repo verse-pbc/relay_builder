@@ -64,8 +64,8 @@ jobs:
         with:
           toolchain: stable
       
-      - name: Build minimal_relay example
-        run: cargo build --example minimal_relay --features axum --verbose
+      - name: Build 01_minimal_relay example
+        run: cargo build --example 01_minimal_relay --features axum --verbose
 
   feature-combinations:
     name: Feature Combinations
