@@ -34,7 +34,8 @@ pub use database::{NostrDatabase, RelayDatabase};
 pub use error::{Error, Result};
 pub use event_processor::{DefaultRelayProcessor, EventContext, EventProcessor};
 #[cfg(feature = "axum")]
-pub use handlers::{RelayHandlers, RelayInfo};
+pub use handlers::{RelayInfo, RelayService};
+
 pub use message_converter::NostrMessageConverter;
 pub use middleware::RelayMiddleware;
 #[cfg(feature = "axum")]

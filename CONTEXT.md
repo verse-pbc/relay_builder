@@ -55,7 +55,9 @@ nostr_relay_builder/
 
    let processor = MyBusinessLogic::new();
    let handler = RelayBuilder::new(config)
-       .build_axum_handler(processor, relay_info)
+       .with_event_processor(processor)
+       .with_relay_info(relay_info)
+       .build_axum()
        .await?;
    ```
 

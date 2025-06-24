@@ -58,30 +58,38 @@ axum-server = "0.6"
 tower-http = { version = "0.6.2", features = ["cors", "fs"] }
 
 [[example]]
-name = "minimal_relay"
+name = "01_minimal_relay"
 required-features = ["axum"]
 
 [[example]]
-name = "advanced_relay"
+name = "02_bare_mode"
+
+[[example]]
+name = "03_spam_filter"
 required-features = ["axum"]
 
 [[example]]
-name = "private_relay"
+name = "04_auth_relay"
 required-features = ["axum"]
 
 [[example]]
-name = "subdomain_relay"
+name = "05_protocol_features"
 required-features = ["axum"]
 
 [[example]]
-name = "custom_middleware"
-
-[[example]]
-name = "custom_state_relay"
+name = "06_rate_limiter"
 required-features = ["axum"]
 
 [[example]]
-name = "production_relay"
+name = "07_user_sessions"
+required-features = ["axum"]
+
+[[example]]
+name = "08_multi_tenant"
+required-features = ["axum"]
+
+[[example]]
+name = "09_production"
 required-features = ["axum"]
 
 [[bin]]

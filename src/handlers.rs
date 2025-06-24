@@ -64,8 +64,8 @@ fn get_real_ip(headers: &HeaderMap, socket_addr: SocketAddr) -> String {
     format!("{}:{}", ip, socket_addr.port())
 }
 
-/// Handler functions for a Nostr relay
-pub struct RelayHandlers<T = ()>
+/// A complete Nostr relay service with WebSocket handling and HTTP endpoints
+pub struct RelayService<T = ()>
 where
     T: Clone + Send + Sync + 'static,
 {
@@ -263,11 +263,11 @@ pub fn default_relay_html(relay_info: &RelayInfo) -> String {
     )
 }
 
-impl<T> RelayHandlers<T>
+impl<T> RelayService<T>
 where
     T: Clone + Send + Sync + 'static,
 {
-    /// Create new relay handlers
+    /// Create new relay service
     pub fn new(
         ws_handler: crate::RelayWebSocketHandler<T>,
         relay_info: RelayInfo,

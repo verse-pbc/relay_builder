@@ -36,7 +36,8 @@ async fn main() -> Result<()> {
 
     // Build the relay - uses DefaultRelayProcessor which accepts all valid events
     let root_handler = RelayBuilder::<()>::new(config.clone())
-        .build_axum_handler(relay_info)
+        .with_relay_info(relay_info)
+        .build_axum()
         .await?;
 
     // Create HTTP server

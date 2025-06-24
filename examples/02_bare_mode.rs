@@ -97,10 +97,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         icon: None,
     };
 
-    // Build the relay handler using build_axum_handler
+    // Build the relay handler using the new build_axum method
     let root_handler = builder
         .with_event_processor(SimpleProcessor)
-        .build_axum_handler(relay_info)
+        .with_relay_info(relay_info)
+        .build_axum()
         .await?;
 
     // Create HTTP server

@@ -131,6 +131,8 @@ pub struct RelayBuilder<T = ()> {
     bare_mode: bool,
     /// Event processor - defaults to DefaultRelayProcessor
     event_processor: Arc<dyn EventProcessor<T>>,
+    /// Relay information for NIP-11
+    relay_info: Option<crate::handlers::RelayInfo>,
     _phantom: PhantomData<T>,
 }
 
@@ -153,6 +155,7 @@ where
             task_tracker: None,
             bare_mode: false,
             event_processor: Arc::new(DefaultRelayProcessor::default()),
+            relay_info: None,
             _phantom: PhantomData,
         }
     }
@@ -234,6 +237,13 @@ where
         self
     }
 
+    /// Set relay information for NIP-11 responses
+    #[must_use]
+    pub fn with_relay_info(mut self, relay_info: crate::handlers::RelayInfo) -> Self {
+        self.relay_info = Some(relay_info);
+        self
+    }
+
     /// Transform the builder to use a different state type
     pub fn with_custom_state<U>(self) -> RelayBuilder<U>
     where
@@ -252,6 +262,7 @@ where
             task_tracker: self.task_tracker,
             bare_mode: self.bare_mode,
             event_processor: Arc::new(DefaultRelayProcessor::default()), // Reset to default processor
+            relay_info: self.relay_info,
             _phantom: PhantomData,
         }
     }
@@ -324,8 +335,157 @@ where
         }
     }
 
-    /// Build a WebSocket server with all configured middlewares
-    pub async fn build_server(mut self) -> Result<RelayWebSocketHandler<T>, Error>
+    // ===== New Clean API Methods =====
+
+    /// Build a raw WebSocket handler without any framework integration
+    ///
+    /// This returns the core WebSocket handler that can be used with any
+    /// WebSocket server implementation.
+    pub async fn build(self) -> Result<RelayWebSocketHandler<T>, Error>
+    where
+        T: Default,
+    {
+        self.build_internal().await
+    }
+
+    /// Build an Axum-compatible handler with WebSocket and optional NIP-11 support
+    ///
+    /// This returns a handler function that can be used directly with Axum routing.
+    /// If `with_relay_info()` was called, NIP-11 responses will be enabled.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let handler = RelayBuilder::new(config)
+    ///     .with_relay_info(relay_info)
+    ///     .build_axum()
+    ///     .await?;
+    ///
+    /// let app = Router::new().route("/", get(handler));
+    /// ```
+    #[cfg(feature = "axum")]
+    pub async fn build_axum(
+        self,
+    ) -> Result<
+        impl Fn(
+                Option<axum::extract::ws::WebSocketUpgrade>,
+                axum::extract::ConnectInfo<std::net::SocketAddr>,
+                axum::http::HeaderMap,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = axum::response::Response> + Send>,
+            > + Clone
+            + Send
+            + 'static,
+        Error,
+    >
+    where
+        T: Default,
+    {
+        let relay_info = self.relay_info.clone();
+        let service = self.build_relay_service_internal().await?;
+
+        Ok(
+            move |ws: Option<axum::extract::ws::WebSocketUpgrade>,
+                  connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
+                  headers: axum::http::HeaderMap| {
+                let service = service.clone();
+                let relay_info = relay_info.clone();
+
+                Box::pin(async move {
+                    // Delegate to service's axum handler
+                    if ws.is_some()
+                        || headers
+                            .get("accept")
+                            .and_then(|h| h.to_str().ok())
+                            .map(|s| s == "application/nostr+json")
+                            .unwrap_or(false)
+                    {
+                        service.axum_root_handler()(ws, connect_info, headers).await
+                    } else if relay_info.is_some() {
+                        // Serve default relay info HTML
+                        use axum::response::{Html, IntoResponse};
+                        Html(crate::handlers::default_relay_html(
+                            relay_info.as_ref().unwrap(),
+                        ))
+                        .into_response()
+                    } else {
+                        // No relay info, return 404
+                        use axum::response::IntoResponse;
+                        axum::http::StatusCode::NOT_FOUND.into_response()
+                    }
+                })
+                    as std::pin::Pin<
+                        Box<dyn std::future::Future<Output = axum::response::Response> + Send>,
+                    >
+            },
+        )
+    }
+
+    /// Build a relay service with full control over individual components
+    ///
+    /// This returns a service object that provides methods for handling
+    /// different aspects of the relay protocol separately. Useful when
+    /// you need to integrate the relay into existing infrastructure.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let service = RelayBuilder::new(config)
+    ///     .build_relay_service(relay_info)
+    ///     .await?;
+    ///
+    /// // Use service.axum_root_handler() for WebSocket + NIP-11
+    /// // Or access individual components as needed
+    /// ```
+    #[cfg(feature = "axum")]
+    pub async fn build_relay_service(
+        mut self,
+        relay_info: crate::handlers::RelayInfo,
+    ) -> Result<Arc<crate::handlers::RelayService<T>>, Error>
+    where
+        T: Default,
+    {
+        self.relay_info = Some(relay_info);
+        self.build_relay_service_internal().await
+    }
+
+    /// Internal method to build relay service
+    #[cfg(feature = "axum")]
+    async fn build_relay_service_internal(
+        self,
+    ) -> Result<Arc<crate::handlers::RelayService<T>>, Error>
+    where
+        T: Default,
+    {
+        let cancellation_token = self.cancellation_token.clone();
+        let connection_counter = self.connection_counter.clone();
+        let scope_config = self.config.scope_config.clone();
+        let relay_info = self
+            .relay_info
+            .clone()
+            .unwrap_or_else(|| crate::handlers::RelayInfo {
+                name: "Nostr Relay".to_string(),
+                description: "A Nostr relay".to_string(),
+                pubkey: self.config.keys.public_key().to_string(),
+                contact: "".to_string(),
+                supported_nips: vec![1],
+                software: "nostr_relay_builder".to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                icon: None,
+            });
+
+        let handler = self.build_internal().await?;
+        Ok(Arc::new(crate::handlers::RelayService::new(
+            handler,
+            relay_info,
+            cancellation_token,
+            connection_counter,
+            scope_config,
+        )))
+    }
+
+    // ===== Internal Methods =====
+
+    /// Internal builder that constructs the WebSocket handler
+    async fn build_internal(mut self) -> Result<RelayWebSocketHandler<T>, Error>
     where
         T: Default,
     {
@@ -473,99 +633,6 @@ where
         builder = builder.with_middleware(relay_middleware);
 
         Ok(builder.build())
-    }
-
-    /// Alias for build_server - builds a WebSocket handler
-    pub async fn build_handler(self) -> Result<RelayWebSocketHandler<T>, Error>
-    where
-        T: Default,
-    {
-        self.build_server().await
-    }
-
-    /// Build handlers for framework integration
-    #[cfg(feature = "axum")]
-    pub async fn build_handlers(
-        self,
-        relay_info: crate::handlers::RelayInfo,
-    ) -> Result<crate::handlers::RelayHandlers<T>, Error>
-    where
-        T: Default,
-    {
-        let cancellation_token = self.cancellation_token.clone();
-        let connection_counter = self.connection_counter.clone();
-        let scope_config = self.config.scope_config.clone();
-        let handler = self.build_handler().await?;
-        Ok(crate::handlers::RelayHandlers::new(
-            handler,
-            relay_info,
-            cancellation_token,
-            connection_counter,
-            scope_config,
-        ))
-    }
-
-    /// Build handlers with an Axum root handler
-    #[cfg(feature = "axum")]
-    pub async fn build_axum_handler(
-        self,
-        relay_info: crate::handlers::RelayInfo,
-    ) -> Result<
-        impl Fn(
-                Option<axum::extract::ws::WebSocketUpgrade>,
-                axum::extract::ConnectInfo<std::net::SocketAddr>,
-                axum::http::HeaderMap,
-            ) -> std::pin::Pin<
-                Box<dyn std::future::Future<Output = axum::response::Response> + Send>,
-            > + Clone
-            + Send
-            + 'static,
-        Error,
-    >
-    where
-        T: Default,
-    {
-        let html_option = self.html_option.clone();
-        let handlers = Arc::new(self.build_handlers(relay_info).await?);
-
-        Ok(
-            move |ws: Option<axum::extract::ws::WebSocketUpgrade>,
-                  connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
-                  headers: axum::http::HeaderMap| {
-                let handlers = handlers.clone();
-                let html_option = html_option.clone();
-                Box::pin(async move {
-                    // Check if this is a WebSocket or NIP-11 request
-                    if ws.is_some()
-                        || headers
-                            .get("accept")
-                            .and_then(|h| h.to_str().ok())
-                            .map(|s| s == "application/nostr+json")
-                            .unwrap_or(false)
-                    {
-                        // Handle WebSocket/NIP-11 with the built handler
-                        handlers.axum_root_handler()(ws, connect_info, headers).await
-                    } else {
-                        // Handle HTML based on configuration
-                        use axum::response::{Html, IntoResponse};
-
-                        match &html_option {
-                            HtmlOption::None => axum::http::StatusCode::NOT_FOUND.into_response(),
-                            HtmlOption::Default => {
-                                Html(crate::handlers::default_relay_html(handlers.relay_info()))
-                                    .into_response()
-                            }
-                            HtmlOption::Custom(provider) => {
-                                Html(provider(handlers.relay_info())).into_response()
-                            }
-                        }
-                    }
-                })
-                    as std::pin::Pin<
-                        Box<dyn std::future::Future<Output = axum::response::Response> + Send>,
-                    >
-            },
-        )
     }
 }
 
