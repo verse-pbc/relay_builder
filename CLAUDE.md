@@ -83,13 +83,15 @@ Built-in middleware in `src/middlewares/`:
 ### Example Progression
 
 Examples in `examples/` directory (require `--features axum`):
-1. `minimal_relay.rs` - Start here! Basic relay implementation
-2. `custom_middleware.rs` - Learn WebSocket middleware pattern
-3. `private_relay.rs` - Add authentication and access control
-4. `advanced_relay.rs` - Moderation and advanced features
-5. `subdomain_relay.rs` - Multi-tenant with subdomain isolation
-6. `custom_state_relay.rs` - Custom per-connection state
-7. `production_relay.rs` - Production-ready with monitoring
+1. `01_minimal_relay.rs` - Start here! Basic relay implementation
+2. `02_bare_mode.rs` - Direct WebSocket middleware without EventProcessor
+3. `03_spam_filter.rs` - Add spam filtering with rate limits
+4. `04_auth_relay.rs` - Authentication and access control (NIP-42)
+5. `05_protocol_features.rs` - Advanced protocol features (NIPs)
+6. `06_rate_limiter.rs` - Rate limiting implementation
+7. `07_user_sessions.rs` - Custom per-connection state management
+8. `08_multi_tenant.rs` - Multi-tenant with subdomain isolation
+9. `09_production.rs` - Production-ready with monitoring
 
 ### Common Patterns
 
@@ -114,7 +116,7 @@ impl EventProcessor for MyRelay {
 
 #### WebSocket Middleware Implementation (Advanced)
 
-Check https://github.com/verse-pbc/websocket_builder for internals
+For low-level protocol extensions, you can implement the WebSocket Middleware trait directly:
 
 ```rust
 #[async_trait]
@@ -127,11 +129,50 @@ impl<T> Middleware for MyMiddleware<T> {
         &self,
         ctx: &mut InboundContext<Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
     ) -> Result<(), anyhow::Error> {
-        // Process incoming messages
+        // Access the message
+        if let Some(message) = &ctx.message {
+            // Process or modify the message
+        }
+        
+        // Send messages back to client
+        ctx.send_message(RelayMessage::notice("Hello"))?;
+        
+        // Continue to next middleware
+        ctx.next().await
+    }
+
+    async fn process_outbound(
+        &self,
+        ctx: &mut OutboundContext<Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
+    ) -> Result<(), anyhow::Error> {
+        // Filter or modify outgoing messages
+        ctx.next().await
+    }
+
+    async fn on_connect(
+        &self,
+        ctx: &mut ConnectionContext<Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
+    ) -> Result<(), anyhow::Error> {
+        // Handle new connections
+        ctx.next().await
+    }
+
+    async fn on_disconnect(
+        &self,
+        ctx: &mut DisconnectContext<Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
+    ) -> Result<(), anyhow::Error> {
+        // Handle connection cleanup
         ctx.next().await
     }
 }
 ```
+
+Key points:
+- Context objects provide `connection_id`, `state`, `sender`, and `message` fields
+- Use `ctx.send_message()` to send messages back to the client
+- Always call `ctx.next().await` to continue the middleware chain
+- Access connection state via `ctx.state.read().await` or `ctx.state.write().await`
+- See `src/middlewares/` for implementation examples
 
 ### Testing Strategy
 

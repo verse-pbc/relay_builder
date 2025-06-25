@@ -24,18 +24,20 @@ struct MyState {
 }
 
 // Use EventProcessor with your state type
+#[async_trait]
 impl EventProcessor<MyState> for MyProcessor {
     async fn handle_event(
         &self,
         event: Event,
-        connection_id: &str,
-        state: &mut NostrConnectionState<MyState>,
+        custom_state: Arc<tokio::sync::RwLock<MyState>>,
+        context: EventContext<'_>,
     ) -> Result<Vec<StoreCommand>> {
-        // Access custom state via state.custom
-        if state.custom.rate_limit_tokens < 1.0 {
+        // Get write lock to modify state
+        let mut state = custom_state.write().await;
+        if state.rate_limit_tokens < 1.0 {
             return Err(Error::restricted("Rate limited"));
         }
-        state.custom.rate_limit_tokens -= 1.0;
+        state.rate_limit_tokens -= 1.0;
         // ... rest of logic
     }
 }
@@ -68,13 +70,14 @@ impl EventProcessor for PrivateRelayProcessor {
     async fn handle_event(
         &self,
         event: Event,
-        state: &mut NostrConnectionState,
+        _custom_state: Arc<tokio::sync::RwLock<()>>,
+        context: EventContext<'_>,
     ) -> Result<Vec<StoreCommand>> {
         // Simple business logic
         if self.allowed_pubkeys.contains(&event.pubkey) {
             Ok(vec![StoreCommand::SaveSignedEvent(
                 Box::new(event),
-                state.subdomain().clone(),
+                context.subdomain.clone(),
             )])
         } else {
             Ok(vec![]) // Reject silently
@@ -132,21 +135,26 @@ pub struct RateLimitMiddleware {
 }
 
 #[async_trait]
-impl Middleware for RateLimitMiddleware {
-    type State = NostrConnectionState;
+impl<T> Middleware for RateLimitMiddleware<T>
+where
+    T: Send + Sync + std::fmt::Debug + 'static,
+{
+    type State = NostrConnectionState<T>;
     type IncomingMessage = ClientMessage<'static>;
     type OutgoingMessage = RelayMessage<'static>;
 
     async fn process_inbound(
         &self,
-        mut ctx: MiddlewareContext<Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
-    ) -> Result<MiddlewareContext<Self::State, Self::IncomingMessage, Self::OutgoingMessage>> {
+        ctx: &mut InboundContext<Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
+    ) -> Result<(), anyhow::Error> {
         if let Some(ClientMessage::Event(_)) = &ctx.message {
-            // Check rate limit
-            if self.exceeds_rate_limit(&ctx.state) {
-                ctx.message = None; // Drop the message
-                ctx.send(RelayMessage::notice("rate limit exceeded")).await?;
-                return Ok(ctx); // Don't call next()
+            // Check rate limit (accessing state requires read lock)
+            let state = ctx.state.read().await;
+            if self.exceeds_rate_limit(&*state) {
+                // Drop the message and send notice
+                ctx.message = None;
+                ctx.send_message(RelayMessage::notice("rate limit exceeded")).await?;
+                return Ok(()); // Don't call next()
             }
         }
         
@@ -165,7 +173,7 @@ impl Middleware for RateLimitMiddleware {
 | **Protocol Knowledge** | Minimal required | Must understand Nostr protocol |
 | **Subscription Handling** | Automatic | Manual |
 | **Database Access** | Via StoreCommand returns | Direct access if needed |
-| **Message Types** | Mainly EVENT, some others | All message types |
+| **Message Types** | All types via handle_message | All message types |
 | **Chainable** | No - always terminal | Yes - can have many |
 | **Use Cases** | Relay business logic | Protocol extensions, filtering |
 
@@ -201,7 +209,8 @@ Database
 1. Keep it focused on business logic
 2. Don't worry about protocol details
 3. Return appropriate `StoreCommand`s
-4. Use connection state for session data
+4. For `can_see_event` (sync method), use `blocking_read()` or `blocking_write()` on the Arc<RwLock<T>>
+5. For `handle_event` (async method), use `read().await` or `write().await` on the Arc<RwLock<T>>
 
 ### For Middleware:
 1. Always call `ctx.next()` unless you're consuming the message
@@ -217,9 +226,14 @@ Database
 struct PublicRelay;
 
 impl EventProcessor for PublicRelay {
-    async fn handle_event(&self, event: Event, state: &mut NostrConnectionState) -> Result<Vec<StoreCommand>> {
+    async fn handle_event(
+        &self,
+        event: Event,
+        _custom_state: Arc<tokio::sync::RwLock<()>>,
+        context: EventContext<'_>,
+    ) -> Result<Vec<StoreCommand>> {
         // Accept everything
-        Ok(vec![StoreCommand::SaveSignedEvent(Box::new(event), state.subdomain().clone())])
+        Ok(vec![StoreCommand::SaveSignedEvent(Box::new(event), context.subdomain.clone())])
     }
 }
 ```
@@ -230,9 +244,14 @@ impl EventProcessor for PublicRelay {
 struct AuthenticatedRelay;
 
 impl EventProcessor for AuthenticatedRelay {
-    async fn handle_event(&self, event: Event, state: &mut NostrConnectionState) -> Result<Vec<StoreCommand>> {
-        if state.authed_pubkey.is_some() {
-            Ok(vec![StoreCommand::SaveSignedEvent(Box::new(event), state.subdomain().clone())])
+    async fn handle_event(
+        &self,
+        event: Event,
+        _custom_state: Arc<tokio::sync::RwLock<()>>,
+        context: EventContext<'_>,
+    ) -> Result<Vec<StoreCommand>> {
+        if context.authed_pubkey.is_some() {
+            Ok(vec![StoreCommand::SaveSignedEvent(Box::new(event), context.subdomain.clone())])
         } else {
             Ok(vec![]) // Reject unauthenticated
         }
@@ -245,8 +264,22 @@ impl EventProcessor for AuthenticatedRelay {
 // Middleware for a hypothetical NIP that adds custom tags
 struct CustomNipMiddleware;
 
-impl Middleware for CustomNipMiddleware {
-    // ... implement custom protocol logic
+#[async_trait]
+impl<T> Middleware for CustomNipMiddleware
+where
+    T: Send + Sync + std::fmt::Debug + 'static,
+{
+    type State = NostrConnectionState<T>;
+    type IncomingMessage = ClientMessage<'static>;
+    type OutgoingMessage = RelayMessage<'static>;
+
+    async fn process_inbound(
+        &self,
+        ctx: &mut InboundContext<Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
+    ) -> Result<(), anyhow::Error> {
+        // Custom protocol logic here
+        ctx.next().await
+    }
 }
 ```
 
@@ -279,7 +312,8 @@ impl EventProcessor for MyProcessor {
     async fn handle_event(
         &self,
         event: Event,
-        state: &mut NostrConnectionState,
+        _custom_state: Arc<tokio::sync::RwLock<()>>,
+        context: EventContext<'_>,
     ) -> Result<Vec<StoreCommand>> {
         // ...
     }
@@ -290,10 +324,11 @@ impl EventProcessor<MyCustomState> for MyProcessor {
     async fn handle_event(
         &self,
         event: Event,
-        connection_id: &str,  // New parameter
-        state: &mut NostrConnectionState<MyCustomState>,  // Generic state
+        custom_state: Arc<tokio::sync::RwLock<MyCustomState>>,  // Typed state
+        context: EventContext<'_>,
     ) -> Result<Vec<StoreCommand>> {
-        // Access custom state via state.custom
+        // Access custom state through Arc<RwLock<T>>
+        let mut state = custom_state.write().await;
         // ...
     }
 }
@@ -305,8 +340,7 @@ impl EventProcessor<MyCustomState> for MyProcessor {
 let builder = RelayBuilder::new(config);
 
 // After
-let builder = RelayBuilder::<MyCustomState>::new(config)
-    .with_state_factory(|| MyCustomState::default());
+let builder = RelayBuilder::<MyCustomState>::new(config);
 ```
 
 ### Backward Compatibility
