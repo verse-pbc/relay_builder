@@ -119,7 +119,11 @@ async fn main() -> Result<()> {
     println!();
     println!("Try sending events with spam words to see them rejected!");
 
-    axum::serve(listener, app.into_make_service()).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }

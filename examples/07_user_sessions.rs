@@ -127,7 +127,11 @@ async fn main() -> Result<()> {
     println!();
     println!("Watch the logs to see session statistics!");
 
-    axum::serve(listener, app.into_make_service()).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }

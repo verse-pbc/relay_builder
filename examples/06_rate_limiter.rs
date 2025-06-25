@@ -147,7 +147,11 @@ async fn main() -> Result<()> {
     println!("  - Consider different limits for different event kinds");
     println!("  - Possibly use per-IP or per-pubkey limits");
 
-    axum::serve(listener, app.into_make_service()).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }

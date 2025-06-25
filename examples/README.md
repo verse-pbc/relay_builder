@@ -17,7 +17,7 @@ Learn the basics with the simplest possible relay.
 
 **Library Features:**
 - `RelayBuilder::new(config)` - Create a builder
-- `RelayConfig::new(url, db_path, keys)` - Basic configuration
+- `RelayConfig::new(url, db_path, keys)` - Basic configuration (path or database instance)
 - `.with_relay_info()` - NIP-11 relay information
 - `.build_axum()` - Build for Axum framework
 - Default middlewares (logger, error handler, signature verifier)
@@ -87,7 +87,7 @@ Enable NIP-42 authentication with one configuration line.
 Add support for deletion, expiration, and protected events.
 
 **Library Features:**
-- `config.create_database()` - Database for NIP-09
+- `config.create_database()` - Database and sender for NIP-09 (returns tuple)
 - `.with_middleware(Nip09Middleware)` - Event deletion (NIP-09)
 - `.with_middleware(Nip40ExpirationMiddleware)` - Event expiration (NIP-40)
 - `.with_middleware(Nip70Middleware)` - Protected events (NIP-70)
@@ -208,7 +208,7 @@ RelayBuilder::new(config)
 
 ### RelayConfig Methods
 ```rust
-RelayConfig::new(url, db_path, keys)
+RelayConfig::new(url, db_path, keys)    // db_path can be String or Arc<RelayDatabase>
     .with_subdomains_from_url(url)      // Parse subdomains
     .with_auth(AuthConfig {...})         // Auth settings
     .with_websocket_config(config)       // Connection config

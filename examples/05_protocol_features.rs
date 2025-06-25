@@ -11,7 +11,7 @@ use anyhow::Result;
 use axum::{routing::get, Router};
 use nostr_relay_builder::{
     CryptoWorker, Nip09Middleware, Nip40ExpirationMiddleware, Nip70Middleware, RelayBuilder,
-    RelayConfig, RelayInfo,
+    RelayConfig, RelayDatabase, RelayInfo,
 };
 use nostr_sdk::prelude::*;
 use std::net::SocketAddr;
@@ -23,10 +23,21 @@ async fn main() -> Result<()> {
     // Initialize logging
     tracing_subscriber::fmt::init();
 
-    // Create relay configuration
+    // Create relay configuration with shared database
     let relay_url = "ws://localhost:8080";
     let keys = Keys::generate();
-    let config = RelayConfig::new(relay_url, "./protocol_features.db", keys);
+
+    // Create crypto worker and database (required for NIP-09)
+    let task_tracker = TaskTracker::new();
+    let crypto_sender = CryptoWorker::spawn(Arc::new(keys.clone()), &task_tracker);
+    let (database, _db_sender) = RelayDatabase::with_task_tracker(
+        "./protocol_features.db",
+        crypto_sender,
+        task_tracker.clone(),
+    )?;
+    let database = Arc::new(database);
+
+    let config = RelayConfig::new(relay_url, database.clone(), keys);
 
     // Relay information for NIP-11
     let relay_info = RelayInfo {
@@ -39,11 +50,6 @@ async fn main() -> Result<()> {
         version: env!("CARGO_PKG_VERSION").to_string(),
         icon: None,
     };
-
-    // Create crypto worker and database (required for NIP-09)
-    let task_tracker = TaskTracker::new();
-    let crypto_sender = CryptoWorker::spawn(Arc::new(config.keys.clone()), &task_tracker);
-    let database = config.create_database(crypto_sender)?;
 
     // Build relay with protocol middleware
     // Note: Middleware order matters! They process in the order added
@@ -82,7 +88,11 @@ async fn main() -> Result<()> {
     println!("  2. Delete an event by sending kind:5 with e-tag");
     println!("  3. Send a protected event and try to read without auth");
 
-    axum::serve(listener, app.into_make_service()).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }

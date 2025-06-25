@@ -98,7 +98,11 @@ async fn main() -> Result<()> {
     println!("  2. Connect to ws://alice.relay.example.com:8080");
     println!("  3. Events are automatically isolated!");
 
-    axum::serve(listener, app.into_make_service()).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }

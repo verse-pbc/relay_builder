@@ -38,21 +38,21 @@ fn bench_write_throughput(c: &mut Criterion) {
                     let keys = Arc::new(Keys::generate());
                     let task_tracker = TaskTracker::new();
                     let crypto_sender = CryptoWorker::spawn(keys.clone(), &task_tracker);
-                    let database = Arc::new(
-                        RelayDatabase::new(&db_path, crypto_sender)
-                            .expect("Failed to create database"),
-                    );
+                    let (database, db_sender) = RelayDatabase::new(&db_path, crypto_sender)
+                        .expect("Failed to create database");
+                    let database = Arc::new(database);
 
                     // Send events
                     for i in 0..count {
                         let event = generate_event(i).await;
-                        database
+                        db_sender
                             .save_signed_event(event, nostr_lmdb::Scope::Default)
                             .await
                             .expect("Failed to save event");
                     }
 
-                    // Ensure all events are persisted
+                    // Drop sender and ensure all events are persisted
+                    drop(db_sender);
                     Arc::try_unwrap(database)
                         .expect("Failed to unwrap Arc")
                         .shutdown()
@@ -88,17 +88,18 @@ fn bench_backpressure(c: &mut Criterion) {
             let keys = Arc::new(Keys::generate());
             let task_tracker = TaskTracker::new();
             let crypto_sender = CryptoWorker::spawn(keys.clone(), &task_tracker);
-            let database = Arc::new(
-                RelayDatabase::new(&db_path, crypto_sender).expect("Failed to create database"),
-            );
+            let (database, db_sender) =
+                RelayDatabase::new(&db_path, crypto_sender).expect("Failed to create database");
+            let database = Arc::new(database);
 
             // Send many events rapidly to trigger backpressure
             let mut handles = vec![];
             for i in 0..event_count {
-                let db = database.clone();
+                let sender = db_sender.clone();
                 let handle = tokio::spawn(async move {
                     let event = generate_event(i).await;
-                    db.save_signed_event(event, nostr_lmdb::Scope::Default)
+                    sender
+                        .save_signed_event(event, nostr_lmdb::Scope::Default)
                         .await
                         .expect("Failed to save event");
                 });
@@ -111,6 +112,7 @@ fn bench_backpressure(c: &mut Criterion) {
             }
 
             // Shutdown
+            drop(db_sender);
             Arc::try_unwrap(database)
                 .expect("Failed to unwrap Arc")
                 .shutdown()

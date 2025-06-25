@@ -1,6 +1,5 @@
 //! NIP-09: Event Deletion middleware
 
-use crate::database::RelayDatabase;
 use crate::error::Error;
 use crate::state::NostrConnectionState;
 use crate::subscription_service::StoreCommand;
@@ -16,13 +15,17 @@ use websocket_builder::{InboundContext, Middleware, OutboundContext, SendMessage
 /// This middleware handles deletion requests (kind 5 events) and removes
 /// events from the database when the deletion request is from the same
 /// pubkey that created the original event.
-#[derive(Debug)]
+///
+/// Note: This middleware requires a database for read operations to check
+/// event ownership, but uses DatabaseSender from NostrConnectionState for
+/// write operations.
+#[derive(Debug, Clone)]
 pub struct Nip09Middleware {
-    database: Arc<RelayDatabase>,
+    database: Arc<crate::database::RelayDatabase>,
 }
 
 impl Nip09Middleware {
-    pub fn new(database: Arc<RelayDatabase>) -> Self {
+    pub fn new(database: Arc<crate::database::RelayDatabase>) -> Self {
         Self { database }
     }
 
@@ -43,8 +46,13 @@ impl Nip09Middleware {
             event.id
         );
 
-        // First save the deletion request event itself
-        self.database
+        // First save the deletion request event itself using the DatabaseSender from state
+        let db_sender = state
+            .db_sender
+            .as_ref()
+            .ok_or_else(|| Error::internal("DatabaseSender not available in state"))?;
+
+        db_sender
             .save_signed_event(event.clone(), state.subdomain().clone())
             .await?;
 
@@ -99,7 +107,12 @@ impl Nip09Middleware {
                         let delete_command =
                             StoreCommand::DeleteEvents(filter, state.subdomain().clone());
 
-                        state.save_and_broadcast(delete_command).await?
+                        // Use DatabaseSender directly for deletion
+                        let db_sender = state
+                            .db_sender
+                            .as_ref()
+                            .ok_or_else(|| Error::internal("DatabaseSender not available"))?;
+                        db_sender.send(delete_command).await?
                     } else {
                         debug!(
                             target: "nip09",
@@ -145,7 +158,12 @@ impl Nip09Middleware {
                         let delete_command =
                             StoreCommand::DeleteEvents(filter, state.subdomain().clone());
 
-                        state.save_and_broadcast(delete_command).await?
+                        // Use DatabaseSender directly for deletion
+                        let db_sender = state
+                            .db_sender
+                            .as_ref()
+                            .ok_or_else(|| Error::internal("DatabaseSender not available"))?;
+                        db_sender.send(delete_command).await?
                     } else {
                         debug!(
                             target: "nip09",
@@ -220,7 +238,7 @@ mod tests {
     use super::*;
     use crate::test_utils::{
         create_test_event, create_test_inbound_context,
-        create_test_state_with_subscription_service, setup_test,
+        create_test_state_with_subscription_service_and_sender, setup_test_with_sender,
     };
     use nostr_lmdb::Scope;
     use std::borrow::Cow;
@@ -230,25 +248,27 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_event_with_matching_pubkey() {
-        let (_tmp_dir, database, keys) = setup_test().await;
+        let (_tmp_dir, database, db_sender, keys) = setup_test_with_sender().await;
         let middleware = Nip09Middleware::new(database.clone());
 
         // Create and save an event
         let event_to_delete = create_test_event(&keys, 1, vec![]).await;
-        database
-            .save_signed_event(event_to_delete.clone(), Scope::Default)
+        db_sender
+            .save_signed_event_sync(event_to_delete.clone(), Scope::Default)
             .await
             .unwrap();
-
-        sleep(Duration::from_millis(30)).await;
 
         // Create deletion request
         let deletion_request =
             create_test_event(&keys, 5, vec![Tag::event(event_to_delete.id)]).await;
 
         // Process deletion request
-        let (state, _rx) =
-            create_test_state_with_subscription_service(None, database.clone()).await;
+        let (state, _rx) = create_test_state_with_subscription_service_and_sender(
+            None,
+            database.clone(),
+            db_sender.clone(),
+        )
+        .await;
         let mut ctx = create_test_inbound_context(
             "test".to_string(),
             Some(ClientMessage::Event(Cow::Owned(deletion_request.clone()))),
@@ -261,7 +281,7 @@ mod tests {
         middleware.process_inbound(&mut ctx).await.unwrap();
 
         // Verify event is deleted
-        sleep(Duration::from_millis(30)).await; // Give time for async deletion
+        sleep(Duration::from_millis(300)).await; // Give time for async deletion
         let filter = Filter::new().id(event_to_delete.id);
         let events = database.query(vec![filter], &Scope::Default).await.unwrap();
         assert!(events.is_empty(), "Event should have been deleted");
@@ -274,14 +294,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_event_with_different_pubkey() {
-        let (_tmp_dir, database, keys1) = setup_test().await;
+        let (_tmp_dir, database, db_sender, keys1) = setup_test_with_sender().await;
         let keys2 = Keys::generate();
         let middleware = Nip09Middleware::new(database.clone());
 
         // Create and save an event from keys2
         let event_to_delete = create_test_event(&keys2, 1, vec![]).await;
-        database
-            .save_signed_event(event_to_delete.clone(), Scope::Default)
+        db_sender
+            .save_signed_event_sync(event_to_delete.clone(), Scope::Default)
             .await
             .unwrap();
 
@@ -290,8 +310,12 @@ mod tests {
             create_test_event(&keys1, 5, vec![Tag::event(event_to_delete.id)]).await;
 
         // Process deletion request
-        let (state, _rx) =
-            create_test_state_with_subscription_service(None, database.clone()).await;
+        let (state, _rx) = create_test_state_with_subscription_service_and_sender(
+            None,
+            database.clone(),
+            db_sender.clone(),
+        )
+        .await;
         let mut ctx = create_test_inbound_context(
             "test".to_string(),
             Some(ClientMessage::Event(Cow::Owned(deletion_request.clone()))),
@@ -304,7 +328,7 @@ mod tests {
         middleware.process_inbound(&mut ctx).await.unwrap();
 
         // Verify event is not deleted
-        sleep(Duration::from_millis(30)).await;
+        sleep(Duration::from_millis(100)).await;
         let filter = Filter::new().id(event_to_delete.id);
         let events = database.query(vec![filter], &Scope::Default).await.unwrap();
         assert_eq!(events.len(), 1, "Event should not have been deleted");
@@ -312,7 +336,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_replaceable_event() {
-        let (_tmp_dir, database, keys) = setup_test().await;
+        let (_tmp_dir, database, db_sender, keys) = setup_test_with_sender().await;
         let middleware = Nip09Middleware::new(database.clone());
 
         // Create and save a replaceable event with a 'd' tag
@@ -322,8 +346,8 @@ mod tests {
             vec![Tag::parse(vec!["d", "test"]).unwrap()],
         )
         .await;
-        database
-            .save_signed_event(replaceable_event.clone(), Scope::Default)
+        db_sender
+            .save_signed_event_sync(replaceable_event.clone(), Scope::Default)
             .await
             .unwrap();
 
@@ -333,8 +357,12 @@ mod tests {
             create_test_event(&keys, 5, vec![Tag::parse(vec!["a", &addr]).unwrap()]).await;
 
         // Process deletion request
-        let (state, _rx) =
-            create_test_state_with_subscription_service(None, database.clone()).await;
+        let (state, _rx) = create_test_state_with_subscription_service_and_sender(
+            None,
+            database.clone(),
+            db_sender.clone(),
+        )
+        .await;
         let mut ctx = create_test_inbound_context(
             "test".to_string(),
             Some(ClientMessage::Event(Cow::Owned(deletion_request.clone()))),
@@ -358,21 +386,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_inbound_with_identifier_tag() {
-        let (_tmp_dir, database, keys) = setup_test().await;
+        let (_tmp_dir, database, db_sender, keys) = setup_test_with_sender().await;
         let middleware = Nip09Middleware::new(database.clone());
 
         // Create and save an event with a 'd' tag
         let event = create_test_event(&keys, 5, vec![Tag::parse(vec!["d", "test"]).unwrap()]).await;
-        database
-            .save_signed_event(event.clone(), Scope::Default)
+        db_sender
+            .save_signed_event_sync(event.clone(), Scope::Default)
             .await
             .unwrap();
 
-        sleep(Duration::from_millis(30)).await;
-
         // Process the event
-        let (state, _rx) =
-            create_test_state_with_subscription_service(None, database.clone()).await;
+        let (state, _rx) = create_test_state_with_subscription_service_and_sender(
+            None,
+            database.clone(),
+            db_sender.clone(),
+        )
+        .await;
         let mut ctx = create_test_inbound_context(
             "test".to_string(),
             Some(ClientMessage::Event(Cow::Owned(event.clone()))),
@@ -392,26 +422,28 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_inbound_with_address_tag() {
-        let (_tmp_dir, database, keys) = setup_test().await;
+        let (_tmp_dir, database, db_sender, keys) = setup_test_with_sender().await;
         let middleware = Nip09Middleware::new(database.clone());
 
         // Create and save a replaceable event first
         let replaceable_event =
             create_test_event(&keys, 10002, vec![Tag::parse(vec!["d", "test"]).unwrap()]).await;
-        database
-            .save_signed_event(replaceable_event.clone(), Scope::Default)
+        db_sender
+            .save_signed_event_sync(replaceable_event.clone(), Scope::Default)
             .await
             .unwrap();
-
-        sleep(Duration::from_millis(30)).await;
 
         // Create and process deletion event with 'a' tag
         let addr = format!("10002:{}:test", keys.public_key());
         let deletion_event =
             create_test_event(&keys, 5, vec![Tag::parse(vec!["a", &addr]).unwrap()]).await;
 
-        let (state, _rx) =
-            create_test_state_with_subscription_service(None, database.clone()).await;
+        let (state, _rx) = create_test_state_with_subscription_service_and_sender(
+            None,
+            database.clone(),
+            db_sender.clone(),
+        )
+        .await;
         let mut ctx = create_test_inbound_context(
             "test".to_string(),
             Some(ClientMessage::Event(Cow::Owned(deletion_event.clone()))),
@@ -423,7 +455,7 @@ mod tests {
 
         middleware.process_inbound(&mut ctx).await.unwrap();
 
-        sleep(Duration::from_millis(30)).await;
+        sleep(Duration::from_millis(300)).await;
 
         // Verify deletion event is saved
         let filter = Filter::new().id(deletion_event.id);

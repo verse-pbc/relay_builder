@@ -101,23 +101,35 @@ async fn main() -> Result<()> {
     println!("  - Custom ValidationMiddleware");
     println!("  - SampledMetricsHandler");
 
+    // Close task tracker early - no new tasks will be spawned
+    task_tracker.close();
+
     // Graceful shutdown handler
-    let shutdown_handle = tokio::spawn(async move {
+    let shutdown_signal = async move {
         tokio::signal::ctrl_c().await.unwrap();
         println!("\n⏹️  Shutting down gracefully...");
         shutdown_token.cancel();
-    });
+    };
 
     // Run server
-    axum::serve(listener, app.into_make_service())
-        .with_graceful_shutdown(async move {
-            shutdown_handle.await.ok();
-        })
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal)
+    .await?;
 
-    // Wait for all tasks to complete
+    // At this point, the app and all its handlers should be dropped
+    // The service Arc was moved into the handler, so it will be dropped
+    // when the server shuts down and the handler is dropped
+
+    // Note: The database will show a warning about not calling shutdown()
+    // This is a known limitation - the RelayService doesn't expose a shutdown method
+    // In production, you might want to modify the library to add proper shutdown support
+
     println!("⏳ Waiting for background tasks to complete...");
     task_tracker.wait().await;
+
     println!("✅ Shutdown complete");
 
     Ok(())

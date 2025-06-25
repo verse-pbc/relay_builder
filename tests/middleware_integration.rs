@@ -116,8 +116,8 @@ mod tests {
         let keys = Keys::generate();
         let task_tracker = TaskTracker::new();
         let crypto_sender = CryptoWorker::spawn(Arc::new(keys.clone()), &task_tracker);
-        let database = Arc::new(RelayDatabase::new(db_path, crypto_sender).unwrap());
-        (database, keys, tmp_dir)
+        let (database, _db_sender) = RelayDatabase::new(db_path, crypto_sender).unwrap();
+        (Arc::new(database), keys, tmp_dir)
     }
 
     #[tokio::test]

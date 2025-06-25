@@ -1,4 +1,4 @@
-use crate::database::RelayDatabase;
+use crate::database::{DatabaseSender, RelayDatabase};
 use crate::state::NostrConnectionState;
 use crate::subscription_service::SubscriptionService;
 use flume;
@@ -19,8 +19,21 @@ pub async fn setup_test() -> (TempDir, Arc<RelayDatabase>, Keys) {
     let task_tracker = TaskTracker::new();
     let crypto_sender =
         crate::crypto_worker::CryptoWorker::spawn(Arc::new(keys.clone()), &task_tracker);
-    let database = Arc::new(RelayDatabase::new(db_path.to_str().unwrap(), crypto_sender).unwrap());
-    (tmp_dir, database, keys)
+    let (database, _db_sender) =
+        RelayDatabase::new(db_path.to_str().unwrap(), crypto_sender).unwrap();
+    (tmp_dir, Arc::new(database), keys)
+}
+
+pub async fn setup_test_with_sender() -> (TempDir, Arc<RelayDatabase>, DatabaseSender, Keys) {
+    let tmp_dir = TempDir::new().unwrap();
+    let db_path = tmp_dir.path().join("test.db");
+    let keys = Keys::generate();
+    let task_tracker = TaskTracker::new();
+    let crypto_sender =
+        crate::crypto_worker::CryptoWorker::spawn(Arc::new(keys.clone()), &task_tracker);
+    let (database, db_sender) =
+        RelayDatabase::new(db_path.to_str().unwrap(), crypto_sender).unwrap();
+    (tmp_dir, Arc::new(database), db_sender, keys)
 }
 
 pub async fn create_test_keys() -> (Keys, Keys, Keys) {
@@ -60,13 +73,43 @@ pub async fn create_test_state_with_subscription_service(
     let (tx, rx) = flume::bounded(10);
     let sender = MessageSender::new(tx, 0);
 
-    let subscription_service = SubscriptionService::new(database, sender)
+    // Create a db_sender for testing
+    let (_tmp, _db, db_sender, _keys) = setup_test_with_sender().await;
+
+    let subscription_service = SubscriptionService::new(database, db_sender.clone(), sender)
         .await
         .expect("Failed to create subscription service");
 
     let mut state = NostrConnectionState::new("ws://test.relay".to_string())
         .expect("Failed to create test state");
     state.authed_pubkey = pubkey;
+    state.db_sender = Some(db_sender);
+
+    // Use the test method to add the subscription service
+    state.set_subscription_service(subscription_service);
+
+    (state, rx)
+}
+
+pub async fn create_test_state_with_subscription_service_and_sender(
+    pubkey: Option<nostr_sdk::PublicKey>,
+    database: Arc<RelayDatabase>,
+    db_sender: DatabaseSender,
+) -> (
+    NostrConnectionState,
+    flume::Receiver<(RelayMessage<'static>, usize)>,
+) {
+    let (tx, rx) = flume::bounded(10);
+    let sender = MessageSender::new(tx, 0);
+
+    let subscription_service = SubscriptionService::new(database, db_sender.clone(), sender)
+        .await
+        .expect("Failed to create subscription service");
+
+    let mut state = NostrConnectionState::new("ws://test.relay".to_string())
+        .expect("Failed to create test state");
+    state.authed_pubkey = pubkey;
+    state.db_sender = Some(db_sender);
 
     // Use the test method to add the subscription service
     state.set_subscription_service(subscription_service);
