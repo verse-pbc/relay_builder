@@ -16,9 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Note**: Simple `RelayConfig::new(url, db_path, keys)` API remains unchanged for basic usage
 - **BREAKING**: Updated `NostrConnectionState` to require `db_sender` field for database operations
 - **BREAKING**: Modified connection setup process to pass `DatabaseSender` to middleware
-- **BREAKING**: Changed `EventProcessor::handle_event` to take `Arc<RwLock<T>>` instead of `&mut T`
+- **BREAKING**: Changed `EventProcessor` trait methods to use `Arc<RwLock<T>>` for custom state
+  - `handle_event`, `verify_filters`, and `can_see_event` now take `Arc<RwLock<T>>` instead of `&mut T` or `&T`
   - Allows processors to choose between read-only or write access to custom state
   - Eliminates performance penalty when state doesn't need to be modified
+  - Enables better concurrent access patterns with reduced lock contention
 - Renamed `middleware.rs` to `relay_middleware.rs` for better clarity
 - Consolidated `NostrConnectionFactory` and `GenericNostrConnectionFactory` into a single implementation
   - `NostrConnectionFactory` now handles both Default and custom state factory scenarios
@@ -39,10 +41,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added missing `on_disconnect` implementation to `RelayMiddleware`
   - Ensures proper cleanup of subscription counters when connections are dropped
 
+### Performance
+- Removed `event_start_time` and `event_kind` fields from `NostrConnectionState`
+  - Metrics middleware now tracks its own timing state internally
+  - Reduces unnecessary state mutations and write lock requirements
+- Optimized `handle_subscription` to use read locks instead of write locks
+- Direct `Arc<RwLock<T>>` passing eliminates double-wrapping overhead in custom state management
+
 ### Internal
 - Added tokio tracing and console-subscriber dependencies for debugging
 - Updated all examples and benchmarks to use new `DatabaseSender` interface
 - Enhanced CI workflow to use correct example names
+- Marked `test_drop_completes_pending_work` as ignored due to LMDB limitation
+  - LMDB doesn't allow reopening the same database file in the same process
 
 ## [0.3.0] - 2025-06-24
 

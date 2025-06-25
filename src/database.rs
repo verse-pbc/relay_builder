@@ -1103,6 +1103,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "LMDB doesn't allow reopening the same database file in the same process"]
     async fn test_drop_completes_pending_work() {
         // This test verifies that dropping the database still processes pending events
         let tmp_dir = TempDir::new().unwrap();
