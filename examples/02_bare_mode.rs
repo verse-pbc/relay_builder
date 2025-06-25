@@ -29,7 +29,7 @@ impl EventProcessor for SimpleProcessor {
     async fn handle_event(
         &self,
         event: Event,
-        _custom_state: &mut (),
+        _custom_state: Arc<tokio::sync::RwLock<()>>,
         context: EventContext<'_>,
     ) -> Result<Vec<StoreCommand>, Error> {
         info!(

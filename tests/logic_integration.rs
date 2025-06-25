@@ -5,6 +5,7 @@ use nostr_relay_builder::{
     Error, EventContext, EventProcessor, NostrConnectionState, StoreCommand,
 };
 use nostr_sdk::prelude::*;
+use std::sync::Arc;
 
 /// Basic public event processor implementation for testing
 #[derive(Debug, Clone)]
@@ -15,7 +16,7 @@ impl EventProcessor for PublicEventProcessor {
     async fn handle_event(
         &self,
         event: Event,
-        _custom_state: &mut (),
+        _custom_state: Arc<tokio::sync::RwLock<()>>,
         context: EventContext<'_>,
     ) -> Result<Vec<StoreCommand>, Error> {
         // Public relay accepts all events
@@ -35,7 +36,7 @@ impl EventProcessor for AuthRequiredEventProcessor {
     async fn handle_event(
         &self,
         event: Event,
-        _custom_state: &mut (),
+        _custom_state: Arc<tokio::sync::RwLock<()>>,
         context: EventContext<'_>,
     ) -> Result<Vec<StoreCommand>, Error> {
         // Only accept events from authenticated users
@@ -93,7 +94,11 @@ async fn test_public_event_processor() {
 
     // Test event handling - should accept all events
     let result = processor
-        .handle_event(event.clone(), &mut (), context)
+        .handle_event(
+            event.clone(),
+            Arc::new(tokio::sync::RwLock::new(())),
+            context,
+        )
         .await;
     assert!(result.is_ok());
     let commands = result.unwrap();
@@ -130,7 +135,11 @@ async fn test_auth_required_event_processor() {
     };
 
     let result = processor
-        .handle_event(event.clone(), &mut (), context)
+        .handle_event(
+            event.clone(),
+            Arc::new(tokio::sync::RwLock::new(())),
+            context,
+        )
         .await;
     assert!(result.is_err());
     assert!(matches!(result.unwrap_err(), Error::AuthRequired { .. }));
@@ -153,7 +162,11 @@ async fn test_auth_required_event_processor() {
     };
 
     let result = processor
-        .handle_event(event.clone(), &mut (), auth_context)
+        .handle_event(
+            event.clone(),
+            Arc::new(tokio::sync::RwLock::new(())),
+            auth_context,
+        )
         .await;
     assert!(result.is_ok());
     let commands = result.unwrap();
@@ -177,7 +190,7 @@ impl EventProcessor for FilteringProcessor {
     async fn handle_event(
         &self,
         event: Event,
-        _custom_state: &mut (),
+        _custom_state: Arc<tokio::sync::RwLock<()>>,
         context: EventContext<'_>,
     ) -> Result<Vec<StoreCommand>, Error> {
         // Check if event contains blocked keywords
@@ -233,7 +246,11 @@ async fn test_filtering_processor() {
         .await
         .unwrap();
     let result = processor
-        .handle_event(clean_event.clone(), &mut (), context)
+        .handle_event(
+            clean_event.clone(),
+            Arc::new(tokio::sync::RwLock::new(())),
+            context,
+        )
         .await;
     assert!(result.is_ok());
 
@@ -246,7 +263,11 @@ async fn test_filtering_processor() {
         .await
         .unwrap();
     let result = processor
-        .handle_event(spam_event.clone(), &mut (), context)
+        .handle_event(
+            spam_event.clone(),
+            Arc::new(tokio::sync::RwLock::new(())),
+            context,
+        )
         .await;
     assert!(result.is_err());
 

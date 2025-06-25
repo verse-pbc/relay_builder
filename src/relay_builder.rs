@@ -83,7 +83,7 @@ impl std::fmt::Debug for HtmlOption {
 /// #     async fn handle_event(
 /// #         &self,
 /// #         event: nostr_sdk::Event,
-/// #         custom_state: &mut MyState,
+/// #         custom_state: std::sync::Arc<tokio::sync::RwLock<MyState>>,
 /// #         context: EventContext<'_>,
 /// #     ) -> Result<Vec<nostr_relay_builder::StoreCommand>, nostr_relay_builder::Error> {
 /// #         Ok(vec![])
@@ -549,7 +549,7 @@ where
             async fn handle_event(
                 &self,
                 event: Event,
-                custom_state: &mut T,
+                custom_state: Arc<tokio::sync::RwLock<T>>,
                 context: EventContext<'_>,
             ) -> Result<Vec<crate::subscription_service::StoreCommand>, Error> {
                 self.0.handle_event(event, custom_state, context).await

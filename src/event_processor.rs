@@ -10,6 +10,7 @@ use crate::subscription_service::StoreCommand;
 use async_trait::async_trait;
 use nostr_lmdb::Scope;
 use nostr_sdk::prelude::*;
+use std::sync::Arc;
 use tracing::debug;
 
 /// Minimal context for event visibility checks
@@ -44,6 +45,7 @@ pub struct EventContext<'a> {
 /// use nostr_relay_builder::{EventProcessor, EventContext, StoreCommand};
 /// use nostr_sdk::prelude::*;
 /// use async_trait::async_trait;
+/// use std::sync::Arc;
 ///
 /// #[derive(Debug, Clone, Default)]
 /// struct RateLimitState {
@@ -70,15 +72,18 @@ pub struct EventContext<'a> {
 ///     async fn handle_event(
 ///         &self,
 ///         event: Event,
-///         custom_state: &mut RateLimitState,
+///         custom_state: Arc<tokio::sync::RwLock<RateLimitState>>,
 ///         context: EventContext<'_>,
 ///     ) -> Result<Vec<StoreCommand>, nostr_relay_builder::Error> {
-///         if custom_state.tokens < self.tokens_per_event {
+///         // Get a write lock since we need to modify the rate limit state
+///         let mut state = custom_state.write().await;
+///         
+///         if state.tokens < self.tokens_per_event {
 ///             return Err(nostr_relay_builder::Error::restricted("Rate limit exceeded"));
 ///         }
 ///
-///         custom_state.tokens -= self.tokens_per_event;
-///         custom_state.events_processed += 1;
+///         state.tokens -= self.tokens_per_event;
+///         state.events_processed += 1;
 ///
 ///         Ok(vec![StoreCommand::SaveSignedEvent(
 ///             Box::new(event),
@@ -148,12 +153,12 @@ where
 
     /// Process an incoming event and return database commands.
     ///
-    /// This method handles EVENT messages with direct access to mutable custom state,
-    /// avoiding the overhead of passing full connection state.
+    /// This method handles EVENT messages with access to custom state through Arc<RwLock<T>>,
+    /// allowing the implementor to choose between read-only or write access as needed.
     ///
     /// # Arguments
     /// * `event` - The event to process
-    /// * `custom_state` - Custom per-connection state (mutable)
+    /// * `custom_state` - Custom per-connection state wrapped in Arc<RwLock<T>>
     /// * `context` - Minimal context with auth info
     ///
     /// # Returns
@@ -162,7 +167,7 @@ where
     async fn handle_event(
         &self,
         event: Event,
-        custom_state: &mut T,
+        custom_state: Arc<tokio::sync::RwLock<T>>,
         context: EventContext<'_>,
     ) -> Result<Vec<StoreCommand>> {
         // Default implementation: store all valid events

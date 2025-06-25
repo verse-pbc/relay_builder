@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Note**: Simple `RelayConfig::new(url, db_path, keys)` API remains unchanged for basic usage
 - **BREAKING**: Updated `NostrConnectionState` to require `db_sender` field for database operations
 - **BREAKING**: Modified connection setup process to pass `DatabaseSender` to middleware
+- **BREAKING**: Changed `EventProcessor::handle_event` to take `Arc<RwLock<T>>` instead of `&mut T`
+  - Allows processors to choose between read-only or write access to custom state
+  - Eliminates performance penalty when state doesn't need to be modified
 - Renamed `middleware.rs` to `relay_middleware.rs` for better clarity
 - Consolidated `NostrConnectionFactory` and `GenericNostrConnectionFactory` into a single implementation
   - `NostrConnectionFactory` now handles both Default and custom state factory scenarios

@@ -85,10 +85,18 @@ where
             relay_pubkey: &self.relay_pubkey,
         };
 
+        // Create Arc<RwLock<T>> for the custom state
+        let custom_state_arc = Arc::new(tokio::sync::RwLock::new(connection_state.custom.clone()));
+
         let commands = self
             .processor
-            .handle_event(event.clone(), &mut connection_state.custom, context)
+            .handle_event(event.clone(), custom_state_arc.clone(), context)
             .await?;
+
+        // Update the connection state with any changes made
+        connection_state.custom = Arc::try_unwrap(custom_state_arc)
+            .map(|rwlock| rwlock.into_inner())
+            .unwrap_or_else(|arc| arc.blocking_read().clone());
 
         // Execute database commands via subscription service
         let subscription_service = connection_state

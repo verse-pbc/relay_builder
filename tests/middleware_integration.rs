@@ -26,7 +26,7 @@ impl EventProcessor for TestEventProcessor {
     async fn handle_event(
         &self,
         event: Event,
-        _custom_state: &mut (),
+        _custom_state: Arc<tokio::sync::RwLock<()>>,
         context: EventContext<'_>,
     ) -> Result<Vec<StoreCommand>, Error> {
         if self.allow_all {
@@ -67,7 +67,7 @@ impl EventProcessor for RestrictiveEventProcessor {
     async fn handle_event(
         &self,
         event: Event,
-        _custom_state: &mut (),
+        _custom_state: Arc<tokio::sync::RwLock<()>>,
         context: EventContext<'_>,
     ) -> Result<Vec<StoreCommand>, Error> {
         if context.authed_pubkey.is_some() {

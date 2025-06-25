@@ -14,6 +14,7 @@ use nostr_relay_builder::{
 };
 use nostr_sdk::prelude::*;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 /// Custom state for each connection
 #[derive(Debug, Clone, Default)]
@@ -31,21 +32,24 @@ impl EventProcessor<UserSession> for SessionTrackingProcessor {
     async fn handle_event(
         &self,
         event: Event,
-        custom_state: &mut UserSession, // Mutable access to per-connection state!
+        custom_state: Arc<tokio::sync::RwLock<UserSession>>,
         context: EventContext<'_>,
     ) -> RelayResult<Vec<StoreCommand>> {
+        // Get a write lock since we need to modify the session state
+        let mut state = custom_state.write().await;
+
         // Track first event time
-        if custom_state.first_event_time.is_none() {
-            custom_state.first_event_time = Some(std::time::Instant::now());
+        if state.first_event_time.is_none() {
+            state.first_event_time = Some(std::time::Instant::now());
             tracing::info!("New session started for pubkey: {}", event.pubkey);
         }
 
         // Increment message counter
-        custom_state.messages_sent += 1;
+        state.messages_sent += 1;
 
         // Log session statistics
-        if custom_state.messages_sent % 5 == 0 {
-            let duration = custom_state
+        if state.messages_sent % 5 == 0 {
+            let duration = state
                 .first_event_time
                 .map(|t| t.elapsed().as_secs())
                 .unwrap_or(0);
@@ -53,13 +57,13 @@ impl EventProcessor<UserSession> for SessionTrackingProcessor {
             tracing::info!(
                 "Session stats - Pubkey: {}, Messages: {}, Duration: {}s",
                 event.pubkey,
-                custom_state.messages_sent,
+                state.messages_sent,
                 duration
             );
         }
 
         // Simple spam prevention based on message count
-        if custom_state.messages_sent > 100 {
+        if state.messages_sent > 100 {
             tracing::warn!("User {} exceeded 100 messages in session", event.pubkey);
             return Err(nostr_relay_builder::Error::restricted(
                 "too many messages in this session",

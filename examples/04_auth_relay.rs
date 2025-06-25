@@ -14,6 +14,7 @@ use nostr_relay_builder::{
 };
 use nostr_sdk::prelude::*;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 /// Simple processor that only accepts events from authenticated users
 #[derive(Debug, Clone)]
@@ -24,7 +25,7 @@ impl EventProcessor for AuthRequiredProcessor {
     async fn handle_event(
         &self,
         event: Event,
-        _custom_state: &mut (),
+        _custom_state: Arc<tokio::sync::RwLock<()>>,
         context: EventContext<'_>,
     ) -> RelayResult<Vec<StoreCommand>> {
         // Check if user is authenticated
