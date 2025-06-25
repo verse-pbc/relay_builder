@@ -145,8 +145,8 @@ impl RelayConfig {
     pub fn create_database(
         &self,
         crypto_sender: CryptoSender,
-    ) -> Result<Arc<RelayDatabase>, Error> {
-        self.create_database_with_tracker(crypto_sender, None)
+    ) -> Result<(Arc<RelayDatabase>, crate::database::DatabaseSender), Error> {
+        self.create_database_with_tracker(crypto_sender, None, None)
     }
 
     /// Create database instance from configuration with a provided crypto sender and optional TaskTracker
@@ -154,25 +154,38 @@ impl RelayConfig {
         &self,
         crypto_sender: CryptoSender,
         task_tracker: Option<tokio_util::task::TaskTracker>,
-    ) -> Result<Arc<RelayDatabase>, Error> {
+        cancellation_token: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<(Arc<RelayDatabase>, crate::database::DatabaseSender), Error> {
         match &self.database {
             DatabaseConfig::Path(path) => {
-                if let Some(tracker) = task_tracker {
-                    Ok(Arc::new(RelayDatabase::with_task_tracker(
+                let (database, db_sender) = match (task_tracker, cancellation_token) {
+                    (Some(tracker), Some(token)) => RelayDatabase::with_task_tracker_and_token(
                         path,
                         crypto_sender,
                         tracker,
-                    )?))
-                } else {
-                    Ok(Arc::new(RelayDatabase::with_config(
+                        token,
+                    )?,
+                    (Some(tracker), None) => {
+                        RelayDatabase::with_task_tracker(path, crypto_sender, tracker)?
+                    }
+                    _ => RelayDatabase::with_config(
                         path,
                         crypto_sender,
                         self.websocket_config.max_connections,
                         Some(self.max_subscriptions),
-                    )?))
-                }
+                    )?,
+                };
+                Ok((Arc::new(database), db_sender))
             }
-            DatabaseConfig::Instance(db) => Ok(db.clone()),
+            DatabaseConfig::Instance(_db) => {
+                // For existing instances, we need to create a DatabaseSender
+                // This is a limitation - existing instances won't have write capability
+                // through the actor pattern
+                Err(Error::internal(
+                    "Cannot use existing database instance with actor pattern. \
+                     Please use DatabaseConfig::Path instead.",
+                ))
+            }
         }
     }
 

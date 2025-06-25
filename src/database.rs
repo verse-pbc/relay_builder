@@ -10,14 +10,110 @@ use nostr_lmdb::{NostrLMDB, Scope};
 use nostr_sdk::prelude::*;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, oneshot};
+use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 /// Maximum number of events that can be queued for writing.
 /// This provides backpressure to prevent unbounded memory growth.
 /// When the queue is full, writers will wait until space is available.
 const WRITE_QUEUE_CAPACITY: usize = 10_000;
+
+/// Response handler for database commands - supports both fire-and-forget and synchronous operations
+#[derive(Debug)]
+enum ResponseHandler {
+    /// WebSocket message sender for fire-and-forget client responses (high performance)
+    MessageSender(websocket_builder::MessageSender<RelayMessage<'static>>),
+    /// Oneshot channel for immediate synchronous acknowledgment (tests and critical operations)
+    Oneshot(oneshot::Sender<Result<(), Error>>),
+}
+
+/// Internal command that includes the StoreCommand and optional response handler
+#[derive(Debug)]
+struct CommandWithReply {
+    command: StoreCommand,
+    response_handler: Option<ResponseHandler>,
+}
+
+/// A cloneable sender for database commands following the actor pattern.
+///
+/// This wrapper provides a clean API for sending commands to the database actor
+/// and includes convenience methods for common operations.
+#[derive(Clone, Debug)]
+pub struct DatabaseSender {
+    inner: flume::Sender<CommandWithReply>,
+}
+
+impl DatabaseSender {
+    /// Create a new DatabaseSender wrapping a flume sender
+    fn new(sender: flume::Sender<CommandWithReply>) -> Self {
+        Self { inner: sender }
+    }
+
+    /// Send a store command to the database
+    pub async fn send(&self, command: StoreCommand) -> Result<(), Error> {
+        self.send_with_sender(command, None).await
+    }
+
+    /// Send a store command with an optional message sender for responses (fire-and-forget)
+    pub async fn send_with_sender(
+        &self,
+        command: StoreCommand,
+        message_sender: Option<websocket_builder::MessageSender<RelayMessage<'static>>>,
+    ) -> Result<(), Error> {
+        self.inner
+            .send_async(CommandWithReply {
+                command,
+                response_handler: message_sender.map(ResponseHandler::MessageSender),
+            })
+            .await
+            .map_err(|_| Error::internal("Database shut down"))
+    }
+
+    /// Send a store command synchronously with immediate acknowledgment
+    pub async fn send_sync(&self, command: StoreCommand) -> Result<(), Error> {
+        let (tx, rx) = oneshot::channel();
+
+        self.inner
+            .send_async(CommandWithReply {
+                command,
+                response_handler: Some(ResponseHandler::Oneshot(tx)),
+            })
+            .await
+            .map_err(|_| Error::internal("Database shut down"))?;
+
+        rx.await
+            .map_err(|_| Error::internal("Database response channel closed"))?
+    }
+
+    /// Save a signed event to the database (fire-and-forget)
+    pub async fn save_signed_event(&self, event: Event, scope: Scope) -> Result<(), Error> {
+        self.send(StoreCommand::SaveSignedEvent(Box::new(event), scope))
+            .await
+    }
+
+    /// Save a signed event to the database with immediate acknowledgment (for tests)
+    pub async fn save_signed_event_sync(&self, event: Event, scope: Scope) -> Result<(), Error> {
+        self.send_sync(StoreCommand::SaveSignedEvent(Box::new(event), scope))
+            .await
+    }
+
+    /// Save an unsigned event to the database
+    pub async fn save_unsigned_event(
+        &self,
+        event: UnsignedEvent,
+        scope: Scope,
+    ) -> Result<(), Error> {
+        self.send(StoreCommand::SaveUnsignedEvent(event, scope))
+            .await
+    }
+
+    /// Delete events matching the filter from the database
+    pub async fn delete_events(&self, filter: Filter, scope: Scope) -> Result<(), Error> {
+        self.send(StoreCommand::DeleteEvents(filter, scope)).await
+    }
+}
 
 // Note: LMDB only allows one write transaction at a time, so we use a single worker
 
@@ -30,7 +126,7 @@ const DEFAULT_BROADCAST_CAPACITY: usize = 10_000;
 struct SaveSignedItem {
     event: Box<Event>,
     scope: Scope,
-    message_sender: Option<websocket_builder::MessageSender<RelayMessage<'static>>>,
+    response_handler: Option<ResponseHandler>,
 }
 
 /// Item for the save unsigned event queue
@@ -38,7 +134,7 @@ struct SaveSignedItem {
 struct SaveUnsignedItem {
     event: Box<UnsignedEvent>,
     scope: Scope,
-    message_sender: Option<websocket_builder::MessageSender<RelayMessage<'static>>>,
+    response_handler: Option<ResponseHandler>,
 }
 
 /// Item for the deletion queue
@@ -46,7 +142,7 @@ struct SaveUnsignedItem {
 struct DeleteItem {
     filter: Filter,
     scope: Scope,
-    message_sender: Option<websocket_builder::MessageSender<RelayMessage<'static>>>,
+    response_handler: Option<ResponseHandler>,
 }
 
 /// A Nostr relay database that wraps NostrLMDB with async operations and event broadcasting
@@ -60,9 +156,6 @@ pub struct RelayDatabase {
     save_signed_sender: Option<flume::Sender<SaveSignedItem>>,
     save_unsigned_sender: Option<flume::Sender<SaveUnsignedItem>>,
     delete_sender: Option<flume::Sender<DeleteItem>>,
-
-    /// Task tracker for all worker threads
-    task_tracker: TaskTracker,
 
     /// Queue capacity used for this instance
     queue_capacity: usize,
@@ -165,9 +258,16 @@ impl RelayDatabase {
     /// Send error responses for save items
     fn send_error_responses(items: Vec<SaveSignedItem>, error_msg: String) {
         for item in items {
-            if let Some(mut sender) = item.message_sender {
-                let msg = RelayMessage::ok(item.event.id, false, error_msg.clone());
-                let _ = sender.send_bypass(msg);
+            if let Some(response_handler) = item.response_handler {
+                match response_handler {
+                    ResponseHandler::MessageSender(mut sender) => {
+                        let msg = RelayMessage::ok(item.event.id, false, error_msg.clone());
+                        let _ = sender.send_bypass(msg);
+                    }
+                    ResponseHandler::Oneshot(oneshot_sender) => {
+                        let _ = oneshot_sender.send(Err(Error::internal(error_msg.clone())));
+                    }
+                }
             }
         }
     }
@@ -181,9 +281,16 @@ impl RelayDatabase {
     ) {
         // Send OK responses
         for item in items.into_iter() {
-            if let Some(mut sender) = item.message_sender {
-                let msg = RelayMessage::ok(item.event.id, true, "");
-                let _ = sender.send_bypass(msg);
+            if let Some(response_handler) = item.response_handler {
+                match response_handler {
+                    ResponseHandler::MessageSender(mut sender) => {
+                        let msg = RelayMessage::ok(item.event.id, true, "");
+                        let _ = sender.send_bypass(msg);
+                    }
+                    ResponseHandler::Oneshot(oneshot_sender) => {
+                        let _ = oneshot_sender.send(Ok(()));
+                    }
+                }
             }
         }
 
@@ -258,9 +365,16 @@ impl RelayDatabase {
     /// Send error responses for delete items
     fn send_delete_error_responses(items: Vec<DeleteItem>, error_msg: String) {
         for item in items {
-            if let Some(mut sender) = item.message_sender {
-                let msg = RelayMessage::notice(error_msg.clone());
-                let _ = sender.send_bypass(msg);
+            if let Some(response_handler) = item.response_handler {
+                match response_handler {
+                    ResponseHandler::MessageSender(mut sender) => {
+                        let msg = RelayMessage::notice(error_msg.clone());
+                        let _ = sender.send_bypass(msg);
+                    }
+                    ResponseHandler::Oneshot(oneshot_sender) => {
+                        let _ = oneshot_sender.send(Err(Error::internal(error_msg.clone())));
+                    }
+                }
             }
         }
     }
@@ -268,9 +382,16 @@ impl RelayDatabase {
     /// Send success responses for delete items
     fn send_delete_success_responses(items: Vec<DeleteItem>) {
         for item in items {
-            if let Some(mut sender) = item.message_sender {
-                let msg = RelayMessage::notice("Events deleted");
-                let _ = sender.send_bypass(msg);
+            if let Some(response_handler) = item.response_handler {
+                match response_handler {
+                    ResponseHandler::MessageSender(mut sender) => {
+                        let msg = RelayMessage::notice("Events deleted");
+                        let _ = sender.send_bypass(msg);
+                    }
+                    ResponseHandler::Oneshot(oneshot_sender) => {
+                        let _ = oneshot_sender.send(Ok(()));
+                    }
+                }
             }
         }
     }
@@ -282,8 +403,8 @@ impl RelayDatabase {
     pub fn new(
         db_path_param: impl AsRef<std::path::Path>,
         crypto_sender: CryptoSender,
-    ) -> Result<Self, Error> {
-        Self::with_config(db_path_param, crypto_sender, None, None)
+    ) -> Result<(Self, DatabaseSender), Error> {
+        Self::with_config_and_tracker(db_path_param, crypto_sender, None, None, None, None)
     }
 
     /// Create a new relay database with a provided TaskTracker
@@ -296,8 +417,38 @@ impl RelayDatabase {
         db_path_param: impl AsRef<std::path::Path>,
         crypto_sender: CryptoSender,
         task_tracker: TaskTracker,
-    ) -> Result<Self, Error> {
-        Self::with_config_and_tracker(db_path_param, crypto_sender, None, None, Some(task_tracker))
+    ) -> Result<(Self, DatabaseSender), Error> {
+        Self::with_config_and_tracker(
+            db_path_param,
+            crypto_sender,
+            None,
+            None,
+            Some(task_tracker),
+            None,
+        )
+    }
+
+    /// Create a new relay database with a provided TaskTracker and CancellationToken
+    ///
+    /// # Arguments
+    /// * `db_path_param` - Path where the database should be stored
+    /// * `crypto_sender` - Crypto sender for signing unsigned events
+    /// * `task_tracker` - TaskTracker for managing background tasks
+    /// * `cancellation_token` - CancellationToken for graceful shutdown
+    pub fn with_task_tracker_and_token(
+        db_path_param: impl AsRef<std::path::Path>,
+        crypto_sender: CryptoSender,
+        task_tracker: TaskTracker,
+        cancellation_token: CancellationToken,
+    ) -> Result<(Self, DatabaseSender), Error> {
+        Self::with_config_and_tracker(
+            db_path_param,
+            crypto_sender,
+            None,
+            None,
+            Some(task_tracker),
+            Some(cancellation_token),
+        )
     }
 
     /// Create a new relay database with broadcast channel configuration
@@ -312,12 +463,13 @@ impl RelayDatabase {
         crypto_sender: CryptoSender,
         max_connections: Option<usize>,
         max_subscriptions: Option<usize>,
-    ) -> Result<Self, Error> {
+    ) -> Result<(Self, DatabaseSender), Error> {
         Self::with_config_and_tracker(
             db_path_param,
             crypto_sender,
             max_connections,
             max_subscriptions,
+            None,
             None,
         )
     }
@@ -329,7 +481,8 @@ impl RelayDatabase {
         max_connections: Option<usize>,
         max_subscriptions: Option<usize>,
         task_tracker: Option<TaskTracker>,
-    ) -> Result<Self, Error> {
+        cancellation_token: Option<CancellationToken>,
+    ) -> Result<(Self, DatabaseSender), Error> {
         let db_path = db_path_param.as_ref().to_path_buf();
 
         // Ensure database directory exists
@@ -369,6 +522,10 @@ impl RelayDatabase {
         // Use same queue capacity for both modes to enable batching
         let queue_capacity = WRITE_QUEUE_CAPACITY;
         info!("Creating database - queue capacity: {}", queue_capacity);
+
+        // Create main command channel for actor pattern
+        let (command_sender, command_receiver) = flume::bounded::<CommandWithReply>(queue_capacity);
+
         // Create three specialized queues
         let (save_signed_sender, save_signed_receiver) =
             flume::bounded::<SaveSignedItem>(queue_capacity);
@@ -404,6 +561,16 @@ impl RelayDatabase {
 
         info!("Starting single database worker per queue (LMDB limitation)");
 
+        // Spawn the command dispatcher task
+        Self::spawn_command_dispatcher(
+            command_receiver,
+            save_signed_sender.clone(),
+            save_unsigned_sender.clone(),
+            delete_sender.clone(),
+            cancellation_token,
+            &task_tracker,
+        );
+
         // Spawn processor tasks
         Self::spawn_save_signed_processor(
             save_signed_receiver,
@@ -428,11 +595,92 @@ impl RelayDatabase {
             save_signed_sender: Some(save_signed_sender),
             save_unsigned_sender: Some(save_unsigned_sender),
             delete_sender: Some(delete_sender),
-            task_tracker,
             queue_capacity,
         };
 
-        Ok(relay_db)
+        // Create the DatabaseSender for external use
+        let db_sender = DatabaseSender::new(command_sender);
+
+        Ok((relay_db, db_sender))
+    }
+
+    /// Spawn the command dispatcher task that routes StoreCommand to specialized queues
+    fn spawn_command_dispatcher(
+        command_receiver: flume::Receiver<CommandWithReply>,
+        save_signed_sender: flume::Sender<SaveSignedItem>,
+        save_unsigned_sender: flume::Sender<SaveUnsignedItem>,
+        delete_sender: flume::Sender<DeleteItem>,
+        cancellation_token: Option<CancellationToken>,
+        task_tracker: &TaskTracker,
+    ) {
+        task_tracker.spawn(async move {
+            info!("Command dispatcher started");
+
+            let cancellation_token = cancellation_token.unwrap_or_default();
+
+            loop {
+                tokio::select! {
+                    _ = cancellation_token.cancelled() => {
+                        info!("Command dispatcher shutting down due to cancellation");
+                        break;
+                    }
+
+                    result = command_receiver.recv_async() => {
+                        match result {
+                            Ok(CommandWithReply { command, response_handler }) => {
+                                debug!("Dispatching command: {:?}", command);
+
+                                let dispatch_result: Result<(), anyhow::Error> = match command {
+                                    StoreCommand::SaveSignedEvent(event, scope) => {
+                                        save_signed_sender.send_async(SaveSignedItem {
+                                            event,
+                                            scope,
+                                            response_handler,
+                                        }).await
+                                        .map_err(|e| anyhow::anyhow!("Failed to send SaveSignedItem: {:?}", e))
+                                    }
+                                    StoreCommand::SaveUnsignedEvent(event, scope) => {
+                                        save_unsigned_sender.send_async(SaveUnsignedItem {
+                                            event: Box::new(event),
+                                            scope,
+                                            response_handler,
+                                        }).await
+                                        .map_err(|e| anyhow::anyhow!("Failed to send SaveUnsignedItem: {:?}", e))
+                                    }
+                                    StoreCommand::DeleteEvents(filter, scope) => {
+                                        delete_sender.send_async(DeleteItem {
+                                            filter,
+                                            scope,
+                                            response_handler,
+                                        }).await
+                                        .map_err(|e| anyhow::anyhow!("Failed to send DeleteItem: {:?}", e))
+                                    }
+                                };
+
+                                if let Err(e) = dispatch_result {
+                                    error!("Failed to dispatch command: {:?}", e);
+                                    // Channel closed, exit
+                                    break;
+                                }
+                            }
+                            Err(_) => {
+                                info!("Command dispatcher channel closed");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            info!("Command dispatcher completed");
+
+            // Close all internal channels to trigger shutdown of processor tasks
+            drop(save_signed_sender);
+            drop(save_unsigned_sender);
+            drop(delete_sender);
+
+            cancellation_token.cancel();
+        });
     }
 
     /// Spawn processor for signed events
@@ -480,38 +728,44 @@ impl RelayDatabase {
             while let Ok(item) = receiver.recv_async().await {
                 debug!("Processing unsigned event");
 
+                let response_handler = item.response_handler;
                 match crypto_sender.sign_event(*item.event).await {
                     Ok(signed_event) => {
-                        let event_id = signed_event.id;
+                        let _event_id = signed_event.id;
                         let signed_item = SaveSignedItem {
                             event: Box::new(signed_event),
                             scope: item.scope,
-                            message_sender: item.message_sender.clone(),
+                            response_handler,
                         };
 
                         if let Err(e) = save_signed_sender.send_async(signed_item).await {
                             error!("Failed to forward signed event: {:?}", e);
-
-                            // Send error response if MessageSender was present
-                            if let Some(mut sender) = item.message_sender {
-                                let msg = RelayMessage::ok(
-                                    event_id,
-                                    false,
-                                    "error: Failed to forward signed event",
-                                );
-                                let _ = sender.send_bypass(msg);
-                            }
+                            // The response_handler was already moved into signed_item
+                            // So we can't send an error response here - the channel is closed anyway
                         }
                         // If successful, the signed processor will handle the response
                     }
                     Err(e) => {
                         error!("Failed to sign event: {:?}", e);
 
-                        // Send error response if MessageSender present
+                        // Send error response if response handler present
                         // Note: We can't send a proper OK message without an event ID
-                        if let Some(mut sender) = item.message_sender {
-                            let msg = RelayMessage::notice(format!("Failed to sign event: {}", e));
-                            let _ = sender.send_bypass(msg);
+                        if let Some(response_handler) = response_handler {
+                            match response_handler {
+                                ResponseHandler::MessageSender(mut sender) => {
+                                    let msg = RelayMessage::notice(format!(
+                                        "Failed to sign event: {}",
+                                        e
+                                    ));
+                                    let _ = sender.send_bypass(msg);
+                                }
+                                ResponseHandler::Oneshot(oneshot_sender) => {
+                                    let _ = oneshot_sender.send(Err(Error::internal(format!(
+                                        "Failed to sign event: {}",
+                                        e
+                                    ))));
+                                }
+                            }
                         }
                     }
                 }
@@ -664,70 +918,9 @@ impl RelayDatabase {
         Ok(scopes)
     }
 
-    /// Save a signed event through the async processor
-    pub async fn save_signed_event(&self, event: Event, scope: Scope) -> Result<(), Error> {
-        self.save_store_command(StoreCommand::SaveSignedEvent(Box::new(event), scope), None)
-            .await
-    }
-
-    /// Save an unsigned event (will be signed in the processor)
-    pub async fn save_unsigned_event(
-        &self,
-        event: UnsignedEvent,
-        scope: Scope,
-    ) -> Result<(), Error> {
-        self.save_store_command(StoreCommand::SaveUnsignedEvent(event, scope), None)
-            .await
-    }
-
-    /// Save a store command to the async processor
-    pub async fn save_store_command(
-        &self,
-        command: StoreCommand,
-        message_sender: Option<websocket_builder::MessageSender<RelayMessage<'static>>>,
-    ) -> Result<(), Error> {
-        match command {
-            StoreCommand::SaveSignedEvent(event, scope) => {
-                let item = SaveSignedItem {
-                    event,
-                    scope,
-                    message_sender,
-                };
-                self.save_signed_sender
-                    .as_ref()
-                    .ok_or_else(|| Error::internal("Database shutting down"))?
-                    .send_async(item)
-                    .await
-                    .map_err(|_| Error::internal("Failed to send to save queue"))
-            }
-            StoreCommand::SaveUnsignedEvent(event, scope) => {
-                let item = SaveUnsignedItem {
-                    event: Box::new(event),
-                    scope,
-                    message_sender,
-                };
-                self.save_unsigned_sender
-                    .as_ref()
-                    .ok_or_else(|| Error::internal("Database shutting down"))?
-                    .send_async(item)
-                    .await
-                    .map_err(|_| Error::internal("Failed to send to unsigned queue"))
-            }
-            StoreCommand::DeleteEvents(filter, scope) => {
-                let item = DeleteItem {
-                    filter,
-                    scope,
-                    message_sender,
-                };
-                self.delete_sender
-                    .as_ref()
-                    .ok_or_else(|| Error::internal("Database shutting down"))?
-                    .send_async(item)
-                    .await
-                    .map_err(|_| Error::internal("Failed to send to delete queue"))
-            }
-        }
-    }
+    // NOTE: Write operations are removed from RelayDatabase public API.
+    // All writes must go through DatabaseSender following the actor pattern.
+    // The cancellation listener is now handled by the command dispatcher.
 
     /// Get the current write queue depth (sum of all queues)
     pub fn write_queue_len(&self) -> usize {
@@ -800,17 +993,9 @@ impl RelayDatabase {
             info!("Dropped delete sender");
         }
 
-        // Step 2: Close task tracker and wait for all workers
-        self.task_tracker.close();
-        let timeout = std::time::Duration::from_secs(30);
-
-        match tokio::time::timeout(timeout, self.task_tracker.wait()).await {
-            Ok(()) => info!("All database workers shut down successfully"),
-            Err(_) => {
-                error!("Database workers shutdown timed out");
-                return Err(Error::internal("Worker shutdown timeout"));
-            }
-        }
+        // Note: The caller is responsible for waiting on the task tracker
+        // that was used to spawn the background tasks
+        info!("Database shutdown complete - channels closed");
 
         Ok(())
     }
@@ -818,19 +1003,11 @@ impl RelayDatabase {
 
 impl Drop for RelayDatabase {
     fn drop(&mut self) {
-        // Check if channels are still open - this indicates shutdown() was not called
-        let has_open_channels = self.save_signed_sender.is_some()
-            || self.save_unsigned_sender.is_some()
-            || self.delete_sender.is_some();
+        // Note: In the actor pattern, writes go through DatabaseSender, not these internal senders
+        // So we don't warn about shutdown() not being called - the database will shut down
+        // naturally when all DatabaseSender instances are dropped
 
-        if has_open_channels {
-            warn!(
-                "RelayDatabase dropped without calling shutdown() - this may cause data loss! \
-                Call database.shutdown().await before dropping to ensure all pending writes complete."
-            );
-        }
-
-        // Drop all senders to signal shutdown
+        // Drop all internal senders to signal shutdown to any remaining processors
         if let Some(sender) = self.save_signed_sender.take() {
             drop(sender);
         }
@@ -841,8 +1018,6 @@ impl Drop for RelayDatabase {
             drop(sender);
         }
 
-        // Note: We don't wait for workers here - the Drop trait is not async
-        // Workers will continue processing until channels are closed
         debug!("RelayDatabase dropped - processors will complete any pending work");
     }
 }
@@ -875,25 +1050,31 @@ mod tests {
             let keys = Keys::generate();
             let task_tracker = TaskTracker::new();
             let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
-            let database = Arc::new(
-                RelayDatabase::new(&db_path, crypto_sender).expect("Failed to create database"),
-            );
+            let (database, db_sender) =
+                RelayDatabase::with_task_tracker(&db_path, crypto_sender, task_tracker.clone())
+                    .expect("Failed to create database");
+            let database = Arc::new(database);
 
             // Send events rapidly
             for i in 0..event_count {
                 let event = generate_test_event(i).await;
-                database
+                db_sender
                     .save_signed_event(event, Scope::Default)
                     .await
                     .expect("Failed to save event");
             }
 
             // Properly shutdown the database
+            drop(db_sender);
             Arc::try_unwrap(database)
                 .expect("Failed to unwrap Arc<RelayDatabase>")
                 .shutdown()
                 .await
                 .expect("Failed to shutdown database");
+
+            // Close and wait for task tracker
+            task_tracker.close();
+            task_tracker.wait().await;
         }
 
         // Re-open database and verify all events were saved
@@ -901,9 +1082,9 @@ mod tests {
             let keys = Keys::generate();
             let task_tracker = TaskTracker::new();
             let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
-            let database = Arc::new(
-                RelayDatabase::new(&db_path, crypto_sender).expect("Failed to create database"),
-            );
+            let (database, _db_sender) =
+                RelayDatabase::new(&db_path, crypto_sender).expect("Failed to create database");
+            let database = Arc::new(database);
 
             let count = database
                 .count(
@@ -928,39 +1109,44 @@ mod tests {
         let db_path = tmp_dir.path().join("test.db");
         let event_count = 50;
 
+        // Create a task tracker that we'll wait on
+        let task_tracker = TaskTracker::new();
+
         // Create and populate database
         {
             let keys = Keys::generate();
-            let task_tracker = TaskTracker::new();
             let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
-            let database = Arc::new(
-                RelayDatabase::new(&db_path, crypto_sender).expect("Failed to create database"),
-            );
+            let (database, db_sender) =
+                RelayDatabase::with_task_tracker(&db_path, crypto_sender, task_tracker.clone())
+                    .expect("Failed to create database");
+            let database = Arc::new(database);
 
             // Send events
             for i in 0..event_count {
                 let event = generate_test_event(i).await;
-                database
+                db_sender
                     .save_signed_event(event, Scope::Default)
                     .await
                     .expect("Failed to save event");
             }
 
             // Drop without explicit shutdown - the Drop impl should handle it gracefully
+            drop(db_sender);
             drop(database);
         }
 
-        // Give time for the processor to complete
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // Close the tracker and wait for all tasks to complete
+        task_tracker.close();
+        task_tracker.wait().await;
 
         // Re-open and verify events were saved
         {
             let keys = Keys::generate();
             let task_tracker = TaskTracker::new();
             let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
-            let database = Arc::new(
-                RelayDatabase::new(&db_path, crypto_sender).expect("Failed to create database"),
-            );
+            let (database, _db_sender) =
+                RelayDatabase::new(&db_path, crypto_sender).expect("Failed to create database");
+            let database = Arc::new(database);
 
             let count = database
                 .count(
@@ -991,18 +1177,22 @@ mod tests {
             let keys = Keys::generate();
             let task_tracker = TaskTracker::new();
             let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
-            let database = Arc::new(
-                RelayDatabase::new(&db_path, crypto_sender).expect("Failed to create database"),
-            );
+            let (database, db_sender) =
+                RelayDatabase::with_task_tracker(&db_path, crypto_sender, task_tracker.clone())
+                    .expect("Failed to create database");
+            let database = Arc::new(database);
 
             // Send many events to ensure some are queued
             for i in 0..event_count {
                 let event = generate_test_event(i).await;
-                database
+                db_sender
                     .save_signed_event(event, Scope::Default)
                     .await
                     .expect("Failed to save event");
             }
+
+            // Drop sender first
+            drop(db_sender);
 
             // Immediately initiate shutdown while events may still be processing
             Arc::try_unwrap(database)
@@ -1013,6 +1203,10 @@ mod tests {
 
             // Shutdown should take some time to process queued events
             // With batch operations, this may be faster, so we just ensure it completed
+
+            // Close and wait for task tracker
+            task_tracker.close();
+            task_tracker.wait().await;
         }
 
         // Verify all events were saved
@@ -1020,9 +1214,9 @@ mod tests {
             let keys = Keys::generate();
             let task_tracker = TaskTracker::new();
             let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
-            let database = Arc::new(
-                RelayDatabase::new(&db_path, crypto_sender).expect("Failed to create database"),
-            );
+            let (database, _db_sender) =
+                RelayDatabase::new(&db_path, crypto_sender).expect("Failed to create database");
+            let database = Arc::new(database);
 
             let count = database
                 .count(
@@ -1048,9 +1242,9 @@ mod tests {
         let keys = Keys::generate();
         let task_tracker = TaskTracker::new();
         let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
-        let database = Arc::new(
-            RelayDatabase::new(&db_path, crypto_sender).expect("Failed to create database"),
-        );
+        let (database, db_sender) =
+            RelayDatabase::new(&db_path, crypto_sender).expect("Failed to create database");
+        let database = Arc::new(database);
 
         // Initially queue should be empty
         assert_eq!(database.write_queue_len(), 0);
@@ -1062,7 +1256,7 @@ mod tests {
         let event_count = 100;
         for i in 0..event_count {
             let event = generate_test_event(i).await;
-            database
+            db_sender
                 .save_signed_event(event, Scope::Default)
                 .await
                 .expect("Failed to save event");
@@ -1097,11 +1291,16 @@ mod tests {
         );
 
         // Cleanup
+        drop(db_sender);
         Arc::try_unwrap(database)
             .expect("Failed to unwrap Arc<RelayDatabase>")
             .shutdown()
             .await
             .expect("Failed to shutdown database");
+
+        // Close and wait for task tracker
+        task_tracker.close();
+        task_tracker.wait().await;
     }
 
     #[tokio::test]
@@ -1113,28 +1312,22 @@ mod tests {
         let task_tracker = TaskTracker::new();
         let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
         // Create in optimistic mode (default)
-        let database = Arc::new(
-            RelayDatabase::new(&db_path, crypto_sender).expect("Failed to create database"),
-        );
+        let (database, db_sender) =
+            RelayDatabase::new(&db_path, crypto_sender).expect("Failed to create database");
+        let database = Arc::new(database);
 
         let event = generate_test_event(0).await;
         let event_id = event.id;
 
         // Save should work and wait for persistence
-        let result = database
-            .save_store_command(
-                StoreCommand::SaveSignedEvent(Box::new(event), Scope::Default),
-                None,
-            )
+        let result = db_sender
+            .save_signed_event_sync(event, Scope::Default)
             .await;
 
         assert!(
             result.is_ok(),
             "Sync save should succeed in optimistic mode"
         );
-
-        // Give the processor a moment to actually persist the event
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         // Verify event was persisted
         let count = database
@@ -1144,10 +1337,15 @@ mod tests {
         assert_eq!(count, 1, "Event should be persisted after sync save");
 
         // Cleanup
+        drop(db_sender);
         Arc::try_unwrap(database)
             .expect("Failed to unwrap Arc<RelayDatabase>")
             .shutdown()
             .await
             .expect("Failed to shutdown database");
+
+        // Close and wait for task tracker
+        task_tracker.close();
+        task_tracker.wait().await;
     }
 }
