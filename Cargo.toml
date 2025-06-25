@@ -1,6 +1,6 @@
 [package]
 name = "nostr_relay_builder"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 authors = ["Daniel Cadenas <dcadenas@gmail.com>"]
 description = "A framework for building custom Nostr relays with pluggable business logic and middleware support"
@@ -21,7 +21,7 @@ nostr-sdk = { git = "https://github.com/verse-pbc/nostr", rev = "ece888e", featu
 nostr = { git = "https://github.com/verse-pbc/nostr", rev = "ece888e", features = ["std"] }
 nostr-database = { git = "https://github.com/verse-pbc/nostr", rev = "ece888e" }
 nostr-lmdb = { git = "https://github.com/verse-pbc/nostr", rev = "ece888e" }
-tokio = { version = "1.45", features = ["full"] }
+tokio = { version = "1.45", features = ["full", "tracing"] }
 tokio-util = { version = "0.7.12", features = ["rt"] }
 tracing = "0.1"
 tracing-futures = "0.2"
@@ -56,6 +56,7 @@ parking_lot = "0.12"
 axum = { version = "0.7.9", features = ["ws", "http1"] }
 axum-server = "0.6"
 tower-http = { version = "0.6.2", features = ["cors", "fs"] }
+console-subscriber = "0.4"
 
 [[example]]
 name = "01_minimal_relay"

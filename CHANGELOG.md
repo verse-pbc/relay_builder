@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2025-06-25
+
+### Changed
+- **BREAKING**: Implemented database actor pattern with hybrid response system
+  - `RelayDatabase::new()` and related constructors now return `(RelayDatabase, DatabaseSender)` tuple
+  - `RelayConfig::create_database()` now returns `(Arc<RelayDatabase>, DatabaseSender)` tuple
+  - Database write operations moved to `DatabaseSender` actor interface
+  - Added `ResponseHandler` enum supporting both fire-and-forget and synchronous operations
+  - **Note**: Simple `RelayConfig::new(url, db_path, keys)` API remains unchanged for basic usage
+- **BREAKING**: Updated `NostrConnectionState` to require `db_sender` field for database operations
+- **BREAKING**: Modified connection setup process to pass `DatabaseSender` to middleware
+- Renamed `middleware.rs` to `relay_middleware.rs` for better clarity
+- Consolidated `NostrConnectionFactory` and `GenericNostrConnectionFactory` into a single implementation
+  - `NostrConnectionFactory` now handles both Default and custom state factory scenarios
+  - Removed duplicate `GenericNostrConnectionFactory` type
+
+### Added
+- `DatabaseSender` wrapper providing clean API for database commands with actor pattern
+- `send_sync()` and `save_signed_event_sync()` methods for immediate acknowledgment in tests
+- Hybrid response system supporting both WebSocket `MessageSender` and oneshot channels
+- Command dispatcher architecture for routing database operations to specialized queues
+- Graceful shutdown support by eliminating stored senders in database core
+
+### Fixed
+- Resolved graceful shutdown hanging issue where database held copies of senders
+- Eliminated race conditions in tests by replacing `sleep()` with synchronous save methods
+- Improved test reliability with immediate confirmation of database operations
+- Fixed subscription metrics counter bug where counters were not decremented on connection disconnect
+  - Added missing `on_disconnect` implementation to `RelayMiddleware`
+  - Ensures proper cleanup of subscription counters when connections are dropped
+
+### Internal
+- Added tokio tracing and console-subscriber dependencies for debugging
+- Updated all examples and benchmarks to use new `DatabaseSender` interface
+- Enhanced CI workflow to use correct example names
+
 ## [0.3.0] - 2025-06-24
 
 ### Changed
