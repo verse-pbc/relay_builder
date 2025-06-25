@@ -1,7 +1,7 @@
 //! Connection state management
 
 use crate::config::ScopeConfig;
-use crate::database::RelayDatabase;
+use crate::database::{DatabaseSender, RelayDatabase};
 use crate::error::Error;
 use crate::subscription_service::{StoreCommand, SubscriptionService};
 use anyhow::Result;
@@ -35,6 +35,8 @@ pub struct NostrConnectionState<T = ()> {
     pub authed_pubkey: Option<PublicKey>,
     /// Subscription service for this connection (private - use methods below)
     subscription_service: Option<SubscriptionService>,
+    /// Database sender for write operations
+    pub(crate) db_sender: Option<DatabaseSender>,
     /// Cancellation token for this connection
     pub connection_token: CancellationToken,
     /// Start time for event processing (for metrics)
@@ -54,6 +56,7 @@ impl<T: Default> Default for NostrConnectionState<T> {
             challenge: None,
             authed_pubkey: None,
             subscription_service: None,
+            db_sender: None,
             connection_token: CancellationToken::new(),
             event_start_time: None,
             event_kind: None,
@@ -74,6 +77,7 @@ impl<T: Default> NostrConnectionState<T> {
             challenge: None,
             authed_pubkey: None,
             subscription_service: None,
+            db_sender: None,
             connection_token: CancellationToken::new(),
             event_start_time: None,
             event_kind: None,
@@ -94,6 +98,7 @@ impl<T> NostrConnectionState<T> {
             challenge: None,
             authed_pubkey: None,
             subscription_service: None,
+            db_sender: None,
             connection_token: CancellationToken::new(),
             event_start_time: None,
             event_kind: None,
@@ -115,16 +120,23 @@ impl<T> NostrConnectionState<T> {
     ) -> Result<(), Error> {
         debug!("Setting up connection");
 
+        // db_sender should already be set by the connection factory
+        let db_sender = self
+            .db_sender
+            .as_ref()
+            .ok_or_else(|| Error::internal("DatabaseSender not set by connection factory"))?
+            .clone();
+
         let metrics_handler = crate::global_metrics::get_subscription_metrics_handler();
 
         let service = if let Some(handler) = metrics_handler {
-            SubscriptionService::new_with_metrics(database, sender, Some(handler))
+            SubscriptionService::new_with_metrics(database, db_sender, sender, Some(handler))
                 .await
                 .map_err(|e| {
                     Error::internal(format!("Failed to create subscription service: {}", e))
                 })?
         } else {
-            SubscriptionService::new(database, sender)
+            SubscriptionService::new(database, db_sender, sender)
                 .await
                 .map_err(|e| {
                     Error::internal(format!("Failed to create subscription service: {}", e))
@@ -233,72 +245,20 @@ pub struct NostrConnectionFactory<T = ()> {
     relay_url: RelayUrl,
     #[allow(dead_code)]
     database: Arc<RelayDatabase>,
+    db_sender: DatabaseSender,
     scope_config: ScopeConfig,
-    _phantom: std::marker::PhantomData<T>,
+    state_factory: Option<Arc<dyn Fn() -> T + Send + Sync>>,
 }
 
 /// Type alias for the original non-generic factory
 pub type DefaultNostrConnectionFactory = NostrConnectionFactory<()>;
 
 impl<T> NostrConnectionFactory<T> {
-    /// Create a new connection factory
-    pub fn new(
-        relay_url: String,
-        database: Arc<RelayDatabase>,
-        scope_config: ScopeConfig,
-    ) -> Result<Self, Error> {
-        let relay_url = RelayUrl::parse(&relay_url)
-            .map_err(|e| Error::internal(format!("Invalid relay URL: {}", e)))?;
-
-        Ok(Self {
-            relay_url,
-            database,
-            scope_config,
-            _phantom: std::marker::PhantomData,
-        })
-    }
-}
-
-impl<T: Default> StateFactory<NostrConnectionState<T>> for NostrConnectionFactory<T> {
-    fn create_state(&self, token: CancellationToken) -> NostrConnectionState<T> {
-        // Try to get host information from task-local storage
-        let host_opt: Option<String> = CURRENT_REQUEST_HOST
-            .try_with(|current_host_opt_ref| current_host_opt_ref.clone())
-            .unwrap_or_else(|_| {
-                warn!(
-                    "CURRENT_REQUEST_HOST task_local not found when creating NostrConnectionState."
-                );
-                None
-            });
-
-        // Resolve scope based on configuration
-        let subdomain_scope = self.scope_config.resolve_scope(host_opt.as_deref());
-
-        let mut state = NostrConnectionState::new(self.relay_url.to_string())
-            .unwrap_or_else(|_| NostrConnectionState::default());
-
-        state.connection_token = token;
-        state.subdomain = subdomain_scope;
-
-        state
-    }
-}
-
-/// Generic factory for creating NostrConnectionState instances with custom state
-#[derive(Clone)]
-pub struct GenericNostrConnectionFactory<T> {
-    relay_url: RelayUrl,
-    #[allow(dead_code)]
-    database: Arc<RelayDatabase>,
-    scope_config: ScopeConfig,
-    state_factory: Arc<dyn Fn() -> T + Send + Sync>,
-}
-
-impl<T> GenericNostrConnectionFactory<T> {
     /// Create a new connection factory with a state factory function
     pub fn new_with_factory(
         relay_url: String,
         database: Arc<RelayDatabase>,
+        db_sender: DatabaseSender,
         scope_config: ScopeConfig,
         state_factory: Arc<dyn Fn() -> T + Send + Sync>,
     ) -> Result<Self, Error> {
@@ -308,8 +268,9 @@ impl<T> GenericNostrConnectionFactory<T> {
         Ok(Self {
             relay_url,
             database,
+            db_sender,
             scope_config,
-            state_factory,
+            state_factory: Some(state_factory),
         })
     }
 
@@ -317,18 +278,28 @@ impl<T> GenericNostrConnectionFactory<T> {
     pub fn new(
         relay_url: String,
         database: Arc<RelayDatabase>,
+        db_sender: DatabaseSender,
         scope_config: ScopeConfig,
     ) -> Result<Self, Error>
     where
         T: Default + 'static,
     {
-        let factory = Arc::new(|| T::default());
-        Self::new_with_factory(relay_url, database, scope_config, factory)
+        let relay_url = RelayUrl::parse(&relay_url)
+            .map_err(|e| Error::internal(format!("Invalid relay URL: {}", e)))?;
+
+        Ok(Self {
+            relay_url,
+            database,
+            db_sender,
+            scope_config,
+            state_factory: None,
+        })
     }
 }
 
-impl<T: Send + Sync + 'static> StateFactory<NostrConnectionState<T>>
-    for GenericNostrConnectionFactory<T>
+impl<T: Send + Sync + 'static> StateFactory<NostrConnectionState<T>> for NostrConnectionFactory<T>
+where
+    T: Default,
 {
     fn create_state(&self, token: CancellationToken) -> NostrConnectionState<T> {
         // Try to get host information from task-local storage
@@ -344,13 +315,18 @@ impl<T: Send + Sync + 'static> StateFactory<NostrConnectionState<T>>
         // Resolve scope based on configuration
         let subdomain_scope = self.scope_config.resolve_scope(host_opt.as_deref());
 
-        let custom = (self.state_factory)();
+        let custom = if let Some(ref factory) = self.state_factory {
+            factory()
+        } else {
+            T::default()
+        };
 
         let mut state = NostrConnectionState::with_custom(self.relay_url.to_string(), custom)
             .unwrap_or_else(|_| panic!("Failed to create NostrConnectionState"));
 
         state.connection_token = token;
         state.subdomain = subdomain_scope;
+        state.db_sender = Some(self.db_sender.clone());
 
         state
     }

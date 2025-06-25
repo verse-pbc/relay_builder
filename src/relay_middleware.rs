@@ -338,4 +338,24 @@ where
         ctx.message = Some(message);
         ctx.next().await
     }
+
+    async fn on_disconnect(
+        &self,
+        ctx: &mut websocket_builder::DisconnectContext<
+            Self::State,
+            Self::IncomingMessage,
+            Self::OutgoingMessage,
+        >,
+    ) -> anyhow::Result<()> {
+        debug!("RelayMiddleware: Processing disconnect");
+
+        // Clean up the connection state to release database references and decrement subscription counters
+        {
+            let state = ctx.state.read().await;
+            state.cleanup();
+        }
+
+        debug!("RelayMiddleware: Connection cleanup complete");
+        ctx.next().await
+    }
 }

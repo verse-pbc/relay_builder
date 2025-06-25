@@ -67,7 +67,7 @@ fn get_real_ip(headers: &HeaderMap, socket_addr: SocketAddr) -> String {
 /// A complete Nostr relay service with WebSocket handling and HTTP endpoints
 pub struct RelayService<T = ()>
 where
-    T: Clone + Send + Sync + 'static,
+    T: Clone + Send + Sync + 'static + Default,
 {
     /// The WebSocket handler for Nostr protocol
     pub ws_handler: Arc<crate::RelayWebSocketHandler<T>>,
@@ -265,7 +265,7 @@ pub fn default_relay_html(relay_info: &RelayInfo) -> String {
 
 impl<T> RelayService<T>
 where
-    T: Clone + Send + Sync + 'static,
+    T: Clone + Send + Sync + 'static + Default,
 {
     /// Create new relay service
     pub fn new(

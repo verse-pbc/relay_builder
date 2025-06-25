@@ -2,14 +2,14 @@
 
 use crate::config::RelayConfig;
 use crate::crypto_worker::CryptoWorker;
-use crate::database::RelayDatabase;
+use crate::database::{DatabaseSender, RelayDatabase};
 use crate::error::Error;
 use crate::event_processor::{DefaultRelayProcessor, EventContext, EventProcessor};
 use crate::message_converter::NostrMessageConverter;
 use crate::metrics::SubscriptionMetricsHandler;
-use crate::middleware::RelayMiddleware;
 use crate::middlewares::MetricsHandler;
-use crate::state::{GenericNostrConnectionFactory, NostrConnectionState};
+use crate::relay_middleware::RelayMiddleware;
+use crate::state::{NostrConnectionFactory, NostrConnectionState};
 use async_trait::async_trait;
 use nostr_sdk::prelude::*;
 use std::marker::PhantomData;
@@ -319,21 +319,24 @@ where
     fn build_connection_factory(
         &self,
         database: Arc<RelayDatabase>,
-    ) -> Result<GenericNostrConnectionFactory<T>, Error>
+        db_sender: DatabaseSender,
+    ) -> Result<NostrConnectionFactory<T>, Error>
     where
         T: Default,
     {
         if let Some(ref state_factory) = self.state_factory {
-            GenericNostrConnectionFactory::new_with_factory(
+            NostrConnectionFactory::new_with_factory(
                 self.config.relay_url.clone(),
                 database,
+                db_sender,
                 self.config.scope_config.clone(),
                 state_factory.clone() as Arc<dyn Fn() -> T + Send + Sync>,
             )
         } else {
-            GenericNostrConnectionFactory::new(
+            NostrConnectionFactory::new(
                 self.config.relay_url.clone(),
                 database,
+                db_sender,
                 self.config.scope_config.clone(),
             )
         }
@@ -508,11 +511,14 @@ where
         let task_tracker = self.task_tracker.take().unwrap_or_default();
         let crypto_sender = CryptoWorker::spawn(Arc::new(self.config.keys.clone()), &task_tracker);
 
-        let database = self
-            .config
-            .create_database_with_tracker(crypto_sender.clone(), Some(task_tracker.clone()))?;
+        let (database, db_sender) = self.config.create_database_with_tracker(
+            crypto_sender.clone(),
+            Some(task_tracker.clone()),
+            self.cancellation_token.clone(),
+        )?;
+
         let custom_middlewares = std::mem::take(&mut self.middlewares);
-        let connection_factory = self.build_connection_factory(database.clone())?;
+        let connection_factory = self.build_connection_factory(database.clone(), db_sender)?;
 
         // Create a wrapper to use Arc<dyn EventProcessor<T>> with RelayMiddleware
         struct DynProcessor<T>(Arc<dyn EventProcessor<T>>);
@@ -646,7 +652,7 @@ pub type RelayWebSocketHandler<T> = websocket_builder::WebSocketHandler<
     ClientMessage<'static>,
     RelayMessage<'static>,
     NostrMessageConverter,
-    GenericNostrConnectionFactory<T>,
+    NostrConnectionFactory<T>,
 >;
 
 /// Type alias for the default relay handler (with unit state for backward compatibility)

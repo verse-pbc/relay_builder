@@ -18,9 +18,9 @@ pub mod global_metrics;
 pub mod handlers;
 pub mod message_converter;
 pub mod metrics;
-pub mod middleware;
 pub mod middlewares;
 pub mod relay_builder;
+pub mod relay_middleware;
 pub mod state;
 pub mod subdomain;
 pub mod subscription_service;
@@ -30,19 +30,19 @@ pub mod utils;
 
 pub use config::{RelayConfig, ScopeConfig, WebSocketConfig};
 pub use crypto_worker::{CryptoSender, CryptoWorker};
-pub use database::{NostrDatabase, RelayDatabase};
+pub use database::{DatabaseSender, NostrDatabase, RelayDatabase};
 pub use error::{Error, Result};
 pub use event_processor::{DefaultRelayProcessor, EventContext, EventProcessor};
 #[cfg(feature = "axum")]
 pub use handlers::{RelayInfo, RelayService};
 
 pub use message_converter::NostrMessageConverter;
-pub use middleware::RelayMiddleware;
 #[cfg(feature = "axum")]
 pub use relay_builder::HtmlOption;
 pub use relay_builder::{DefaultRelayWebSocketHandler, RelayBuilder, RelayWebSocketHandler};
+pub use relay_middleware::RelayMiddleware;
 pub use state::{
-    DefaultNostrConnectionState, GenericNostrConnectionFactory, NostrConnectionFactory,
+    DefaultNostrConnectionFactory, DefaultNostrConnectionState, NostrConnectionFactory,
     NostrConnectionState,
 };
 pub use subscription_service::{StoreCommand, SubscriptionService};
