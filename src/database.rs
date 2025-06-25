@@ -1103,7 +1103,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "LMDB doesn't allow reopening the same database file in the same process"]
     async fn test_drop_completes_pending_work() {
         // This test verifies that dropping the database still processes pending events
         let tmp_dir = TempDir::new().unwrap();
@@ -1139,6 +1138,9 @@ mod tests {
         // Close the tracker and wait for all tasks to complete
         task_tracker.close();
         task_tracker.wait().await;
+
+        // Give LMDB time to fully release resources
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         // Re-open and verify events were saved
         {

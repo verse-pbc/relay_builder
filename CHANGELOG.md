@@ -52,8 +52,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added tokio tracing and console-subscriber dependencies for debugging
 - Updated all examples and benchmarks to use new `DatabaseSender` interface
 - Enhanced CI workflow to use correct example names
-- Marked `test_drop_completes_pending_work` as ignored due to LMDB limitation
-  - LMDB doesn't allow reopening the same database file in the same process
 
 ## [0.3.0] - 2025-06-24
 
