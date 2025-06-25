@@ -70,13 +70,16 @@ where
         state: Arc<tokio::sync::RwLock<NostrConnectionState<T>>>,
         message_sender: Option<websocket_builder::MessageSender<RelayMessage<'static>>>,
     ) -> Result<(), Error> {
-        let mut connection_state = state.write().await;
-        connection_state.event_start_time = Some(std::time::Instant::now());
-        connection_state.event_kind = Some(event.kind.as_u16());
+        let (subdomain, authed_pubkey, custom_state) = {
+            let connection_state = state.read().await;
 
-        // Extract necessary state before calling handle_event
-        let subdomain = connection_state.subdomain().clone();
-        let authed_pubkey = connection_state.authed_pubkey.as_ref().cloned();
+            // Extract necessary state before calling handle_event
+            let subdomain = connection_state.subdomain().clone();
+            let authed_pubkey = connection_state.authed_pubkey.as_ref().cloned();
+            let custom_state = connection_state.custom.clone();
+
+            (subdomain, authed_pubkey, custom_state)
+        };
 
         // Process with direct custom state access
         let context = EventContext {
@@ -85,30 +88,20 @@ where
             relay_pubkey: &self.relay_pubkey,
         };
 
-        // Create Arc<RwLock<T>> for the custom state
-        let custom_state_arc = Arc::new(tokio::sync::RwLock::new(connection_state.custom.clone()));
-
         let commands = self
             .processor
-            .handle_event(event.clone(), custom_state_arc.clone(), context)
+            .handle_event(event.clone(), custom_state, context)
             .await?;
 
-        // Update the connection state with any changes made
-        connection_state.custom = Arc::try_unwrap(custom_state_arc)
-            .map(|rwlock| rwlock.into_inner())
-            .unwrap_or_else(|arc| arc.blocking_read().clone());
+        let subscription_service = state.read().await;
 
-        // Execute database commands via subscription service
-        let subscription_service = connection_state
-            .subscription_service()
-            .ok_or_else(|| Error::internal("No subscription service available"))?;
-
-        // Process commands - always pass MessageSender so database can send OK after persistence
-        for command in commands {
-            subscription_service
-                .save_and_broadcast(command, message_sender.clone())
-                .await
-                .map_err(|e| Error::database(e.to_string()))?;
+        if let Some(subscription_service) = subscription_service.subscription_service() {
+            for command in commands {
+                subscription_service
+                    .save_and_broadcast(command, message_sender.clone())
+                    .await
+                    .map_err(|e| Error::database(e.to_string()))?;
+            }
         }
 
         // Database layer will send OK after persistence
@@ -122,28 +115,31 @@ where
         subscription_id: String,
         filters: Vec<Filter>,
     ) -> Result<(), Error> {
-        let connection_state = state.write().await;
-        // First verify filters are allowed
-        let context = EventContext {
-            authed_pubkey: connection_state.authed_pubkey.as_ref(),
-            subdomain: connection_state.subdomain(),
-            relay_pubkey: &self.relay_pubkey,
+        // First verify filters are allowed with read lock
+        {
+            let connection_state = state.read().await;
+            let context = EventContext {
+                authed_pubkey: connection_state.authed_pubkey.as_ref(),
+                subdomain: connection_state.subdomain(),
+                relay_pubkey: &self.relay_pubkey,
+            };
+
+            self.processor
+                .verify_filters(&filters, connection_state.custom.clone(), context)?;
+        }
+
+        // Extract necessary state with read lock
+        let (subdomain, authed_pubkey, custom_state) = {
+            let connection_state = state.read().await;
+            let subdomain = connection_state.subdomain().clone();
+            let authed_pubkey = connection_state.authed_pubkey;
+            let custom_state = connection_state.custom.clone();
+            (subdomain, authed_pubkey, custom_state)
         };
 
-        self.processor
-            .verify_filters(&filters, &connection_state.custom, context)?;
-
-        // Clone the custom state for use in the filter function
-        let custom_state = connection_state.custom.clone();
-        let subdomain = connection_state.subdomain().clone();
-        let authed_pubkey = connection_state.authed_pubkey;
+        // Clone for the filter function
         let processor = Arc::clone(&self.processor);
         let relay_pubkey = self.relay_pubkey;
-
-        // Get subscription service and process
-        let subscription_service = connection_state
-            .subscription_service()
-            .ok_or_else(|| Error::internal("No subscription service available"))?;
 
         // Create filter function with cloned state - no async needed
         let filter_fn =
@@ -156,9 +152,15 @@ where
                 };
 
                 processor
-                    .can_see_event(event, &custom_state, context)
+                    .can_see_event(event, custom_state.clone(), context)
                     .unwrap_or(false)
             };
+
+        // Get subscription service and process
+        let connection_state = state.read().await;
+        let subscription_service = connection_state
+            .subscription_service()
+            .ok_or_else(|| Error::internal("No subscription service available"))?;
 
         subscription_service
             .handle_req(
@@ -335,7 +337,7 @@ where
 
                 !self
                     .processor
-                    .can_see_event(event, &state.custom, context)?
+                    .can_see_event(event, state.custom.clone(), context)?
             };
 
             if should_filter {

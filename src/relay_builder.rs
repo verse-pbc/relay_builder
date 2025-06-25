@@ -531,7 +531,7 @@ where
             fn can_see_event(
                 &self,
                 event: &Event,
-                custom_state: &T,
+                custom_state: Arc<tokio::sync::RwLock<T>>,
                 context: EventContext<'_>,
             ) -> Result<bool, Error> {
                 self.0.can_see_event(event, custom_state, context)
@@ -540,7 +540,7 @@ where
             fn verify_filters(
                 &self,
                 filters: &[Filter],
-                custom_state: &T,
+                custom_state: Arc<tokio::sync::RwLock<T>>,
                 context: EventContext<'_>,
             ) -> Result<(), Error> {
                 self.0.verify_filters(filters, custom_state, context)

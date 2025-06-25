@@ -63,10 +63,12 @@ pub struct EventContext<'a> {
 ///     fn can_see_event(
 ///         &self,
 ///         _event: &Event,
-///         custom_state: &RateLimitState,
+///         custom_state: Arc<tokio::sync::RwLock<RateLimitState>>,
 ///         _context: EventContext<'_>,
 ///     ) -> Result<bool, nostr_relay_builder::Error> {
-///         Ok(custom_state.tokens > 0.0)
+///         // For read-only access, use read lock
+///         let state = custom_state.blocking_read();
+///         Ok(state.tokens > 0.0)
 ///     }
 ///
 ///     async fn handle_event(
@@ -101,16 +103,12 @@ where
     ///
     /// This method is called in hot loops during subscription processing,
     /// so it must be synchronous for maximum performance with zero allocations.
-    /// Any necessary async operations (like database lookups) should be done
-    /// during connection setup and cached in the custom state.
-    ///
-    /// Note: The state is immutable here because this method may be called
-    /// concurrently from multiple threads. If you need mutable state, use
-    /// interior mutability patterns like `RefCell` or `Mutex`.
+    /// The Arc<RwLock<T>> allows implementors to choose whether they need read
+    /// or write access to the state.
     ///
     /// # Arguments
     /// * `event` - The event to check visibility for
-    /// * `custom_state` - Custom per-connection state with cached auth data
+    /// * `custom_state` - Custom per-connection state wrapped in Arc<RwLock<T>>
     /// * `context` - Minimal context with auth info and relay details
     ///
     /// # Returns
@@ -120,7 +118,7 @@ where
     fn can_see_event(
         &self,
         event: &Event,
-        custom_state: &T,
+        custom_state: Arc<tokio::sync::RwLock<T>>,
         context: EventContext<'_>,
     ) -> Result<bool> {
         // Default implementation: allow all events (public relay behavior)
@@ -134,7 +132,7 @@ where
     ///
     /// # Arguments
     /// * `filters` - The filters from the REQ message
-    /// * `custom_state` - Custom per-connection state (read-only)
+    /// * `custom_state` - Custom per-connection state wrapped in Arc<RwLock<T>>
     /// * `context` - Minimal context with auth info
     ///
     /// # Returns
@@ -143,7 +141,7 @@ where
     fn verify_filters(
         &self,
         filters: &[Filter],
-        custom_state: &T,
+        custom_state: Arc<tokio::sync::RwLock<T>>,
         context: EventContext<'_>,
     ) -> Result<()> {
         // Default implementation: allow all filters

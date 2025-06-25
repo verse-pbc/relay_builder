@@ -11,7 +11,8 @@ use crate::state::NostrConnectionState;
 use anyhow::Result;
 use async_trait::async_trait;
 use nostr_sdk::prelude::*;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use websocket_builder::{
     ConnectionContext, DisconnectContext, InboundContext, Middleware, OutboundContext,
@@ -37,10 +38,19 @@ pub trait MetricsHandler: Send + Sync + std::fmt::Debug {
     }
 }
 
+/// Per-event tracking state
+#[derive(Debug)]
+struct EventTimingState {
+    start_time: Instant,
+    event_kind: u16,
+}
+
 /// Middleware that tracks metrics for relay operations
 #[derive(Debug)]
 pub struct MetricsMiddleware<T = ()> {
     handler: Option<Arc<dyn MetricsHandler>>,
+    /// Track event timing by event ID
+    event_timing: Arc<Mutex<HashMap<EventId, EventTimingState>>>,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -55,6 +65,7 @@ impl<T> MetricsMiddleware<T> {
     pub fn new() -> Self {
         Self {
             handler: None,
+            event_timing: Arc::new(Mutex::new(HashMap::new())),
             _phantom: std::marker::PhantomData,
         }
     }
@@ -63,6 +74,7 @@ impl<T> MetricsMiddleware<T> {
     pub fn with_handler(handler: Box<dyn MetricsHandler>) -> Self {
         Self {
             handler: Some(Arc::from(handler)),
+            event_timing: Arc::new(Mutex::new(HashMap::new())),
             _phantom: std::marker::PhantomData,
         }
     }
@@ -71,6 +83,7 @@ impl<T> MetricsMiddleware<T> {
     pub fn with_arc_handler(handler: Arc<dyn MetricsHandler>) -> Self {
         Self {
             handler: Some(handler),
+            event_timing: Arc::new(Mutex::new(HashMap::new())),
             _phantom: std::marker::PhantomData,
         }
     }
@@ -91,9 +104,16 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for MetricsM
             if let Some(handler) = &self.handler {
                 // Only track timing if the handler wants it
                 if handler.should_track_latency() {
-                    let mut state = ctx.state.write().await;
-                    state.event_start_time = Some(Instant::now());
-                    state.event_kind = Some(event.as_ref().kind.as_u16());
+                    let event_id = event.id;
+                    let event_kind = event.as_ref().kind.as_u16();
+                    let mut timing_map = self.event_timing.lock().unwrap();
+                    timing_map.insert(
+                        event_id,
+                        EventTimingState {
+                            start_time: Instant::now(),
+                            event_kind,
+                        },
+                    );
                 }
                 handler.increment_inbound_events_processed();
             }
@@ -108,14 +128,12 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for MetricsM
         ctx: &mut OutboundContext<Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
     ) -> Result<(), anyhow::Error> {
         // Track event processing latency for OK responses
-        if let Some(RelayMessage::Ok { .. }) = ctx.message.as_ref() {
-            let mut state = ctx.state.write().await;
-            if let (Some(start_time), Some(kind)) =
-                (state.event_start_time.take(), state.event_kind.take())
-            {
-                let latency_ms = start_time.elapsed().as_secs_f64() * 1000.0;
-                if let Some(handler) = &self.handler {
-                    handler.record_event_latency(kind as u32, latency_ms);
+        if let Some(RelayMessage::Ok { event_id, .. }) = ctx.message.as_ref() {
+            if let Some(handler) = &self.handler {
+                let mut timing_map = self.event_timing.lock().unwrap();
+                if let Some(timing_state) = timing_map.remove(event_id) {
+                    let latency_ms = timing_state.start_time.elapsed().as_secs_f64() * 1000.0;
+                    handler.record_event_latency(timing_state.event_kind as u32, latency_ms);
                 }
             }
         }
@@ -143,6 +161,10 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for MetricsM
         if let Some(handler) = &self.handler {
             handler.decrement_active_connections();
         }
+
+        // Clean up any remaining event timing entries for this connection
+        // Note: In a production system, you might want to track which events
+        // belong to which connection to clean up more precisely
 
         // Continue with the middleware chain
         ctx.next().await

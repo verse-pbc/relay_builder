@@ -8,7 +8,6 @@ use anyhow::Result;
 use nostr_lmdb::Scope;
 use nostr_sdk::prelude::*;
 use std::sync::Arc;
-use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 use websocket_builder::{MessageSender, StateFactory};
@@ -39,14 +38,10 @@ pub struct NostrConnectionState<T = ()> {
     pub(crate) db_sender: Option<DatabaseSender>,
     /// Cancellation token for this connection
     pub connection_token: CancellationToken,
-    /// Start time for event processing (for metrics)
-    pub event_start_time: Option<Instant>,
-    /// Kind of event being processed (for metrics)
-    pub event_kind: Option<u16>,
     /// Subdomain/scope for this connection
     pub subdomain: Scope,
     /// Custom state for application-specific data
-    pub custom: T,
+    pub custom: Arc<tokio::sync::RwLock<T>>,
 }
 
 impl<T: Default> Default for NostrConnectionState<T> {
@@ -58,10 +53,8 @@ impl<T: Default> Default for NostrConnectionState<T> {
             subscription_service: None,
             db_sender: None,
             connection_token: CancellationToken::new(),
-            event_start_time: None,
-            event_kind: None,
             subdomain: Scope::Default,
-            custom: T::default(),
+            custom: Arc::new(tokio::sync::RwLock::new(T::default())),
         }
     }
 }
@@ -79,10 +72,8 @@ impl<T: Default> NostrConnectionState<T> {
             subscription_service: None,
             db_sender: None,
             connection_token: CancellationToken::new(),
-            event_start_time: None,
-            event_kind: None,
             subdomain: Scope::Default,
-            custom: T::default(),
+            custom: Arc::new(tokio::sync::RwLock::new(T::default())),
         })
     }
 }
@@ -100,10 +91,8 @@ impl<T> NostrConnectionState<T> {
             subscription_service: None,
             db_sender: None,
             connection_token: CancellationToken::new(),
-            event_start_time: None,
-            event_kind: None,
             subdomain: Scope::Default,
-            custom,
+            custom: Arc::new(tokio::sync::RwLock::new(custom)),
         })
     }
 

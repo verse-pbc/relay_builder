@@ -55,7 +55,7 @@ impl EventProcessor for AuthRequiredEventProcessor {
     fn can_see_event(
         &self,
         _event: &Event,
-        _custom_state: &(),
+        _custom_state: Arc<tokio::sync::RwLock<()>>,
         context: EventContext<'_>,
     ) -> Result<bool, Error> {
         // Only authenticated users can see events
@@ -65,7 +65,7 @@ impl EventProcessor for AuthRequiredEventProcessor {
     fn verify_filters(
         &self,
         _filters: &[Filter],
-        _custom_state: &(),
+        _custom_state: Arc<tokio::sync::RwLock<()>>,
         context: EventContext<'_>,
     ) -> Result<(), Error> {
         // Only authenticated users can subscribe
@@ -109,12 +109,15 @@ async fn test_public_event_processor() {
     }
 
     // Test can_see_event - should always return true
-    let can_see = processor.can_see_event(&event, &(), context).unwrap();
+    let can_see = processor
+        .can_see_event(&event, Arc::new(tokio::sync::RwLock::new(())), context)
+        .unwrap();
     assert!(can_see);
 
     // Test verify_filters - should always succeed
     let filters = vec![Filter::new()];
-    let verify_result = processor.verify_filters(&filters, &(), context);
+    let verify_result =
+        processor.verify_filters(&filters, Arc::new(tokio::sync::RwLock::new(())), context);
     assert!(verify_result.is_ok());
 }
 
@@ -144,11 +147,14 @@ async fn test_auth_required_event_processor() {
     assert!(result.is_err());
     assert!(matches!(result.unwrap_err(), Error::AuthRequired { .. }));
 
-    let can_see = processor.can_see_event(&event, &(), context).unwrap();
+    let can_see = processor
+        .can_see_event(&event, Arc::new(tokio::sync::RwLock::new(())), context)
+        .unwrap();
     assert!(!can_see);
 
     let filters = vec![Filter::new()];
-    let verify_result = processor.verify_filters(&filters, &(), context);
+    let verify_result =
+        processor.verify_filters(&filters, Arc::new(tokio::sync::RwLock::new(())), context);
     assert!(verify_result.is_err());
 
     // Test with authentication
@@ -172,10 +178,16 @@ async fn test_auth_required_event_processor() {
     let commands = result.unwrap();
     assert_eq!(commands.len(), 1);
 
-    let can_see = processor.can_see_event(&event, &(), auth_context).unwrap();
+    let can_see = processor
+        .can_see_event(&event, Arc::new(tokio::sync::RwLock::new(())), auth_context)
+        .unwrap();
     assert!(can_see);
 
-    let verify_result = processor.verify_filters(&filters, &(), auth_context);
+    let verify_result = processor.verify_filters(
+        &filters,
+        Arc::new(tokio::sync::RwLock::new(())),
+        auth_context,
+    );
     assert!(verify_result.is_ok());
 }
 
@@ -212,7 +224,7 @@ impl EventProcessor for FilteringProcessor {
     fn can_see_event(
         &self,
         event: &Event,
-        _custom_state: &(),
+        _custom_state: Arc<tokio::sync::RwLock<()>>,
         _context: EventContext<'_>,
     ) -> Result<bool, Error> {
         // Hide events with blocked keywords
@@ -254,7 +266,13 @@ async fn test_filtering_processor() {
         .await;
     assert!(result.is_ok());
 
-    let can_see = processor.can_see_event(&clean_event, &(), context).unwrap();
+    let can_see = processor
+        .can_see_event(
+            &clean_event,
+            Arc::new(tokio::sync::RwLock::new(())),
+            context,
+        )
+        .unwrap();
     assert!(can_see);
 
     // Test with blocked content
@@ -271,6 +289,8 @@ async fn test_filtering_processor() {
         .await;
     assert!(result.is_err());
 
-    let can_see = processor.can_see_event(&spam_event, &(), context).unwrap();
+    let can_see = processor
+        .can_see_event(&spam_event, Arc::new(tokio::sync::RwLock::new(())), context)
+        .unwrap();
     assert!(!can_see);
 }

@@ -51,7 +51,7 @@ impl EventProcessor for TestEventProcessor {
     fn can_see_event(
         &self,
         _event: &Event,
-        _custom_state: &(),
+        _custom_state: Arc<tokio::sync::RwLock<()>>,
         _context: EventContext<'_>,
     ) -> Result<bool, Error> {
         Ok(self.allow_all)
@@ -85,7 +85,7 @@ impl EventProcessor for RestrictiveEventProcessor {
     fn can_see_event(
         &self,
         _event: &Event,
-        _custom_state: &(),
+        _custom_state: Arc<tokio::sync::RwLock<()>>,
         context: EventContext<'_>,
     ) -> Result<bool, Error> {
         Ok(context.authed_pubkey.is_some())
@@ -94,7 +94,7 @@ impl EventProcessor for RestrictiveEventProcessor {
     fn verify_filters(
         &self,
         _filters: &[Filter],
-        _custom_state: &(),
+        _custom_state: Arc<tokio::sync::RwLock<()>>,
         context: EventContext<'_>,
     ) -> Result<(), Error> {
         if context.authed_pubkey.is_some() {
@@ -142,7 +142,11 @@ mod tests {
         };
 
         // Test without authentication
-        let verify_result = restrict_processor.verify_filters(&filters, &(), context);
+        let verify_result = restrict_processor.verify_filters(
+            &filters,
+            Arc::new(tokio::sync::RwLock::new(())),
+            context,
+        );
         assert!(verify_result.is_err());
 
         // Test with authentication
@@ -153,7 +157,11 @@ mod tests {
             relay_pubkey: &relay_pubkey,
         };
 
-        let verify_result = restrict_processor.verify_filters(&filters, &(), auth_context);
+        let verify_result = restrict_processor.verify_filters(
+            &filters,
+            Arc::new(tokio::sync::RwLock::new(())),
+            auth_context,
+        );
         assert!(verify_result.is_ok());
     }
 
@@ -178,14 +186,18 @@ mod tests {
         };
 
         // Test allow all processor
-        assert!(allow_processor.can_see_event(&event, &(), context).unwrap());
+        assert!(allow_processor
+            .can_see_event(&event, Arc::new(tokio::sync::RwLock::new(())), context)
+            .unwrap());
 
         // Test deny all processor
-        assert!(!deny_processor.can_see_event(&event, &(), context).unwrap());
+        assert!(!deny_processor
+            .can_see_event(&event, Arc::new(tokio::sync::RwLock::new(())), context)
+            .unwrap());
 
         // Test restrictive processor without auth
         assert!(!restrict_processor
-            .can_see_event(&event, &(), context)
+            .can_see_event(&event, Arc::new(tokio::sync::RwLock::new(())), context)
             .unwrap());
 
         // Test restrictive processor with auth
@@ -196,7 +208,7 @@ mod tests {
             relay_pubkey: &relay_pubkey,
         };
         assert!(restrict_processor
-            .can_see_event(&event, &(), auth_context)
+            .can_see_event(&event, Arc::new(tokio::sync::RwLock::new(())), auth_context)
             .unwrap());
     }
 }
