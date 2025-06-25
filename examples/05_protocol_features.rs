@@ -37,7 +37,7 @@ async fn main() -> Result<()> {
     )?;
     let database = Arc::new(database);
 
-    let config = RelayConfig::new(relay_url, database.clone(), keys);
+    let config = RelayConfig::new(relay_url, "./protocol_features.db", keys);
 
     // Relay information for NIP-11
     let relay_info = RelayInfo {

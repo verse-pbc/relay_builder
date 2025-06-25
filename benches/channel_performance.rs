@@ -40,7 +40,7 @@ fn bench_write_throughput(c: &mut Criterion) {
                     let crypto_sender = CryptoWorker::spawn(keys.clone(), &task_tracker);
                     let (database, db_sender) = RelayDatabase::new(&db_path, crypto_sender)
                         .expect("Failed to create database");
-                    let database = Arc::new(database);
+                    let _database = Arc::new(database);
 
                     // Send events
                     for i in 0..count {
@@ -53,11 +53,6 @@ fn bench_write_throughput(c: &mut Criterion) {
 
                     // Drop sender and ensure all events are persisted
                     drop(db_sender);
-                    Arc::try_unwrap(database)
-                        .expect("Failed to unwrap Arc")
-                        .shutdown()
-                        .await
-                        .expect("Failed to shutdown");
 
                     black_box(count);
                 });
@@ -90,7 +85,7 @@ fn bench_backpressure(c: &mut Criterion) {
             let crypto_sender = CryptoWorker::spawn(keys.clone(), &task_tracker);
             let (database, db_sender) =
                 RelayDatabase::new(&db_path, crypto_sender).expect("Failed to create database");
-            let database = Arc::new(database);
+            let _database = Arc::new(database);
 
             // Send many events rapidly to trigger backpressure
             let mut handles = vec![];
@@ -113,11 +108,6 @@ fn bench_backpressure(c: &mut Criterion) {
 
             // Shutdown
             drop(db_sender);
-            Arc::try_unwrap(database)
-                .expect("Failed to unwrap Arc")
-                .shutdown()
-                .await
-                .expect("Failed to shutdown");
 
             black_box(event_count);
         });

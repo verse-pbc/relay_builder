@@ -1110,12 +1110,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Wait for the database queue to be empty and events to be committed
-        database
-            .wait_for_queue_empty(Duration::from_secs(5))
-            .await
-            .unwrap();
-
         // Wait for async tasks to complete
         tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -2463,11 +2457,6 @@ mod tests {
                 .unwrap();
         }
 
-        // Wait longer for database writes to complete
-        database
-            .wait_for_queue_empty(Duration::from_secs(2))
-            .await
-            .unwrap();
         sleep(Duration::from_millis(100)).await;
 
         // Create filter WITHOUT limit (unbounded query)

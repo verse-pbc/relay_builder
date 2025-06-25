@@ -40,6 +40,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed subscription metrics counter bug where counters were not decremented on connection disconnect
   - Added missing `on_disconnect` implementation to `RelayMiddleware`
   - Ensures proper cleanup of subscription counters when connections are dropped
+- Fixed `DatabaseConfig::Instance` variant to properly include `DatabaseSender`
+  - The variant now expects `(Arc<RelayDatabase>, DatabaseSender)` instead of just `Arc<RelayDatabase>`
+  - This allows existing database instances to work with the new actor pattern
 
 ### Performance
 - Removed `event_start_time` and `event_kind` fields from `NostrConnectionState`

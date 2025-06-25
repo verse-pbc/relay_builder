@@ -75,8 +75,8 @@ pub struct WebSocketConfig {
 pub enum DatabaseConfig {
     /// Create a new database at the specified path
     Path(String),
-    /// Use an existing database instance
-    Instance(Arc<RelayDatabase>),
+    /// Use an existing database instance with its sender
+    Instance(Arc<RelayDatabase>, crate::database::DatabaseSender),
 }
 
 impl From<String> for DatabaseConfig {
@@ -91,9 +91,9 @@ impl From<&str> for DatabaseConfig {
     }
 }
 
-impl From<Arc<RelayDatabase>> for DatabaseConfig {
-    fn from(db: Arc<RelayDatabase>) -> Self {
-        DatabaseConfig::Instance(db)
+impl From<(Arc<RelayDatabase>, crate::database::DatabaseSender)> for DatabaseConfig {
+    fn from((db, sender): (Arc<RelayDatabase>, crate::database::DatabaseSender)) -> Self {
+        DatabaseConfig::Instance(db, sender)
     }
 }
 
@@ -177,14 +177,9 @@ impl RelayConfig {
                 };
                 Ok((Arc::new(database), db_sender))
             }
-            DatabaseConfig::Instance(_db) => {
-                // For existing instances, we need to create a DatabaseSender
-                // This is a limitation - existing instances won't have write capability
-                // through the actor pattern
-                Err(Error::internal(
-                    "Cannot use existing database instance with actor pattern. \
-                     Please use DatabaseConfig::Path instead.",
-                ))
+            DatabaseConfig::Instance(db, sender) => {
+                // Return the existing database instance and its sender
+                Ok((db.clone(), sender.clone()))
             }
         }
     }

@@ -1,15 +1,15 @@
 # Nostr Relay Builder
 
-A high-performance framework for building custom Nostr relays in Rust.
+A framework for building custom Nostr relays in Rust.
 
 ## Features
 
-- 🚀 **Fast** - Built on async Rust with Tokio
-- 🔌 **Extensible** - Pluggable business logic via EventProcessor  
-- 🛡️ **Secure** - Automatic signature verification and error handling
-- 📦 **Batteries Included** - Built-in NIPs: 09 (deletion), 40 (expiration), 42 (auth), 70 (protected)
-- 🏢 **Multi-tenant** - Subdomain isolation for SaaS deployments
-- 📊 **Observable** - Metrics, monitoring, and graceful shutdown
+- Built on async Rust with Tokio
+- Pluggable business logic via EventProcessor trait
+- Automatic signature verification and error handling
+- Built-in NIPs: 09 (deletion), 40 (expiration), 42 (auth), 70 (protected)
+- Subdomain isolation for multi-tenant deployments
+- Metrics, monitoring, and graceful shutdown
 
 ## Quick Start
 
@@ -48,17 +48,17 @@ async fn main() -> Result<()> {
     let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     
-    println!("🚀 Relay running at ws://localhost:8080");
+    println!("Relay running at ws://localhost:8080");
     axum::serve(listener, app.into_make_service()).await?;
     Ok(())
 }
 ```
 
-## Learn More
+## Documentation
 
-- **[📚 Tutorial](./examples/README.md)** - Step-by-step guide with 9 progressive examples
-- **[📂 Examples](./examples/)** - Working code for each tutorial step
-- **[🔧 API Docs](https://docs.rs/nostr_relay_builder)** - Detailed documentation
+- [Tutorial](./examples/README.md) - Step-by-step guide with progressive examples
+- [Examples](./examples/) - Working code samples
+- [API Docs](https://docs.rs/nostr_relay_builder) - API reference
 
 ## Production Usage
 

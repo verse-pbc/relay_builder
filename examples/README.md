@@ -1,19 +1,19 @@
-# Nostr Relay Builder Tutorial
+# Nostr Relay Builder Examples
 
-This tutorial teaches you to use nostr_relay_builder through 9 progressive examples. Each example adds ONE library feature with minimal code.
+This guide walks through nostr_relay_builder features with progressive examples.
 
 ## Prerequisites
 - Basic Rust knowledge
 - Familiarity with Nostr protocol basics
 
-## How to Use This Tutorial
-1. Each step has a corresponding example file (`01_*.rs` through `09_*.rs`)
-2. Examples build on each other - start from the beginning
-3. Run each example: `cargo run --example 01_minimal_relay --features axum`
+## Structure
+- Examples are numbered 01 through 09
+- Each builds on previous concepts
+- Run with: `cargo run --example 01_minimal_relay --features axum`
 
 ## Step 1: Minimal Relay
 
-Learn the basics with the simplest possible relay.
+Basic relay with default configuration.
 
 **Library Features:**
 - `RelayBuilder::new(config)` - Create a builder
@@ -23,17 +23,17 @@ Learn the basics with the simplest possible relay.
 - Default middlewares (logger, error handler, signature verifier)
 
 **What happens by default:**
-- ✅ Signature verification (EventVerifierMiddleware)
-- ✅ Error handling (ErrorHandlingMiddleware)
-- ✅ Request logging (LoggerMiddleware)
-- ✅ Event storage and retrieval
-- ✅ Subscription management
+- Signature verification (EventVerifierMiddleware)
+- Error handling (ErrorHandlingMiddleware)
+- Request logging (LoggerMiddleware)
+- Event storage and retrieval
+- Subscription management
 
-📝 **Run:** `cargo run --example 01_minimal_relay --features axum`
+**Run:** `cargo run --example 01_minimal_relay --features axum`
 
-## Step 2: Understanding Bare Mode
+## Step 2: Bare Mode
 
-See what the framework does for you by disabling defaults.
+Manual middleware configuration without defaults.
 
 **Library Features:**
 - `.bare()` - Disable automatic middleware
@@ -45,13 +45,13 @@ See what the framework does for you by disabling defaults.
 - How middleware ordering affects processing
 - When you might need bare mode (rarely!)
 
-⚠️ **Warning:** Without EventVerifierMiddleware, invalid signatures are accepted!
+**Warning:** Without EventVerifierMiddleware, invalid signatures are accepted!
 
-📝 **Run:** `cargo run --example 02_bare_mode --features axum`
+**Run:** `cargo run --example 02_bare_mode --features axum`
 
-## Step 3: Custom Business Logic with EventProcessor
+## Step 3: EventProcessor
 
-Filter events using high-level business logic.
+Implement custom business logic for event handling.
 
 **Library Features:**
 - `EventProcessor` trait - Your business logic interface
@@ -63,11 +63,11 @@ Filter events using high-level business logic.
 - EventProcessor = WHAT events to accept (business logic)
 - Middleware = HOW messages flow (protocol handling)
 
-📝 **Run:** `cargo run --example 03_spam_filter --features axum`
+**Run:** `cargo run --example 03_spam_filter --features axum`
 
-## Step 4: Adding Authentication
+## Step 4: Authentication
 
-Enable NIP-42 authentication with one configuration line.
+NIP-42 authentication support.
 
 **Library Features:**
 - `config.enable_auth = true` - Enable authentication
@@ -80,11 +80,11 @@ Enable NIP-42 authentication with one configuration line.
 - Users must authenticate before posting
 - Check authed_pubkey in your EventProcessor
 
-📝 **Run:** `cargo run --example 04_auth_relay --features axum`
+**Run:** `cargo run --example 04_auth_relay --features axum`
 
-## Step 5: Protocol Features (NIPs)
+## Step 5: Protocol Features
 
-Add support for deletion, expiration, and protected events.
+NIP support for deletion, expiration, and protected events.
 
 **Library Features:**
 - `config.create_database()` - Database and sender for NIP-09 (returns tuple)
@@ -97,11 +97,11 @@ Add support for deletion, expiration, and protected events.
 - Handle protocol-level concerns automatically
 - Can be combined as needed
 
-📝 **Run:** `cargo run --example 05_protocol_features --features axum`
+**Run:** `cargo run --example 05_protocol_features --features axum`
 
 ## Step 6: Custom Middleware
 
-Create your own middleware for cross-cutting concerns.
+Implement middleware for cross-cutting concerns.
 
 **Library Features:**
 - `Middleware` trait - Low-level message processing
@@ -113,11 +113,11 @@ Create your own middleware for cross-cutting concerns.
 - Middleware: Rate limiting, metrics, protocol extensions
 - EventProcessor: Business rules, access control
 
-📝 **Run:** `cargo run --example 06_rate_limiter --features axum`
+**Run:** `cargo run --example 06_rate_limiter --features axum`
 
 ## Step 7: Per-Connection State
 
-Track data for each connected client.
+Maintain state for each connection.
 
 **Library Features:**
 - `EventProcessor<T>` - Generic over state type
@@ -130,11 +130,11 @@ Track data for each connected client.
 - Session tracking
 - Reputation systems
 
-📝 **Run:** `cargo run --example 07_user_sessions --features axum`
+**Run:** `cargo run --example 07_user_sessions --features axum`
 
 ## Step 8: Multi-Tenant Support
 
-Isolate data by subdomain automatically.
+Subdomain-based data isolation.
 
 **Library Features:**
 - `ScopeConfig::Subdomain` - Enable subdomain isolation
@@ -145,13 +145,13 @@ Isolate data by subdomain automatically.
 **How it works:**
 - alice.relay.com → data scoped to "alice"
 - bob.relay.com → data scoped to "bob"
-- Zero code changes needed!
+- Automatic scoping based on subdomain
 
-📝 **Run:** `cargo run --example 08_multi_tenant --features axum`
+**Run:** `cargo run --example 08_multi_tenant --features axum`
 
-## Step 9: Production Ready
+## Step 9: Production Configuration
 
-Add monitoring, metrics, and graceful shutdown.
+Monitoring, metrics, and graceful shutdown.
 
 **Library Features:**
 - `.with_task_tracker()` - Graceful shutdown
@@ -167,7 +167,7 @@ Add monitoring, metrics, and graceful shutdown.
 - **groups_relay**: Custom ValidationMiddleware, PrometheusSubscriptionMetricsHandler
 - **profile_aggregator**: TaskTracker for graceful shutdown
 
-📝 **Run:** `cargo run --example 09_production --features axum`
+**Run:** `cargo run --example 09_production --features axum`
 
 ## Quick Reference
 
@@ -208,7 +208,7 @@ RelayBuilder::new(config)
 
 ### RelayConfig Methods
 ```rust
-RelayConfig::new(url, db_path, keys)    // db_path can be String or Arc<RelayDatabase>
+RelayConfig::new(url, db_path, keys)    // db_path can be String or (Arc<RelayDatabase>, DatabaseSender)
     .with_subdomains_from_url(url)      // Parse subdomains
     .with_auth(AuthConfig {...})         // Auth settings
     .with_websocket_config(config)       // Connection config

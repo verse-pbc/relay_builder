@@ -152,11 +152,6 @@ pub struct RelayDatabase {
     db_path: PathBuf,
     broadcast_sender: broadcast::Sender<Box<Event>>,
 
-    // Three specialized queues
-    save_signed_sender: Option<flume::Sender<SaveSignedItem>>,
-    save_unsigned_sender: Option<flume::Sender<SaveUnsignedItem>>,
-    delete_sender: Option<flume::Sender<DeleteItem>>,
-
     /// Queue capacity used for this instance
     queue_capacity: usize,
 }
@@ -165,12 +160,6 @@ impl std::fmt::Debug for RelayDatabase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RelayDatabase")
             .field("db_path", &self.db_path)
-            .field("has_save_signed_sender", &self.save_signed_sender.is_some())
-            .field(
-                "has_save_unsigned_sender",
-                &self.save_unsigned_sender.is_some(),
-            )
-            .field("has_delete_sender", &self.delete_sender.is_some())
             .finish()
     }
 }
@@ -592,9 +581,6 @@ impl RelayDatabase {
             env,
             db_path,
             broadcast_sender,
-            save_signed_sender: Some(save_signed_sender),
-            save_unsigned_sender: Some(save_unsigned_sender),
-            delete_sender: Some(delete_sender),
             queue_capacity,
         };
 
@@ -918,107 +904,9 @@ impl RelayDatabase {
         Ok(scopes)
     }
 
-    // NOTE: Write operations are removed from RelayDatabase public API.
-    // All writes must go through DatabaseSender following the actor pattern.
-    // The cancellation listener is now handled by the command dispatcher.
-
-    /// Get the current write queue depth (sum of all queues)
-    pub fn write_queue_len(&self) -> usize {
-        let signed_len = self
-            .save_signed_sender
-            .as_ref()
-            .map(|s| s.len())
-            .unwrap_or(0);
-        let unsigned_len = self
-            .save_unsigned_sender
-            .as_ref()
-            .map(|s| s.len())
-            .unwrap_or(0);
-        let delete_len = self.delete_sender.as_ref().map(|s| s.len()).unwrap_or(0);
-
-        signed_len + unsigned_len + delete_len
-    }
-
     /// Get the write queue capacity
     pub fn write_queue_capacity(&self) -> usize {
         self.queue_capacity
-    }
-
-    /// Get the write queue utilization percentage (0-100)
-    pub fn write_queue_utilization(&self) -> f64 {
-        let len = self.write_queue_len();
-        let capacity = self.write_queue_capacity();
-        if capacity > 0 {
-            // Account for 3 queues, each with the same capacity
-            (len as f64 / (capacity as f64 * 3.0)) * 100.0
-        } else {
-            0.0
-        }
-    }
-
-    /// Check if the write queue is near capacity (>80% full)
-    pub fn is_write_queue_congested(&self) -> bool {
-        self.write_queue_utilization() >= 80.0
-    }
-
-    /// Wait for the write queue to be empty (useful for tests)
-    pub async fn wait_for_queue_empty(&self, timeout: std::time::Duration) -> Result<(), Error> {
-        let start = std::time::Instant::now();
-        while self.write_queue_len() > 0 {
-            if start.elapsed() > timeout {
-                return Err(Error::internal("Timeout waiting for queue to empty"));
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        // Additional small delay to ensure batch processor has committed
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        Ok(())
-    }
-
-    /// Initiate graceful shutdown
-    pub async fn shutdown(mut self) -> Result<(), Error> {
-        info!("Initiating RelayDatabase shutdown");
-
-        // Step 1: Drop all senders to close the channels
-        if let Some(sender) = self.save_signed_sender.take() {
-            drop(sender);
-            info!("Dropped save signed sender");
-        }
-        if let Some(sender) = self.save_unsigned_sender.take() {
-            drop(sender);
-            info!("Dropped save unsigned sender");
-        }
-        if let Some(sender) = self.delete_sender.take() {
-            drop(sender);
-            info!("Dropped delete sender");
-        }
-
-        // Note: The caller is responsible for waiting on the task tracker
-        // that was used to spawn the background tasks
-        info!("Database shutdown complete - channels closed");
-
-        Ok(())
-    }
-}
-
-impl Drop for RelayDatabase {
-    fn drop(&mut self) {
-        // Note: In the actor pattern, writes go through DatabaseSender, not these internal senders
-        // So we don't warn about shutdown() not being called - the database will shut down
-        // naturally when all DatabaseSender instances are dropped
-
-        // Drop all internal senders to signal shutdown to any remaining processors
-        if let Some(sender) = self.save_signed_sender.take() {
-            drop(sender);
-        }
-        if let Some(sender) = self.save_unsigned_sender.take() {
-            drop(sender);
-        }
-        if let Some(sender) = self.delete_sender.take() {
-            drop(sender);
-        }
-
-        debug!("RelayDatabase dropped - processors will complete any pending work");
     }
 }
 
@@ -1050,10 +938,9 @@ mod tests {
             let keys = Keys::generate();
             let task_tracker = TaskTracker::new();
             let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
-            let (database, db_sender) =
+            let (_database, db_sender) =
                 RelayDatabase::with_task_tracker(&db_path, crypto_sender, task_tracker.clone())
                     .expect("Failed to create database");
-            let database = Arc::new(database);
 
             // Send events rapidly
             for i in 0..event_count {
@@ -1066,11 +953,6 @@ mod tests {
 
             // Properly shutdown the database
             drop(db_sender);
-            Arc::try_unwrap(database)
-                .expect("Failed to unwrap Arc<RelayDatabase>")
-                .shutdown()
-                .await
-                .expect("Failed to shutdown database");
 
             // Close and wait for task tracker
             task_tracker.close();
@@ -1180,10 +1062,9 @@ mod tests {
             let keys = Keys::generate();
             let task_tracker = TaskTracker::new();
             let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
-            let (database, db_sender) =
+            let (_database, db_sender) =
                 RelayDatabase::with_task_tracker(&db_path, crypto_sender, task_tracker.clone())
                     .expect("Failed to create database");
-            let database = Arc::new(database);
 
             // Send many events to ensure some are queued
             for i in 0..event_count {
@@ -1196,13 +1077,6 @@ mod tests {
 
             // Drop sender first
             drop(db_sender);
-
-            // Immediately initiate shutdown while events may still be processing
-            Arc::try_unwrap(database)
-                .expect("Failed to unwrap Arc<RelayDatabase>")
-                .shutdown()
-                .await
-                .expect("Failed to shutdown database");
 
             // Shutdown should take some time to process queued events
             // With batch operations, this may be faster, so we just ensure it completed
@@ -1235,75 +1109,6 @@ mod tests {
                 event_count, count
             );
         }
-    }
-
-    #[tokio::test]
-    async fn test_queue_monitoring() {
-        // Test that queue monitoring works with flume
-        let tmp_dir = TempDir::new().unwrap();
-        let db_path = tmp_dir.path().join("test.db");
-        let keys = Keys::generate();
-        let task_tracker = TaskTracker::new();
-        let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
-        let (database, db_sender) =
-            RelayDatabase::new(&db_path, crypto_sender).expect("Failed to create database");
-        let database = Arc::new(database);
-
-        // Initially queue should be empty
-        assert_eq!(database.write_queue_len(), 0);
-        assert_eq!(database.write_queue_capacity(), WRITE_QUEUE_CAPACITY);
-        assert_eq!(database.write_queue_utilization(), 0.0);
-        assert!(!database.is_write_queue_congested());
-
-        // Send some events
-        let event_count = 100;
-        for i in 0..event_count {
-            let event = generate_test_event(i).await;
-            db_sender
-                .save_signed_event(event, Scope::Default)
-                .await
-                .expect("Failed to save event");
-        }
-
-        // Queue should have some items (may vary due to processing speed)
-        let queue_len = database.write_queue_len();
-        assert!(queue_len <= event_count);
-
-        // Utilization should be calculated correctly (accounting for 3 queues)
-        let utilization = database.write_queue_utilization();
-        let expected_utilization = (queue_len as f64 / (WRITE_QUEUE_CAPACITY as f64 * 3.0)) * 100.0;
-        assert!(
-            (utilization - expected_utilization).abs() < 1.0,
-            "Utilization {} vs expected {}",
-            utilization,
-            expected_utilization
-        );
-
-        // Wait for queue to drain
-        let start = std::time::Instant::now();
-        while database.write_queue_len() > 0 && start.elapsed() < std::time::Duration::from_secs(5)
-        {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-
-        // Queue should be empty
-        assert_eq!(
-            database.write_queue_len(),
-            0,
-            "Queue should be empty after draining"
-        );
-
-        // Cleanup
-        drop(db_sender);
-        Arc::try_unwrap(database)
-            .expect("Failed to unwrap Arc<RelayDatabase>")
-            .shutdown()
-            .await
-            .expect("Failed to shutdown database");
-
-        // Close and wait for task tracker
-        task_tracker.close();
-        task_tracker.wait().await;
     }
 
     #[tokio::test]
@@ -1341,11 +1146,6 @@ mod tests {
 
         // Cleanup
         drop(db_sender);
-        Arc::try_unwrap(database)
-            .expect("Failed to unwrap Arc<RelayDatabase>")
-            .shutdown()
-            .await
-            .expect("Failed to shutdown database");
 
         // Close and wait for task tracker
         task_tracker.close();
