@@ -178,11 +178,11 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for Nip42Mid
                     connection_id_clone, auth_event_id
                 );
 
-                let (expected_challenge, connection_scope) = {
+                let (expected_challenge, connection_subdomain) = {
                     let state_guard = ctx.state.read().await;
                     let challenge = state_guard.challenge.as_ref().cloned();
-                    let scope = state_guard.subdomain().clone();
-                    (challenge, scope)
+                    let subdomain = state_guard.subdomain().clone();
+                    (challenge, subdomain)
                 };
 
                 let Some(expected_challenge) = expected_challenge else {
@@ -284,9 +284,9 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for Nip42Mid
                         let client_relay_url = tag_relay_url.as_str_without_trailing_slash();
 
                         // Validate the relay URL against the current connection
-                        if !self.validate_relay_url(client_relay_url, &connection_scope) {
+                        if !self.validate_relay_url(client_relay_url, &connection_subdomain) {
                             let conn_id_err = ctx.connection_id.clone();
-                            let subdomain_msg = match &connection_scope {
+                            let subdomain_msg = match &connection_subdomain {
                                 Scope::Named { name, .. } => format!(" with subdomain '{}'", name),
                                 Scope::Default => String::new(),
                             };

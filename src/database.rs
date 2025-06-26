@@ -195,9 +195,8 @@ impl RelayDatabase {
                 match env.save_event_with_txn(&mut txn, &item.scope, &item.event) {
                     Ok(status) => {
                         if !status.is_success() {
-                            all_succeeded = false;
+                            // Rejected is not an error, we just log it
                             error!("Failed to save event: status={:?}", status);
-                            break; // Stop on first failure
                         }
                     }
                     Err(e) => {
@@ -1109,6 +1108,95 @@ mod tests {
                 event_count, count
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_batch_save_handles_rejected_events() {
+        // This test verifies that batch saves continue processing even when some events are rejected
+        let tmp_dir = TempDir::new().unwrap();
+        let db_path = tmp_dir.path().join("test.db");
+
+        // Create database
+        let keys = Keys::generate();
+        let task_tracker = TaskTracker::new();
+        let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
+        let (database, db_sender) =
+            RelayDatabase::with_task_tracker(&db_path, crypto_sender, task_tracker.clone())
+                .expect("Failed to create database");
+        let database = Arc::new(database);
+
+        // Create a unique event that we'll save twice to trigger rejection
+        let duplicate_event = generate_test_event(999).await;
+
+        // First, save the duplicate event once
+        db_sender
+            .save_signed_event(duplicate_event.clone(), Scope::Default)
+            .await
+            .expect("Failed to save initial event");
+
+        // Wait a bit to ensure it's processed
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Now send a batch with:
+        // - Some new events (should succeed)
+        // - The duplicate event (should be rejected)
+        // - More new events (should still succeed despite the rejection)
+        let batch_size = 10;
+        for i in 0..batch_size {
+            if i == 5 {
+                // Insert the duplicate in the middle of the batch
+                db_sender
+                    .save_signed_event(duplicate_event.clone(), Scope::Default)
+                    .await
+                    .expect("Failed to queue duplicate event");
+            } else {
+                let event = generate_test_event(i).await;
+                db_sender
+                    .save_signed_event(event, Scope::Default)
+                    .await
+                    .expect("Failed to queue event");
+            }
+        }
+
+        // Wait for processing before checking results
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+        // Verify the results using the existing database instance
+        let count = database
+            .count(
+                vec![Filter::new().kinds(vec![Kind::TextNote])],
+                &Scope::Default,
+            )
+            .await
+            .expect("Failed to count events");
+
+        // We should have:
+        // - 1 event from the initial save (event 999)
+        // - 9 events from the batch (0-4, 6-9, but not the duplicate at position 5)
+        // Total: 10 events
+        assert_eq!(
+            count, 10,
+            "Expected 10 unique events (1 initial + 9 new), but found {}",
+            count
+        );
+
+        // Verify the duplicate event exists (only one copy)
+        let duplicate_filter = vec![Filter::new().id(duplicate_event.id)];
+        let duplicate_count = database
+            .count(duplicate_filter, &Scope::Default)
+            .await
+            .expect("Failed to count duplicate event");
+
+        assert_eq!(
+            duplicate_count, 1,
+            "Expected exactly 1 copy of the duplicate event, but found {}",
+            duplicate_count
+        );
+
+        // Cleanup
+        drop(db_sender);
+        task_tracker.close();
+        task_tracker.wait().await;
     }
 
     #[tokio::test]
