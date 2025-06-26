@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2025-06-26
+
+### Fixed
+- Fixed batch save operations incorrectly stopping on rejected events (e.g., duplicates)
+  - Rejected events are now properly logged but don't interrupt processing of remaining events
+  - Added test coverage for batch save behavior with mixed success/rejected statuses
+
 ## [0.4.0] - 2025-06-25
 
 ### Changed

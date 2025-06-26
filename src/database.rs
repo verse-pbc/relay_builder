@@ -958,6 +958,9 @@ mod tests {
             task_tracker.wait().await;
         }
 
+        // Give LMDB time to fully release resources
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
         // Re-open database and verify all events were saved
         {
             let keys = Keys::generate();

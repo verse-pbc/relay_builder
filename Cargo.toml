@@ -1,6 +1,6 @@
 [package]
 name = "nostr_relay_builder"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 authors = ["Daniel Cadenas <dcadenas@gmail.com>"]
 description = "A framework for building custom Nostr relays with pluggable business logic and middleware support"
