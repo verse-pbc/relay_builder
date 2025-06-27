@@ -520,11 +520,14 @@ where
                 // Use existing database instance - create crypto worker for signature verification
                 (db, db_sender, crypto_sender)
             }
-            Some(DatabaseConfig::Path(_)) => {
+            Some(database_config @ DatabaseConfig::Path(_)) => {
                 // Create new database with crypto worker
                 let crypto_sender =
                     CryptoWorker::spawn(Arc::new(self.config.keys.clone()), &task_tracker);
-                let (database, db_sender) = self.config.create_database_with_tracker(
+                let (database, db_sender) = RelayConfig::create_database_from_config(
+                    database_config,
+                    &self.config.websocket_config,
+                    self.config.max_subscriptions,
                     crypto_sender.clone(),
                     Some(task_tracker.clone()),
                     self.cancellation_token.clone(),

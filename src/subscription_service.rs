@@ -509,6 +509,49 @@ impl SubscriptionService {
         }
     }
 
+    /// Helper method to send events with proper error handling for channel overflow
+    #[inline]
+    fn send_event_bypass(
+        sender: &mut MessageSender<RelayMessage<'static>>,
+        subscription_id: &SubscriptionId,
+        event: Event,
+    ) -> Result<(), Error> {
+        let message = RelayMessage::Event {
+            subscription_id: Cow::Owned(subscription_id.clone()),
+            event: Cow::Owned(event),
+        };
+
+        match sender.send_bypass(message) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                use flume::TrySendError;
+                match e {
+                    TrySendError::Full(_) => {
+                        // Channel is full - this is a backpressure issue
+                        // Log as warning but don't fail the entire operation
+                        warn!(
+                            "Channel full when sending event for subscription {}. \
+                            Consider increasing channel size or implementing flow control.",
+                            subscription_id
+                        );
+                        // Return a notice error to inform the client without crashing
+                        Err(Error::notice(
+                            "Server temporarily overloaded, some events may be dropped",
+                        ))
+                    }
+                    TrySendError::Disconnected(_) => {
+                        // Channel is closed - connection is likely shutting down
+                        debug!(
+                            "Channel closed when sending event for subscription {}",
+                            subscription_id
+                        );
+                        Err(Error::internal("Connection closed"))
+                    }
+                }
+            }
+        }
+    }
+
     /// Handle subscriptions without optimization (no limits or both since and until)
     async fn handle_simple_subscription(
         mut ctx: SubscriptionContext<'_>,
@@ -529,13 +572,7 @@ impl SubscriptionService {
         // Send matching events
         for event in events {
             if filter_fn(&event, ctx.subdomain, ctx.authed_pubkey.as_ref()) {
-                let message = RelayMessage::Event {
-                    subscription_id: Cow::Owned(ctx.subscription_id.clone()),
-                    event: Cow::Owned(event),
-                };
-                ctx.sender
-                    .send_bypass(message)
-                    .map_err(|e| Error::internal(format!("Failed to send event: {e:?}")))?;
+                Self::send_event_bypass(&mut ctx.sender, &ctx.subscription_id, event)?;
             }
         }
 
@@ -664,13 +701,7 @@ impl SubscriptionService {
                     }
 
                     sent_events.insert(event.id);
-                    let message = RelayMessage::Event {
-                        subscription_id: Cow::Owned(ctx.subscription_id.clone()),
-                        event: Cow::Owned(event),
-                    };
-                    ctx.sender
-                        .send_bypass(message)
-                        .map_err(|e| Error::internal(format!("Failed to send event: {e:?}")))?;
+                    Self::send_event_bypass(&mut ctx.sender, &ctx.subscription_id, event)?;
                     filter_sent += 1;
                     total_sent += 1;
                 }
@@ -791,13 +822,7 @@ impl SubscriptionService {
                     .take(requested_limit - filter_sent)
                 {
                     sent_events.insert(event.id);
-                    let message = RelayMessage::Event {
-                        subscription_id: Cow::Owned(ctx.subscription_id.clone()),
-                        event: Cow::Owned(event),
-                    };
-                    ctx.sender
-                        .send_bypass(message)
-                        .map_err(|e| Error::internal(format!("Failed to send event: {e:?}")))?;
+                    Self::send_event_bypass(&mut ctx.sender, &ctx.subscription_id, event)?;
                     filter_sent += 1;
                     total_sent += 1;
                 }

@@ -8,6 +8,7 @@
 /data/
 *.db/
 *.db
+*_relay_db/
 
 # IDE
 .idea/

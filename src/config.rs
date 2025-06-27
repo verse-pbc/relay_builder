@@ -212,6 +212,43 @@ impl RelayConfig {
         }
     }
 
+    /// Create database instance from a database config with a provided crypto sender and optional TaskTracker
+    pub fn create_database_from_config(
+        database_config: DatabaseConfig,
+        websocket_config: &WebSocketConfig,
+        max_subscriptions: usize,
+        crypto_sender: CryptoSender,
+        task_tracker: Option<tokio_util::task::TaskTracker>,
+        cancellation_token: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<(Arc<RelayDatabase>, crate::database::DatabaseSender), Error> {
+        match database_config {
+            DatabaseConfig::Path(path) => {
+                let (database, db_sender) = match (task_tracker, cancellation_token) {
+                    (Some(tracker), Some(token)) => RelayDatabase::with_task_tracker_and_token(
+                        &path,
+                        crypto_sender,
+                        tracker,
+                        token,
+                    )?,
+                    (Some(tracker), None) => {
+                        RelayDatabase::with_task_tracker(&path, crypto_sender, tracker)?
+                    }
+                    _ => RelayDatabase::with_config(
+                        &path,
+                        crypto_sender,
+                        websocket_config.max_connections,
+                        Some(max_subscriptions),
+                    )?,
+                };
+                Ok((Arc::new(database), db_sender))
+            }
+            DatabaseConfig::Instance(db, sender, _crypto_sender) => {
+                // Return the existing database instance and its sender
+                Ok((db, sender))
+            }
+        }
+    }
+
     /// Set the scope configuration
     pub fn with_scope_config(mut self, scope_config: ScopeConfig) -> Self {
         self.scope_config = scope_config;
