@@ -8,7 +8,6 @@ use nostr_database::nostr::{Event, Filter};
 use nostr_database::Events;
 use nostr_lmdb::{NostrLMDB, Scope};
 use nostr_sdk::prelude::*;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -40,9 +39,21 @@ struct CommandWithReply {
 ///
 /// This wrapper provides a clean API for sending commands to the database actor
 /// and includes convenience methods for common operations.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct DatabaseSender {
     inner: flume::Sender<CommandWithReply>,
+}
+
+impl std::fmt::Debug for DatabaseSender {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DatabaseSender").finish()
+    }
+}
+
+impl Drop for DatabaseSender {
+    fn drop(&mut self) {
+        debug!("DatabaseSender dropped");
+    }
 }
 
 impl DatabaseSender {
@@ -146,28 +157,19 @@ struct DeleteItem {
 }
 
 /// A Nostr relay database that wraps NostrLMDB with async operations and event broadcasting
+#[derive(Debug)]
 pub struct RelayDatabase {
-    env: Arc<NostrLMDB>,
-    #[allow(dead_code)]
-    db_path: PathBuf,
+    lmdb: Arc<NostrLMDB>,
     broadcast_sender: broadcast::Sender<Box<Event>>,
 
     /// Queue capacity used for this instance
     queue_capacity: usize,
 }
 
-impl std::fmt::Debug for RelayDatabase {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RelayDatabase")
-            .field("db_path", &self.db_path)
-            .finish()
-    }
-}
-
 impl RelayDatabase {
     /// Process a batch of signed save items
     fn process_signed_batch(
-        env: &NostrLMDB,
+        env: &Arc<NostrLMDB>,
         items: Vec<SaveSignedItem>,
         broadcast_sender: &broadcast::Sender<Box<Event>>,
     ) {
@@ -183,7 +185,7 @@ impl RelayDatabase {
                 Ok(txn) => txn,
                 Err(e) => {
                     error!("Failed to create write transaction: {:?}", e);
-                    Self::send_error_responses(items, format!("error: {}", e));
+                    Self::send_error_responses(items, format!("error: {e}"));
                     return;
                 }
             };
@@ -238,7 +240,7 @@ impl RelayDatabase {
             }
             Err(error_msg) => {
                 // All failed - send error responses
-                Self::send_error_responses(items, format!("error: {}", error_msg));
+                Self::send_error_responses(items, format!("error: {error_msg}"));
             }
         }
     }
@@ -300,7 +302,7 @@ impl RelayDatabase {
                     error!("Failed to create write transaction: {:?}", e);
                     Self::send_delete_error_responses(
                         items,
-                        format!("Failed to create transaction: {}", e),
+                        format!("Failed to create transaction: {e}"),
                     );
                     return;
                 }
@@ -478,8 +480,7 @@ impl RelayDatabase {
             if !parent.exists() {
                 std::fs::create_dir_all(parent).map_err(|e| {
                     Error::database(format!(
-                        "Failed to create database directory parent '{:?}': {}",
-                        parent, e
+                        "Failed to create database directory parent '{parent:?}': {e}"
                     ))
                 })?;
             }
@@ -487,8 +488,7 @@ impl RelayDatabase {
         if !db_path.exists() {
             std::fs::create_dir_all(&db_path).map_err(|e| {
                 Error::database(format!(
-                    "Failed to create database directory '{:?}': {}",
-                    db_path, e
+                    "Failed to create database directory '{db_path:?}': {e}"
                 ))
             })?;
         }
@@ -500,11 +500,10 @@ impl RelayDatabase {
         }
         let lmdb_instance = NostrLMDB::open_with_env_config(&db_path).map_err(|e| {
             Error::database(format!(
-                "Failed to open NostrLMDB at path '{:?}': {}",
-                db_path, e
+                "Failed to open NostrLMDB at path '{db_path:?}': {e}"
             ))
         })?;
-        let env = Arc::new(lmdb_instance);
+        let lmdb = Arc::new(lmdb_instance);
 
         // Create channels for async operations
         // Use same queue capacity for both modes to enable batching
@@ -562,7 +561,7 @@ impl RelayDatabase {
         // Spawn processor tasks
         Self::spawn_save_signed_processor(
             save_signed_receiver,
-            Arc::clone(&env),
+            Arc::clone(&lmdb),
             broadcast_sender.clone(),
             &task_tracker,
         );
@@ -574,11 +573,10 @@ impl RelayDatabase {
             &task_tracker,
         );
 
-        Self::spawn_delete_processor(delete_receiver, Arc::clone(&env), &task_tracker);
+        Self::spawn_delete_processor(delete_receiver, Arc::clone(&lmdb), &task_tracker);
 
         let relay_db = Self {
-            env,
-            db_path,
+            lmdb,
             broadcast_sender,
             queue_capacity,
         };
@@ -682,7 +680,7 @@ impl RelayDatabase {
                 let first_item = match receiver.recv() {
                     Ok(item) => item,
                     Err(_) => {
-                        debug!("Save signed processor channel closed");
+                        info!("Save signed processor channel closed - all senders dropped");
                         break;
                     }
                 };
@@ -738,16 +736,13 @@ impl RelayDatabase {
                         if let Some(response_handler) = response_handler {
                             match response_handler {
                                 ResponseHandler::MessageSender(mut sender) => {
-                                    let msg = RelayMessage::notice(format!(
-                                        "Failed to sign event: {}",
-                                        e
-                                    ));
+                                    let msg =
+                                        RelayMessage::notice(format!("Failed to sign event: {e}"));
                                     let _ = sender.send_bypass(msg);
                                 }
                                 ResponseHandler::Oneshot(oneshot_sender) => {
                                     let _ = oneshot_sender.send(Err(Error::internal(format!(
-                                        "Failed to sign event: {}",
-                                        e
+                                        "Failed to sign event: {e}"
                                     ))));
                                 }
                             }
@@ -773,7 +768,7 @@ impl RelayDatabase {
                 let first_item = match receiver.recv() {
                     Ok(item) => item,
                     Err(_) => {
-                        debug!("Delete processor channel closed");
+                        info!("Delete processor channel closed - all senders dropped");
                         break;
                     }
                 };
@@ -807,7 +802,7 @@ impl RelayDatabase {
         let env = self.get_env(scope).await?;
         let scoped_view = env.scoped(scope).map_err(|e| {
             error!("Error getting scoped view: {:?}", e);
-            Error::database(format!("Failed to get scoped view: {}", e))
+            Error::database(format!("Failed to get scoped view: {e}"))
         })?;
 
         scoped_view.save_event(event).await.map_err(|e| {
@@ -828,7 +823,7 @@ impl RelayDatabase {
         let env = self.get_env(scope).await?;
         let scoped_view = env.scoped(scope).map_err(|e| {
             error!("Error getting scoped view: {:?}", e);
-            Error::database(format!("Failed to get scoped view: {}", e))
+            Error::database(format!("Failed to get scoped view: {e}"))
         })?;
 
         scoped_view.delete(filter).await.map_err(|e| {
@@ -845,7 +840,7 @@ impl RelayDatabase {
         let env = self.get_env(scope).await?;
         let scoped_view = env.scoped(scope).map_err(|e| {
             error!("Error getting scoped view: {:?}", e);
-            Error::database(format!("Failed to get scoped view: {}", e))
+            Error::database(format!("Failed to get scoped view: {e}"))
         })?;
 
         let mut all_events = Events::new(&Filter::new());
@@ -854,7 +849,7 @@ impl RelayDatabase {
         for filter in filters {
             let events = scoped_view.query(filter).await.map_err(|e| {
                 error!("Error querying events: {:?}", e);
-                Error::database(format!("Failed to query events: {}", e))
+                Error::database(format!("Failed to query events: {e}"))
             })?;
 
             all_events.extend(events);
@@ -868,7 +863,7 @@ impl RelayDatabase {
         let env = self.get_env(scope).await?;
         let scoped_view = env.scoped(scope).map_err(|e| {
             error!("Error getting scoped view: {:?}", e);
-            Error::database(format!("Failed to get scoped view: {}", e))
+            Error::database(format!("Failed to get scoped view: {e}"))
         })?;
 
         let mut total_count = 0;
@@ -877,7 +872,7 @@ impl RelayDatabase {
         for filter in filters {
             let count = scoped_view.count(filter).await.map_err(|e| {
                 error!("Error counting events: {:?}", e);
-                Error::database(format!("Failed to count events: {}", e))
+                Error::database(format!("Failed to count events: {e}"))
             })?;
             total_count += count;
         }
@@ -888,17 +883,17 @@ impl RelayDatabase {
     /// Get the database environment for a scope
     async fn get_env(&self, _scope: &Scope) -> Result<Arc<NostrLMDB>, Error> {
         // In this implementation, we use a single database for all scopes
-        Ok(Arc::clone(&self.env))
+        Ok(Arc::clone(&self.lmdb))
     }
 
     /// List all scopes available in the database
     pub async fn list_scopes(&self) -> Result<Vec<Scope>, Error> {
-        let env = Arc::clone(&self.env);
+        let env = Arc::clone(&self.lmdb);
 
         let scopes = tokio::task::spawn_blocking(move || env.list_scopes())
             .await
-            .map_err(|e| Error::database(format!("Failed to spawn blocking task: {}", e)))?
-            .map_err(|e| Error::database(format!("Failed to list scopes: {}", e)))?;
+            .map_err(|e| Error::database(format!("Failed to spawn blocking task: {e}")))?
+            .map_err(|e| Error::database(format!("Failed to list scopes: {e}")))?;
 
         Ok(scopes)
     }
@@ -920,7 +915,7 @@ mod tests {
 
     async fn generate_test_event(index: usize) -> Event {
         let keys = Keys::generate();
-        EventBuilder::text_note(format!("Test event #{}", index))
+        EventBuilder::text_note(format!("Test event #{index}"))
             .sign(&keys)
             .await
             .expect("Failed to create event")
@@ -980,8 +975,7 @@ mod tests {
 
             assert_eq!(
                 count, event_count,
-                "Expected {} events but found {}. Data loss detected!",
-                event_count, count
+                "Expected {event_count} events but found {count}. Data loss detected!"
             );
         }
     }
@@ -1107,8 +1101,7 @@ mod tests {
 
             assert_eq!(
                 count, event_count,
-                "Expected {} events but found {}",
-                event_count, count
+                "Expected {event_count} events but found {count}"
             );
         }
     }
@@ -1179,8 +1172,7 @@ mod tests {
         // Total: 10 events
         assert_eq!(
             count, 10,
-            "Expected 10 unique events (1 initial + 9 new), but found {}",
-            count
+            "Expected 10 unique events (1 initial + 9 new), but found {count}"
         );
 
         // Verify the duplicate event exists (only one copy)
@@ -1192,8 +1184,7 @@ mod tests {
 
         assert_eq!(
             duplicate_count, 1,
-            "Expected exactly 1 copy of the duplicate event, but found {}",
-            duplicate_count
+            "Expected exactly 1 copy of the duplicate event, but found {duplicate_count}"
         );
 
         // Cleanup

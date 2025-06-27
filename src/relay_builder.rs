@@ -1,6 +1,6 @@
 //! RelayBuilder for constructing Nostr relays with custom state
 
-use crate::config::RelayConfig;
+use crate::config::{DatabaseConfig, RelayConfig, ScopeConfig};
 use crate::crypto_worker::CryptoWorker;
 use crate::database::{DatabaseSender, RelayDatabase};
 use crate::error::Error;
@@ -230,12 +230,14 @@ where
     /// Set a custom event processor for handling relay business logic
     ///
     /// If not set, uses DefaultRelayProcessor which accepts all valid events.
+    ///
+    /// This method accepts both `MyProcessor` and `Arc::new(MyProcessor)`.
     #[must_use]
-    pub fn with_event_processor<P>(mut self, processor: P) -> Self
+    pub fn with_event_processor<P>(mut self, processor: impl Into<Arc<P>>) -> Self
     where
         P: EventProcessor<T> + 'static,
     {
-        self.event_processor = Arc::new(processor);
+        self.event_processor = processor.into();
         self
     }
 
@@ -317,28 +319,25 @@ where
 
     /// Build the connection factory
     fn build_connection_factory(
-        &self,
+        &mut self,
         database: Arc<RelayDatabase>,
         db_sender: DatabaseSender,
+        relay_url: String,
+        scope_config: ScopeConfig,
     ) -> Result<NostrConnectionFactory<T>, Error>
     where
         T: Default,
     {
-        if let Some(ref state_factory) = self.state_factory {
+        if let Some(state_factory) = self.state_factory.take() {
             NostrConnectionFactory::new_with_factory(
-                self.config.relay_url.clone(),
+                relay_url,
                 database,
                 db_sender,
-                self.config.scope_config.clone(),
-                state_factory.clone() as Arc<dyn Fn() -> T + Send + Sync>,
+                scope_config,
+                state_factory as Arc<dyn Fn() -> T + Send + Sync>,
             )
         } else {
-            NostrConnectionFactory::new(
-                self.config.relay_url.clone(),
-                database,
-                db_sender,
-                self.config.scope_config.clone(),
-            )
+            NostrConnectionFactory::new(relay_url, database, db_sender, scope_config)
         }
     }
 
@@ -507,18 +506,41 @@ where
             crate::global_metrics::set_subscription_metrics_handler(handler);
         }
 
-        // Create the crypto worker for signing and verification
         let task_tracker = self.task_tracker.take().unwrap_or_default();
-        let crypto_sender = CryptoWorker::spawn(Arc::new(self.config.keys.clone()), &task_tracker);
 
-        let (database, db_sender) = self.config.create_database_with_tracker(
-            crypto_sender.clone(),
-            Some(task_tracker.clone()),
-            self.cancellation_token.clone(),
-        )?;
+        // Calculate channel size based on max_subscriptions * max_limit * 1.10
+        let calculated_channel_size = self.config.calculate_channel_size();
+        let relay_url = self.config.relay_url.clone();
+        let scope_config = self.config.scope_config.clone();
+
+        // Only create crypto worker if we're creating a new database
+        let database = self.config.database.take();
+        let (database, db_sender, crypto_sender) = match database {
+            Some(DatabaseConfig::Instance(db, db_sender, crypto_sender)) => {
+                // Use existing database instance - create crypto worker for signature verification
+                (db, db_sender, crypto_sender)
+            }
+            Some(DatabaseConfig::Path(_)) => {
+                // Create new database with crypto worker
+                let crypto_sender =
+                    CryptoWorker::spawn(Arc::new(self.config.keys.clone()), &task_tracker);
+                let (database, db_sender) = self.config.create_database_with_tracker(
+                    crypto_sender.clone(),
+                    Some(task_tracker.clone()),
+                    self.cancellation_token.clone(),
+                )?;
+                (database, db_sender, crypto_sender)
+            }
+            None => {
+                return Err(Error::internal(
+                    "Database configuration is required".to_string(),
+                ));
+            }
+        };
 
         let custom_middlewares = std::mem::take(&mut self.middlewares);
-        let connection_factory = self.build_connection_factory(database.clone(), db_sender)?;
+        let connection_factory =
+            self.build_connection_factory(database.clone(), db_sender, relay_url, scope_config)?;
 
         // Create a wrapper to use Arc<dyn EventProcessor<T>> with RelayMiddleware
         struct DynProcessor<T>(Arc<dyn EventProcessor<T>>);
@@ -578,8 +600,6 @@ where
 
         let mut builder = WebSocketBuilder::new(connection_factory, NostrMessageConverter);
 
-        // Calculate channel size based on max_subscriptions * max_limit * 1.10
-        let calculated_channel_size = self.config.calculate_channel_size();
         builder = builder.with_channel_size(calculated_channel_size);
 
         // Apply other websocket configurations if supported
@@ -630,7 +650,7 @@ where
         // Add event verification middleware unless in bare mode
         if !self.bare_mode {
             builder = builder.with_middleware(crate::middlewares::EventVerifierMiddleware::new(
-                crypto_sender.clone(),
+                crypto_sender,
             ));
         }
 

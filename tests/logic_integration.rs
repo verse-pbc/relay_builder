@@ -209,8 +209,7 @@ impl EventProcessor for FilteringProcessor {
         for keyword in &self.blocked_keywords {
             if event.content.contains(keyword) {
                 return Err(Error::restricted(format!(
-                    "Event contains blocked keyword: {}",
-                    keyword
+                    "Event contains blocked keyword: {keyword}"
                 )));
             }
         }

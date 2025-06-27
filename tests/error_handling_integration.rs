@@ -32,6 +32,6 @@ fn test_error_handling_middleware_creation() {
 #[test]
 fn test_error_handling_middleware_debug_trait() {
     let middleware = ErrorHandlingMiddleware::<()>::new();
-    let debug_str = format!("{:?}", middleware);
+    let debug_str = format!("{middleware:?}");
     assert!(debug_str.contains("ErrorHandlingMiddleware"));
 }

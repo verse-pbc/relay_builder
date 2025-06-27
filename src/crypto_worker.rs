@@ -117,7 +117,7 @@ impl CryptoWorker {
                     let first_op = match rx.recv() {
                         Ok(op) => op,
                         Err(_) => {
-                            debug!("Crypto worker {} shutting down - channel closed", i);
+                            info!("Crypto worker {} shutting down - channel closed, all senders dropped", i);
                             break;
                         }
                     };
@@ -139,7 +139,7 @@ impl CryptoWorker {
                                 // Sign synchronously using sign_with_keys
                                 let result = event.sign_with_keys(&worker_keys).map_err(|e| {
                                     error!("Failed to sign event: {:?}", e);
-                                    Error::internal(format!("Failed to sign event: {}", e))
+                                    Error::internal(format!("Failed to sign event: {e}"))
                                 });
 
                                 if let Err(result) = response.send(result) {
@@ -150,7 +150,7 @@ impl CryptoWorker {
                                 // Verification is synchronous - no async needed
                                 let result = event.verify().map_err(|e| {
                                     debug!("Event verification failed: {:?}", e);
-                                    Error::protocol(format!("Invalid event signature: {}", e))
+                                    Error::protocol(format!("Invalid event signature: {e}"))
                                 });
 
                                 if let Err(result) = response.send(result) {
@@ -286,7 +286,7 @@ mod tests {
                     Timestamp::now(),
                     Kind::TextNote,
                     vec![],
-                    format!("Test message {}", i),
+                    format!("Test message {i}"),
                 );
 
                 sender_clone.sign_event(unsigned_event).await
@@ -306,7 +306,7 @@ mod tests {
                     Timestamp::now(),
                     Kind::TextNote,
                     vec![],
-                    format!("Verify message {}", i),
+                    format!("Verify message {i}"),
                 );
                 let signed_event = keys_clone.sign_event(unsigned_event).await.unwrap();
 
@@ -353,7 +353,7 @@ mod tests {
                     Timestamp::now(),
                     Kind::TextNote,
                     vec![],
-                    format!("Shutdown test {}", i),
+                    format!("Shutdown test {i}"),
                 );
 
                 sender_clone.sign_event(unsigned_event).await
@@ -413,7 +413,7 @@ mod tests {
                     Timestamp::now(),
                     Kind::TextNote,
                     vec![],
-                    format!("Backpressure test {}", i),
+                    format!("Backpressure test {i}"),
                 );
 
                 // Add small delay to simulate slow processing

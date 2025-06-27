@@ -257,7 +257,7 @@ pub fn default_relay_html(relay_info: &RelayInfo) -> String {
         nips = relay_info
             .supported_nips
             .iter()
-            .map(|nip| format!(r#"<span class="nip-badge">NIP-{}</span>"#, nip))
+            .map(|nip| format!(r#"<span class="nip-badge">NIP-{nip}</span>"#))
             .collect::<Vec<_>>()
             .join("")
     )
@@ -407,7 +407,7 @@ where
 
                     let display_info = if let Some(sub) = &subdomain {
                         if !sub.is_empty() {
-                            format!(" @{}", sub)
+                            format!(" @{sub}")
                         } else {
                             String::new()
                         }

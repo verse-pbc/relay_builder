@@ -86,7 +86,7 @@ fn scope_to_filename(scope: &Scope, include_count: bool, count: Option<u64>) -> 
     if include_count && count.is_some() {
         format!("{}_{}.jsonl", base, count.unwrap())
     } else {
-        format!("{}.jsonl", base)
+        format!("{base}.jsonl")
     }
 }
 
@@ -153,12 +153,12 @@ async fn export_scope(
     let file_path = output_path.join(&filename);
 
     let file = File::create(&file_path)
-        .with_context(|| format!("Failed to create file: {:?}", file_path))?;
+        .with_context(|| format!("Failed to create file: {file_path:?}"))?;
     let mut writer = BufWriter::new(file);
 
     for event in events {
         let json = event.as_json();
-        writeln!(writer, "{}", json)?;
+        writeln!(writer, "{json}")?;
     }
 
     writer.flush()?;
@@ -175,7 +175,7 @@ async fn export_database(
     // Create output directory if it doesn't exist
     if !output_dir.exists() {
         fs::create_dir_all(&output_dir)
-            .with_context(|| format!("Failed to create output directory: {:?}", output_dir))?;
+            .with_context(|| format!("Failed to create output directory: {output_dir:?}"))?;
     }
 
     // Check if directory is empty or force flag is set
@@ -229,7 +229,7 @@ async fn import_scope(
     skip_errors: bool,
 ) -> Result<(u64, u64)> {
     let file =
-        File::open(file_path).with_context(|| format!("Failed to open file: {:?}", file_path))?;
+        File::open(file_path).with_context(|| format!("Failed to open file: {file_path:?}"))?;
     let reader = BufReader::new(file);
 
     let mut imported = 0u64;
@@ -360,7 +360,7 @@ async fn import_database(
         for entry in &entries {
             if let Some(filename) = entry.file_name().to_str() {
                 if let Some(scope) = parse_scope_from_filename(filename) {
-                    println!("- {} -> {:?}", filename, scope);
+                    println!("- {filename} -> {scope:?}");
                 }
             }
         }
@@ -450,7 +450,7 @@ async fn main() -> Result<()> {
         } => {
             info!("Opening database at {:?}", db);
             let database = NostrLMDB::open(&db)
-                .with_context(|| format!("Failed to open database at {:?}", db))?;
+                .with_context(|| format!("Failed to open database at {db:?}"))?;
 
             export_database(database, output, force, include_count).await
         }
@@ -462,7 +462,7 @@ async fn main() -> Result<()> {
         } => {
             info!("Opening database at {:?}", db);
             let database = NostrLMDB::open(&db)
-                .with_context(|| format!("Failed to open database at {:?}", db))?;
+                .with_context(|| format!("Failed to open database at {db:?}"))?;
 
             import_database(database, input, yes, skip_errors).await
         }

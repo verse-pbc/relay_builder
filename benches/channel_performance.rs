@@ -9,7 +9,7 @@ use tokio_util::task::TaskTracker;
 /// Generate a test event
 async fn generate_event(index: usize) -> Event {
     let keys = Keys::generate();
-    EventBuilder::text_note(format!("Benchmark event #{}", index))
+    EventBuilder::text_note(format!("Benchmark event #{index}"))
         .sign(&keys)
         .await
         .expect("Failed to create event")

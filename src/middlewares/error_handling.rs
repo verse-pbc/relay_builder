@@ -106,7 +106,7 @@ async fn handle_inbound_error<T: Clone + Send + Sync + std::fmt::Debug + 'static
         } => RelayMessage::Ok {
             event_id: *event_id,
             status: false,
-            message: format!("error: {}", message).into(),
+            message: format!("error: {message}").into(),
         },
         SubscriptionError {
             message,
@@ -114,7 +114,7 @@ async fn handle_inbound_error<T: Clone + Send + Sync + std::fmt::Debug + 'static
             ..
         } => RelayMessage::Closed {
             subscription_id: Cow::Owned(SubscriptionId::new(subscription_id)),
-            message: format!("error: {}", message).into(),
+            message: format!("error: {message}").into(),
         },
         AuthRequired { message, .. } => {
             // For auth errors, use the auth-required prefix as per NIP-42
@@ -122,11 +122,11 @@ async fn handle_inbound_error<T: Clone + Send + Sync + std::fmt::Debug + 'static
                 ClientMessageId::Event(event_id) => RelayMessage::Ok {
                     event_id,
                     status: false,
-                    message: format!("auth-required: {}", message).into(),
+                    message: format!("auth-required: {message}").into(),
                 },
                 ClientMessageId::Subscription(subscription_id) => RelayMessage::Closed {
                     subscription_id: Cow::Owned(SubscriptionId::new(subscription_id)),
-                    message: format!("auth-required: {}", message).into(),
+                    message: format!("auth-required: {message}").into(),
                 },
             }
         }
@@ -136,11 +136,11 @@ async fn handle_inbound_error<T: Clone + Send + Sync + std::fmt::Debug + 'static
                 ClientMessageId::Event(event_id) => RelayMessage::Ok {
                     event_id,
                     status: false,
-                    message: format!("restricted: {}", message).into(),
+                    message: format!("restricted: {message}").into(),
                 },
                 ClientMessageId::Subscription(subscription_id) => RelayMessage::Closed {
                     subscription_id: Cow::Owned(SubscriptionId::new(subscription_id)),
-                    message: format!("restricted: {}", message).into(),
+                    message: format!("restricted: {message}").into(),
                 },
             }
         }
@@ -150,11 +150,11 @@ async fn handle_inbound_error<T: Clone + Send + Sync + std::fmt::Debug + 'static
                 ClientMessageId::Event(event_id) => RelayMessage::Ok {
                     event_id,
                     status: false,
-                    message: format!("error: {}", error).into(),
+                    message: format!("error: {error}").into(),
                 },
                 ClientMessageId::Subscription(subscription_id) => RelayMessage::Closed {
                     subscription_id: Cow::Owned(SubscriptionId::new(subscription_id)),
-                    message: format!("error: {}", error).into(),
+                    message: format!("error: {error}").into(),
                 },
             }
         }
@@ -193,18 +193,18 @@ mod tests {
     fn test_client_message_id_debug_impl() {
         let event_id = EventId::all_zeros();
         let msg_id = ClientMessageId::Event(event_id);
-        let debug_str = format!("{:?}", msg_id);
+        let debug_str = format!("{msg_id:?}");
         assert!(debug_str.contains("Event"));
 
         let sub_id = ClientMessageId::Subscription("test".to_string());
-        let debug_str = format!("{:?}", sub_id);
+        let debug_str = format!("{sub_id:?}");
         assert!(debug_str.contains("Subscription"));
     }
 
     #[test]
     fn test_error_handling_middleware_debug_impl() {
         let middleware = ErrorHandlingMiddleware::<()>::new();
-        let debug_str = format!("{:?}", middleware);
+        let debug_str = format!("{middleware:?}");
         assert!(debug_str.contains("ErrorHandlingMiddleware"));
     }
 

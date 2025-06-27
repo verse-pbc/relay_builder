@@ -518,7 +518,7 @@ impl SubscriptionService {
             .database
             .query(ctx.filters, ctx.subdomain)
             .await
-            .map_err(|e| Error::notice(format!("Failed to fetch events: {:?}", e)))?;
+            .map_err(|e| Error::notice(format!("Failed to fetch events: {e:?}")))?;
 
         debug!(
             "Simple query for {} returned {} events",
@@ -535,7 +535,7 @@ impl SubscriptionService {
                 };
                 ctx.sender
                     .send_bypass(message)
-                    .map_err(|e| Error::internal(format!("Failed to send event: {:?}", e)))?;
+                    .map_err(|e| Error::internal(format!("Failed to send event: {e:?}")))?;
             }
         }
 
@@ -544,7 +544,7 @@ impl SubscriptionService {
             .send(RelayMessage::EndOfStoredEvents(Cow::Owned(
                 ctx.subscription_id,
             )))
-            .map_err(|e| Error::internal(format!("Failed to send EOSE: {:?}", e)))?;
+            .map_err(|e| Error::internal(format!("Failed to send EOSE: {e:?}")))?;
 
         Ok(())
     }
@@ -607,7 +607,7 @@ impl SubscriptionService {
                     .database
                     .query(vec![window_filter.clone()], ctx.subdomain)
                     .await
-                    .map_err(|e| Error::notice(format!("Failed to fetch events: {:?}", e)))?;
+                    .map_err(|e| Error::notice(format!("Failed to fetch events: {e:?}")))?;
 
                 if events.is_empty() {
                     debug!("No more events found for filter {}", filter_idx);
@@ -670,7 +670,7 @@ impl SubscriptionService {
                     };
                     ctx.sender
                         .send_bypass(message)
-                        .map_err(|e| Error::internal(format!("Failed to send event: {:?}", e)))?;
+                        .map_err(|e| Error::internal(format!("Failed to send event: {e:?}")))?;
                     filter_sent += 1;
                     total_sent += 1;
                 }
@@ -720,7 +720,7 @@ impl SubscriptionService {
             .send(RelayMessage::EndOfStoredEvents(Cow::Owned(
                 ctx.subscription_id,
             )))
-            .map_err(|e| Error::internal(format!("Failed to send EOSE: {:?}", e)))?;
+            .map_err(|e| Error::internal(format!("Failed to send EOSE: {e:?}")))?;
 
         Ok(())
     }
@@ -767,7 +767,7 @@ impl SubscriptionService {
                     .database
                     .query(vec![buffer_filter.clone()], ctx.subdomain)
                     .await
-                    .map_err(|e| Error::notice(format!("Failed to fetch events: {:?}", e)))?;
+                    .map_err(|e| Error::notice(format!("Failed to fetch events: {e:?}")))?;
 
                 if events.is_empty() {
                     debug!("No events found for filter {}", filter_idx);
@@ -797,7 +797,7 @@ impl SubscriptionService {
                     };
                     ctx.sender
                         .send_bypass(message)
-                        .map_err(|e| Error::internal(format!("Failed to send event: {:?}", e)))?;
+                        .map_err(|e| Error::internal(format!("Failed to send event: {e:?}")))?;
                     filter_sent += 1;
                     total_sent += 1;
                 }
@@ -825,7 +825,7 @@ impl SubscriptionService {
             .send(RelayMessage::EndOfStoredEvents(Cow::Owned(
                 ctx.subscription_id,
             )))
-            .map_err(|e| Error::internal(format!("Failed to send EOSE: {:?}", e)))?;
+            .map_err(|e| Error::internal(format!("Failed to send EOSE: {e:?}")))?;
 
         Ok(())
     }
@@ -862,20 +862,19 @@ impl SubscriptionService {
 
         if current_count >= max_subscriptions {
             return Err(Error::restricted(format!(
-                "Maximum number of subscriptions ({}) reached",
-                max_subscriptions
+                "Maximum number of subscriptions ({max_subscriptions}) reached"
             )));
         }
 
         self.subscription_sender
             .try_send(SubscriptionMessage::Add(subscription_id, filters))
-            .map_err(|e| Error::internal(format!("Failed to send subscription: {}", e)))
+            .map_err(|e| Error::internal(format!("Failed to send subscription: {e}")))
     }
 
     pub fn remove_subscription(&self, subscription_id: SubscriptionId) -> Result<(), Error> {
         self.subscription_sender
             .try_send(SubscriptionMessage::Remove(subscription_id))
-            .map_err(|e| Error::internal(format!("Failed to send unsubscribe: {}", e)))
+            .map_err(|e| Error::internal(format!("Failed to send unsubscribe: {e}")))
     }
 
     pub async fn save_and_broadcast(
@@ -899,8 +898,7 @@ impl SubscriptionService {
                 if let Err(e) = self.replaceable_event_queue.try_send((event, scope)) {
                     error!("Failed to send replaceable event to buffer: {:?}", e);
                     return Err(Error::internal(format!(
-                        "Failed to send replaceable event to buffer: {}",
-                        e
+                        "Failed to send replaceable event to buffer: {e}"
                     )));
                 }
                 Ok(())
@@ -947,7 +945,7 @@ impl SubscriptionService {
         self.database
             .query(filters.to_vec(), subdomain)
             .await
-            .map_err(|e| Error::notice(format!("Failed to fetch events: {:?}", e)))
+            .map_err(|e| Error::notice(format!("Failed to fetch events: {e:?}")))
     }
 
     pub async fn handle_unsubscribe(&self, subscription_id: SubscriptionId) -> Result<(), Error> {
@@ -1168,7 +1166,7 @@ mod tests {
         for i in 0..10 {
             let timestamp = Timestamp::from(base_timestamp.as_u64() + i * 10);
             let group = if i % 2 == 0 { "public" } else { "private" };
-            let event = create_test_event(&keys, timestamp, group, &format!("Event {}", i)).await;
+            let event = create_test_event(&keys, timestamp, group, &format!("Event {i}")).await;
             db_sender
                 .save_signed_event(event, Scope::Default)
                 .await
@@ -1258,7 +1256,7 @@ mod tests {
         for i in 0..20 {
             let timestamp = Timestamp::from(base_timestamp.as_u64() + i * 5);
             let group = if i % 2 == 0 { "public" } else { "private" };
-            let event = create_test_event(&keys, timestamp, group, &format!("Event {}", i)).await;
+            let event = create_test_event(&keys, timestamp, group, &format!("Event {i}")).await;
             db_sender
                 .save_signed_event(event, Scope::Default)
                 .await
@@ -1368,7 +1366,7 @@ mod tests {
         for i in 0..5 {
             let timestamp = Timestamp::from(base_timestamp.as_u64() + 100 + i * 10);
             let event =
-                create_test_event(&keys, timestamp, "private", &format!("Private {}", i)).await;
+                create_test_event(&keys, timestamp, "private", &format!("Private {i}")).await;
             db_sender
                 .save_signed_event(event, Scope::Default)
                 .await
@@ -1701,7 +1699,7 @@ mod tests {
 
         // Create some events
         for i in 0..5 {
-            let event = EventBuilder::text_note(format!("Event {}", i))
+            let event = EventBuilder::text_note(format!("Event {i}"))
                 .build_with_ctx(&Instant::now(), keys.public_key())
                 .sign_with_keys(&keys)
                 .unwrap();
@@ -1987,7 +1985,7 @@ mod tests {
         for i in 0..10 {
             let timestamp = Timestamp::from(base_timestamp.as_u64() + i * 10);
             let group = if i % 2 == 0 { "public" } else { "private" };
-            let event = create_test_event(&keys, timestamp, group, &format!("Event {}", i)).await;
+            let event = create_test_event(&keys, timestamp, group, &format!("Event {i}")).await;
             db_sender
                 .save_signed_event(event, Scope::Default)
                 .await
@@ -2060,7 +2058,7 @@ mod tests {
         for i in 0..10 {
             let timestamp = Timestamp::from(base_timestamp.as_u64() + i * 10);
             let group = if i % 2 == 0 { "public" } else { "private" };
-            let event = create_test_event(&keys, timestamp, group, &format!("Event {}", i)).await;
+            let event = create_test_event(&keys, timestamp, group, &format!("Event {i}")).await;
             db_sender
                 .save_signed_event(event, Scope::Default)
                 .await
@@ -2371,7 +2369,7 @@ mod tests {
         // Create many events (more than channel capacity)
         let num_events = 10;
         for i in 0..num_events {
-            let event = EventBuilder::text_note(format!("Event {}", i))
+            let event = EventBuilder::text_note(format!("Event {i}"))
                 .build_with_ctx(&Instant::now(), keys.public_key())
                 .sign_with_keys(&keys)
                 .unwrap();
@@ -2401,7 +2399,7 @@ mod tests {
             .await;
 
         if let Err(e) = &result {
-            eprintln!("Error: {:?}", e);
+            eprintln!("Error: {e:?}");
         }
         assert!(result.is_ok());
 
@@ -2422,10 +2420,7 @@ mod tests {
         let expected_max_events = channel_size - 1;
         assert!(
             event_count <= expected_max_events,
-            "Should receive at most {} events (channel capacity {} - 1 for EOSE), but got {}",
-            expected_max_events,
-            channel_size,
-            event_count
+            "Should receive at most {expected_max_events} events (channel capacity {channel_size} - 1 for EOSE), but got {event_count}"
         );
     }
 
@@ -2447,7 +2442,7 @@ mod tests {
 
         // Create some events
         for i in 0..20 {
-            let event = EventBuilder::text_note(format!("Event {}", i))
+            let event = EventBuilder::text_note(format!("Event {i}"))
                 .build_with_ctx(&Instant::now(), keys.public_key())
                 .sign_with_keys(&keys)
                 .unwrap();
@@ -2478,7 +2473,7 @@ mod tests {
             .await;
 
         if let Err(e) = &result {
-            eprintln!("Error: {:?}", e);
+            eprintln!("Error: {e:?}");
         }
         assert!(result.is_ok());
 
@@ -2499,8 +2494,7 @@ mod tests {
         let expected_events = channel_size - 1;
         assert_eq!(
             event_count, expected_events,
-            "Unbounded query should be limited to {} events (channel capacity {} - 1 for EOSE)",
-            expected_events, channel_size
+            "Unbounded query should be limited to {expected_events} events (channel capacity {channel_size} - 1 for EOSE)"
         );
     }
 
@@ -2526,7 +2520,7 @@ mod tests {
             } else {
                 Kind::from(9)
             };
-            let event = EventBuilder::new(kind, format!("Event {}", i))
+            let event = EventBuilder::new(kind, format!("Event {i}"))
                 .custom_created_at(timestamp)
                 .build_with_ctx(&Instant::now(), keys.public_key())
                 .sign_with_keys(&keys)
@@ -2578,13 +2572,11 @@ mod tests {
         // Should receive at most the limits from each filter
         assert!(
             kind_9 <= 5,
-            "Should receive at most 5 kind 9 events, got {}",
-            kind_9
+            "Should receive at most 5 kind 9 events, got {kind_9}"
         );
         assert!(
             text_notes <= 3,
-            "Should receive at most 3 text notes, got {}",
-            text_notes
+            "Should receive at most 3 text notes, got {text_notes}"
         );
     }
 }

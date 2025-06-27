@@ -76,7 +76,11 @@ pub enum DatabaseConfig {
     /// Create a new database at the specified path
     Path(String),
     /// Use an existing database instance with its sender
-    Instance(Arc<RelayDatabase>, crate::database::DatabaseSender),
+    Instance(
+        Arc<RelayDatabase>,
+        crate::database::DatabaseSender,
+        CryptoSender,
+    ),
 }
 
 impl From<String> for DatabaseConfig {
@@ -91,9 +95,21 @@ impl From<&str> for DatabaseConfig {
     }
 }
 
-impl From<(Arc<RelayDatabase>, crate::database::DatabaseSender)> for DatabaseConfig {
-    fn from((db, sender): (Arc<RelayDatabase>, crate::database::DatabaseSender)) -> Self {
-        DatabaseConfig::Instance(db, sender)
+impl
+    From<(
+        Arc<RelayDatabase>,
+        crate::database::DatabaseSender,
+        CryptoSender,
+    )> for DatabaseConfig
+{
+    fn from(
+        (db, sender, crypto_sender): (
+            Arc<RelayDatabase>,
+            crate::database::DatabaseSender,
+            CryptoSender,
+        ),
+    ) -> Self {
+        DatabaseConfig::Instance(db, sender, crypto_sender)
     }
 }
 
@@ -103,7 +119,7 @@ pub struct RelayConfig {
     /// URL of the relay (used for NIP-42 auth and other purposes)
     pub relay_url: String,
     /// Database configuration
-    pub database: DatabaseConfig,
+    pub database: Option<DatabaseConfig>,
     /// Relay keys
     pub keys: Keys,
     /// Scope configuration
@@ -130,7 +146,7 @@ impl RelayConfig {
     ) -> Self {
         Self {
             relay_url: relay_url.into(),
-            database: database.into(),
+            database: Some(database.into()),
             keys,
             scope_config: ScopeConfig::default(),
             enable_auth: false,
@@ -145,8 +161,17 @@ impl RelayConfig {
     pub fn create_database(
         &self,
         crypto_sender: CryptoSender,
-    ) -> Result<(Arc<RelayDatabase>, crate::database::DatabaseSender), Error> {
-        self.create_database_with_tracker(crypto_sender, None, None)
+    ) -> Result<
+        (
+            Arc<RelayDatabase>,
+            crate::database::DatabaseSender,
+            CryptoSender,
+        ),
+        Error,
+    > {
+        let (database, db_sender) =
+            self.create_database_with_tracker(crypto_sender.clone(), None, None)?;
+        Ok((database, db_sender, crypto_sender))
     }
 
     /// Create database instance from configuration with a provided crypto sender and optional TaskTracker
@@ -157,7 +182,7 @@ impl RelayConfig {
         cancellation_token: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<(Arc<RelayDatabase>, crate::database::DatabaseSender), Error> {
         match &self.database {
-            DatabaseConfig::Path(path) => {
+            Some(DatabaseConfig::Path(path)) => {
                 let (database, db_sender) = match (task_tracker, cancellation_token) {
                     (Some(tracker), Some(token)) => RelayDatabase::with_task_tracker_and_token(
                         path,
@@ -177,10 +202,13 @@ impl RelayConfig {
                 };
                 Ok((Arc::new(database), db_sender))
             }
-            DatabaseConfig::Instance(db, sender) => {
+            Some(DatabaseConfig::Instance(db, sender, _crypto_sender)) => {
                 // Return the existing database instance and its sender
                 Ok((db.clone(), sender.clone()))
             }
+            None => Err(Error::internal(
+                "Database configuration is required".to_string(),
+            )),
         }
     }
 

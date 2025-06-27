@@ -211,7 +211,7 @@ impl Middleware for Nip09Middleware {
                 return ctx.send_message(RelayMessage::ok(
                     event_cow.id,
                     false,
-                    format!("Failed to process deletion request: {}", e),
+                    format!("Failed to process deletion request: {e}"),
                 ));
             }
 

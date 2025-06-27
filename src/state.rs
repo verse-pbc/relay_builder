@@ -63,7 +63,7 @@ impl<T: Default> NostrConnectionState<T> {
     /// Create a new connection state
     pub fn new(relay_url: String) -> Result<Self, Error> {
         let relay_url = RelayUrl::parse(&relay_url)
-            .map_err(|e| Error::internal(format!("Invalid relay URL: {}", e)))?;
+            .map_err(|e| Error::internal(format!("Invalid relay URL: {e}")))?;
 
         Ok(Self {
             relay_url,
@@ -82,7 +82,7 @@ impl<T> NostrConnectionState<T> {
     /// Create a new connection state with custom data
     pub fn with_custom(relay_url: String, custom: T) -> Result<Self, Error> {
         let relay_url = RelayUrl::parse(&relay_url)
-            .map_err(|e| Error::internal(format!("Invalid relay URL: {}", e)))?;
+            .map_err(|e| Error::internal(format!("Invalid relay URL: {e}")))?;
 
         Ok(Self {
             relay_url,
@@ -122,13 +122,13 @@ impl<T> NostrConnectionState<T> {
             SubscriptionService::new_with_metrics(database, db_sender, sender, Some(handler))
                 .await
                 .map_err(|e| {
-                    Error::internal(format!("Failed to create subscription service: {}", e))
+                    Error::internal(format!("Failed to create subscription service: {e}"))
                 })?
         } else {
             SubscriptionService::new(database, db_sender, sender)
                 .await
                 .map_err(|e| {
-                    Error::internal(format!("Failed to create subscription service: {}", e))
+                    Error::internal(format!("Failed to create subscription service: {e}"))
                 })?
         };
         self.subscription_service = Some(service);
@@ -252,7 +252,7 @@ impl<T> NostrConnectionFactory<T> {
         state_factory: Arc<dyn Fn() -> T + Send + Sync>,
     ) -> Result<Self, Error> {
         let relay_url = RelayUrl::parse(&relay_url)
-            .map_err(|e| Error::internal(format!("Invalid relay URL: {}", e)))?;
+            .map_err(|e| Error::internal(format!("Invalid relay URL: {e}")))?;
 
         Ok(Self {
             relay_url,
@@ -274,7 +274,7 @@ impl<T> NostrConnectionFactory<T> {
         T: Default + 'static,
     {
         let relay_url = RelayUrl::parse(&relay_url)
-            .map_err(|e| Error::internal(format!("Invalid relay URL: {}", e)))?;
+            .map_err(|e| Error::internal(format!("Invalid relay URL: {e}")))?;
 
         Ok(Self {
             relay_url,

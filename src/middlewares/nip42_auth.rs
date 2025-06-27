@@ -287,7 +287,7 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for Nip42Mid
                         if !self.validate_relay_url(client_relay_url, &connection_subdomain) {
                             let conn_id_err = ctx.connection_id.clone();
                             let subdomain_msg = match &connection_subdomain {
-                                Scope::Named { name, .. } => format!(" with subdomain '{}'", name),
+                                Scope::Named { name, .. } => format!(" with subdomain '{name}'"),
                                 Scope::Default => String::new(),
                             };
 
@@ -636,10 +636,7 @@ mod tests {
             Scope::Named { name, .. } => name.clone(),
             Scope::Default => "Default".to_string(),
         };
-        println!(
-            "Test setup - subdomain: {}, auth_url: {}",
-            subdomain_str, auth_url
-        );
+        println!("Test setup - subdomain: {subdomain_str}, auth_url: {auth_url}");
 
         // Auth event with correct subdomain (test.example.com)
         let auth_event = EventBuilder::new(Kind::Authentication, "")
@@ -659,7 +656,7 @@ mod tests {
                 _ => None,
             })
             .unwrap_or("No relay URL found");
-        println!("Auth event relay URL: {}", client_url);
+        println!("Auth event relay URL: {client_url}");
 
         let mut ctx = create_test_inbound_context(
             "test_conn".to_string(),
@@ -672,7 +669,7 @@ mod tests {
 
         let result = middleware.process_inbound(&mut ctx).await;
         if let Err(e) = &result {
-            println!("Auth failed with error: {}", e);
+            println!("Auth failed with error: {e}");
         } else {
             println!("Auth succeeded!");
         }
@@ -694,10 +691,7 @@ mod tests {
         state.challenge = Some(challenge.clone());
         state.subdomain = Scope::named("test").unwrap(); // Connection is for test.example.com
 
-        println!(
-            "Wrong subdomain test - connection subdomain: test, auth_url: {}",
-            auth_url
-        );
+        println!("Wrong subdomain test - connection subdomain: test, auth_url: {auth_url}");
 
         // Auth event with WRONG subdomain (wrong.example.com)
         let auth_event = EventBuilder::new(Kind::Authentication, "")
@@ -731,10 +725,7 @@ mod tests {
         state.challenge = Some(challenge.clone());
         state.subdomain = Scope::named("test").unwrap(); // Connection is for test.example.com
 
-        println!(
-            "Different base domain test - connection subdomain: test, auth_url: {}",
-            auth_url
-        );
+        println!("Different base domain test - connection subdomain: test, auth_url: {auth_url}");
 
         // Auth event with wrong base domain (test.different.com)
         let auth_event = EventBuilder::new(Kind::Authentication, "")

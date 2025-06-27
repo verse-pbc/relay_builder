@@ -44,7 +44,7 @@ async fn main() -> Result<()> {
     let app = Router::new().route("/", get(root_handler));
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
-    println!("🚀 Minimal relay listening on: {}", addr);
+    println!("🚀 Minimal relay listening on: {addr}");
     println!("📡 WebSocket endpoint: ws://localhost:8080");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;

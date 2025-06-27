@@ -54,7 +54,7 @@ async fn test_crypto_verification_performance() {
     // Create test events
     let test_keys = Keys::generate();
 
-    println!("Creating {} signed events...", event_count);
+    println!("Creating {event_count} signed events...");
     let create_start = Instant::now();
 
     // Create events in parallel batches for faster generation
@@ -68,7 +68,7 @@ async fn test_crypto_verification_performance() {
         let handle = tokio::spawn(async move {
             let mut batch_events = Vec::new();
             for i in batch_start..batch_end {
-                let event = EventBuilder::text_note(format!("Test message {}", i))
+                let event = EventBuilder::text_note(format!("Test message {i}"))
                     .build(test_keys.public_key());
                 let signed_event = test_keys.sign_event(event).await.unwrap();
                 batch_events.push(signed_event);
@@ -85,10 +85,10 @@ async fn test_crypto_verification_performance() {
     }
 
     let create_duration = create_start.elapsed();
-    println!("Created {} events in {:?}", event_count, create_duration);
+    println!("Created {event_count} events in {create_duration:?}");
 
     // Test verification performance
-    println!("\nVerifying {} events...", event_count);
+    println!("\nVerifying {event_count} events...");
     let verify_start = Instant::now();
 
     // Send all verification requests concurrently
@@ -107,8 +107,8 @@ async fn test_crypto_verification_performance() {
     let verify_duration = verify_start.elapsed();
     let events_per_sec = event_count as f64 / verify_duration.as_secs_f64();
 
-    println!("Verified {} events in {:?}", event_count, verify_duration);
-    println!("Verification rate: {:.0} events/second", events_per_sec);
+    println!("Verified {event_count} events in {verify_duration:?}");
+    println!("Verification rate: {events_per_sec:.0} events/second");
     println!(
         "Time per event: {:.3} ms",
         verify_duration.as_millis() as f64 / event_count as f64
@@ -117,8 +117,7 @@ async fn test_crypto_verification_performance() {
     // Assert reasonable performance (at least 100 events/second)
     assert!(
         events_per_sec >= 100.0,
-        "Verification too slow: {:.0} events/second",
-        events_per_sec
+        "Verification too slow: {events_per_sec:.0} events/second"
     );
 
     // Cleanup
@@ -132,7 +131,7 @@ async fn test_with_different_worker_counts() {
         .map(|n| n.get())
         .unwrap_or(4);
 
-    println!("System has {} CPU cores", cpu_count);
+    println!("System has {cpu_count} CPU cores");
     println!("\nTesting crypto performance with different worker counts...\n");
 
     // Test with different worker counts
@@ -144,7 +143,7 @@ async fn test_with_different_worker_counts() {
     ];
 
     for worker_count in worker_counts {
-        println!("Testing with {} workers...", worker_count);
+        println!("Testing with {worker_count} workers...");
         std::env::set_var("CRYPTO_WORKER_THREADS", worker_count.to_string());
 
         // Run a performance test
@@ -158,8 +157,8 @@ async fn test_with_different_worker_counts() {
         let mut events = Vec::new();
 
         for i in 0..event_count {
-            let event = EventBuilder::text_note(format!("Test message {}", i))
-                .build(test_keys.public_key());
+            let event =
+                EventBuilder::text_note(format!("Test message {i}")).build(test_keys.public_key());
             let signed_event = test_keys.sign_event(event).await.unwrap();
             events.push(signed_event);
         }
@@ -181,7 +180,7 @@ async fn test_with_different_worker_counts() {
         let verify_duration = verify_start.elapsed();
         let events_per_sec = event_count as f64 / verify_duration.as_secs_f64();
 
-        println!("  - Verification rate: {:.0} events/second", events_per_sec);
+        println!("  - Verification rate: {events_per_sec:.0} events/second");
         println!(
             "  - Time per event: {:.3} ms\n",
             verify_duration.as_millis() as f64 / event_count as f64
@@ -207,7 +206,7 @@ async fn test_crypto_worker_concurrency() {
 
     for i in 0..1000 {
         let event =
-            EventBuilder::text_note(format!("Test message {}", i)).build(test_keys.public_key());
+            EventBuilder::text_note(format!("Test message {i}")).build(test_keys.public_key());
         let signed_event = test_keys.sign_event(event).await.unwrap();
         events.push(signed_event);
     }
@@ -233,11 +232,8 @@ async fn test_crypto_worker_concurrency() {
     let verify_duration = verify_start.elapsed();
     let events_per_sec = 1000.0 / verify_duration.as_secs_f64();
 
-    println!("Verified 1000 events concurrently in {:?}", verify_duration);
-    println!(
-        "Concurrent verification rate: {:.0} events/second",
-        events_per_sec
-    );
+    println!("Verified 1000 events concurrently in {verify_duration:?}");
+    println!("Concurrent verification rate: {events_per_sec:.0} events/second");
 
     // Cleanup
     drop(crypto_sender);
@@ -256,7 +252,7 @@ async fn test_crypto_worker_saturation() {
         .unwrap_or(1);
 
     println!("\n=== Testing Crypto Worker Saturation ===");
-    println!("Worker count: {}", worker_count);
+    println!("Worker count: {worker_count}");
 
     let crypto_sender = CryptoWorker::spawn(Arc::clone(&keys), &task_tracker);
 
@@ -268,7 +264,7 @@ async fn test_crypto_worker_saturation() {
         let mut events = Vec::new();
         for i in 0..count {
             let event =
-                EventBuilder::text_note(format!("Saturation test {}", i)).build(keys.public_key());
+                EventBuilder::text_note(format!("Saturation test {i}")).build(keys.public_key());
             let signed = keys.sign_event(event).await.unwrap();
             events.push(signed);
         }

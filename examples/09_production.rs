@@ -22,10 +22,7 @@ use tokio_util::task::TaskTracker;
 /// Health check endpoint
 async fn health(State(counter): State<Arc<AtomicUsize>>) -> String {
     let connections = counter.load(Ordering::Relaxed);
-    format!(
-        "{{\"status\":\"ok\",\"active_connections\":{}}}",
-        connections
-    )
+    format!("{{\"status\":\"ok\",\"active_connections\":{connections}}}")
 }
 
 #[tokio::main]

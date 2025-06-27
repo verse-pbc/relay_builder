@@ -127,7 +127,7 @@ mod tests {
     #[test]
     fn test_nip70_middleware_debug() {
         let middleware = Nip70Middleware;
-        let debug_str = format!("{:?}", middleware);
+        let debug_str = format!("{middleware:?}");
         assert!(debug_str.contains("Nip70Middleware"));
     }
 
