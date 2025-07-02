@@ -124,7 +124,7 @@ All middleware work seamlessly with custom state:
 let builder = RelayBuilder::<MyState>::new(config)
     .with_middleware(LoggerMiddleware::new())
     .with_middleware(ErrorHandlingMiddleware::new())
-    .with_middleware(EventVerifierMiddleware::new(crypto_worker));
+    .with_middleware(EventVerifierMiddleware::new(crypto_helper));
 ```
 
 ### Example:

@@ -16,7 +16,7 @@ default = []
 axum = ["dep:axum", "axum-server", "tower-http", "tower"]
 
 [dependencies]
-websocket_builder = { git = "https://github.com/verse-pbc/websocket_builder" }
+websocket_builder = { path = "../websocket_builder" }
 nostr-sdk = { git = "https://github.com/verse-pbc/nostr", features = ["all-nips"] }
 nostr = { git = "https://github.com/verse-pbc/nostr", features = ["std"] }
 nostr-database = { git = "https://github.com/verse-pbc/nostr" }
@@ -38,8 +38,10 @@ flume = "0.11.1"
 rustls = { version = "0.23", features = ["ring"] }
 chrono = "0.4"
 clap = { version = "4.5", features = ["derive"] }
+dashmap = "6.1"
 indicatif = "0.17"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
+parking_lot = "0.12"
 
 # Optional dependencies for the built-in server
 axum = { version = "0.7.9", features = ["ws", "http1"], optional = true }
@@ -51,7 +53,6 @@ tower = { version = "0.4.13", features = ["util"], optional = true }
 tempfile = "3.10"
 criterion = { version = "0.5", features = ["async_tokio"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
-parking_lot = "0.12"
 # For server examples
 axum = { version = "0.7.9", features = ["ws", "http1"] }
 axum-server = "0.6"

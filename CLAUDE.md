@@ -54,7 +54,7 @@ nostr_relay_builder is a Rust framework for building custom Nostr relays with a 
 - `src/state.rs` - Connection state management with generic support
 - `src/database.rs` - Async database abstraction layer
 - `src/subscription_service.rs` - Nostr subscription and filtering
-- `src/crypto_worker.rs` - Parallel cryptographic operations
+- `src/crypto_helper.rs` - Cryptographic operations helper
 
 ### Middleware Implementations
 

@@ -28,7 +28,7 @@ nostr_relay_builder/
 │   │   ├── nip40_expiration.rs # NIP-40 expiration
 │   │   ├── nip42_auth.rs    # NIP-42 authentication
 │   │   └── nip70_protected.rs # NIP-70 protected events
-│   ├── crypto_worker.rs     # Parallel signature verification
+│   ├── crypto_helper.rs     # Cryptographic operations helper
 │   ├── database.rs          # Async database abstraction
 │   ├── subscription_service.rs # Nostr subscriptions
 │   └── state.rs             # Connection state management
@@ -128,14 +128,14 @@ pub struct EventContext<'a> {
 ```
 
 ### WebSocket Middleware
-The framework uses `websocket_builder`'s middleware system. Built-in middleware handle various NIPs and features. The relay automatically sets up cryptographic verification via `CryptoWorker`.
+The framework uses `websocket_builder`'s middleware system. Built-in middleware handle various NIPs and features. The relay automatically sets up cryptographic verification via `CryptoHelper`.
 
 ## Built-in Features
 
 - **NIPs Support**: 09 (deletion), 40 (expiration), 42 (auth for EVENT and REQ), 70 (protected)
 - **Multi-tenant**: Subdomain isolation via Scope
 - **Database**: StoreCommand enum for async database operations
-- **Crypto**: CryptoWorker handles signature verification internally
+- **Crypto**: CryptoHelper handles signature verification internally
 - **State Management**: Generic per-connection state with type safety
 
 ## Common Patterns
