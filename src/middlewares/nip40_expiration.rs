@@ -1,7 +1,7 @@
 //! NIP-40: Expiration Timestamp middleware
 
 use crate::state::NostrConnectionState;
-use crate::subscription_service::StoreCommand;
+use crate::subscription_coordinator::StoreCommand;
 use async_trait::async_trait;
 use nostr_sdk::prelude::*;
 use tracing::{error, warn};
@@ -61,22 +61,21 @@ impl Middleware for Nip40ExpirationMiddleware {
                     );
 
                     let filter = Filter::new().id(event_ref.id);
-                    let delete_command = StoreCommand::DeleteEvents(
-                        filter,
-                        ctx.state.read().await.subdomain().clone(),
-                    );
+                    let delete_command =
+                        StoreCommand::DeleteEvents(filter, ctx.state.read().subdomain().clone());
 
-                    if let Err(e) = ctx
-                        .state
-                        .read()
-                        .await
-                        .save_and_broadcast(delete_command)
-                        .await
-                    {
-                        error!(
-                            target: "nip40",
-                            "Failed to send delete command for expired event {}: {}", event_ref.id, e
-                        );
+                    let coordinator = {
+                        let state = ctx.state.read();
+                        state.subscription_coordinator().cloned()
+                    };
+
+                    if let Some(coordinator) = coordinator {
+                        if let Err(e) = coordinator.save_and_broadcast(delete_command, None).await {
+                            error!(
+                                target: "nip40",
+                                "Failed to send delete command for expired event {}: {}", event_ref.id, e
+                            );
+                        }
                     }
                 }
             }
@@ -152,7 +151,7 @@ mod tests {
             >,
         > = vec![Arc::new(middleware.clone())];
 
-        let state_arc = Arc::new(tokio::sync::RwLock::new(state));
+        let state_arc = Arc::new(parking_lot::RwLock::new(state));
         let middlewares_arc = Arc::new(middlewares);
         let mut context = InboundContext::new(
             "test_connection_id".to_string(),
@@ -211,7 +210,7 @@ mod tests {
             >,
         > = vec![Arc::new(middleware.clone())];
 
-        let state_arc = Arc::new(tokio::sync::RwLock::new(state));
+        let state_arc = Arc::new(parking_lot::RwLock::new(state));
         let middlewares_arc = Arc::new(middlewares);
         let mut context = InboundContext::new(
             "test_connection_id".to_string(),
@@ -270,7 +269,7 @@ mod tests {
             >,
         > = vec![Arc::new(middleware.clone())];
 
-        let state_arc = Arc::new(tokio::sync::RwLock::new(state));
+        let state_arc = Arc::new(parking_lot::RwLock::new(state));
         let middlewares_arc = Arc::new(middlewares);
         let mut context = InboundContext::new(
             "test_connection_id".to_string(),

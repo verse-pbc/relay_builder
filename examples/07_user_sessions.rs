@@ -32,11 +32,11 @@ impl EventProcessor<UserSession> for SessionTrackingProcessor {
     async fn handle_event(
         &self,
         event: Event,
-        custom_state: Arc<tokio::sync::RwLock<UserSession>>,
+        custom_state: Arc<parking_lot::RwLock<UserSession>>,
         context: EventContext<'_>,
     ) -> RelayResult<Vec<StoreCommand>> {
         // Get a write lock since we need to modify the session state
-        let mut state = custom_state.write().await;
+        let mut state = custom_state.write();
 
         // Track first event time
         if state.first_event_time.is_none() {

@@ -35,7 +35,7 @@ impl Middleware for Nip70Middleware {
         }
 
         // Protected events require authentication
-        let Some(auth_pubkey) = ctx.state.read().await.authed_pubkey else {
+        let Some(auth_pubkey) = ctx.state.read().authed_pubkey else {
             return Err(
                 Error::auth_required("this event may only be published by its author").into(),
             );

@@ -27,7 +27,7 @@ impl EventProcessor for SpamFilterProcessor {
     async fn handle_event(
         &self,
         event: Event,
-        _custom_state: Arc<tokio::sync::RwLock<()>>,
+        _custom_state: Arc<parking_lot::RwLock<()>>,
         context: EventContext<'_>,
     ) -> RelayResult<Vec<StoreCommand>> {
         let content_lower = event.content.to_lowercase();

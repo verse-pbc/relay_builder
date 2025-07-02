@@ -5,13 +5,11 @@
 //! allocations and maximize performance in hot paths like subscription processing.
 
 use crate::error::Result;
-use crate::state::NostrConnectionState;
-use crate::subscription_service::StoreCommand;
+use crate::subscription_coordinator::StoreCommand;
 use async_trait::async_trait;
 use nostr_lmdb::Scope;
 use nostr_sdk::prelude::*;
 use std::sync::Arc;
-use tracing::debug;
 
 /// Minimal context for event visibility checks
 ///
@@ -63,23 +61,23 @@ pub struct EventContext<'a> {
 ///     fn can_see_event(
 ///         &self,
 ///         _event: &Event,
-///         custom_state: Arc<tokio::sync::RwLock<RateLimitState>>,
+///         custom_state: Arc<parking_lot::RwLock<RateLimitState>>,
 ///         _context: EventContext<'_>,
 ///     ) -> Result<bool, nostr_relay_builder::Error> {
 ///         // For read-only access, use read lock
-///         let state = custom_state.blocking_read();
+///         let state = custom_state.read();
 ///         Ok(state.tokens > 0.0)
 ///     }
 ///
 ///     async fn handle_event(
 ///         &self,
 ///         event: Event,
-///         custom_state: Arc<tokio::sync::RwLock<RateLimitState>>,
+///         custom_state: Arc<parking_lot::RwLock<RateLimitState>>,
 ///         context: EventContext<'_>,
 ///     ) -> Result<Vec<StoreCommand>, nostr_relay_builder::Error> {
 ///         // Get a write lock since we need to modify the rate limit state
-///         let mut state = custom_state.write().await;
-///         
+///         let mut state = custom_state.write();
+///
 ///         if state.tokens < self.tokens_per_event {
 ///             return Err(nostr_relay_builder::Error::restricted("Rate limit exceeded"));
 ///         }
@@ -118,7 +116,7 @@ where
     fn can_see_event(
         &self,
         event: &Event,
-        custom_state: Arc<tokio::sync::RwLock<T>>,
+        custom_state: Arc<parking_lot::RwLock<T>>,
         context: EventContext<'_>,
     ) -> Result<bool> {
         // Default implementation: allow all events (public relay behavior)
@@ -141,7 +139,7 @@ where
     fn verify_filters(
         &self,
         filters: &[Filter],
-        custom_state: Arc<tokio::sync::RwLock<T>>,
+        custom_state: Arc<parking_lot::RwLock<T>>,
         context: EventContext<'_>,
     ) -> Result<()> {
         // Default implementation: allow all filters
@@ -165,7 +163,7 @@ where
     async fn handle_event(
         &self,
         event: Event,
-        custom_state: Arc<tokio::sync::RwLock<T>>,
+        custom_state: Arc<parking_lot::RwLock<T>>,
         context: EventContext<'_>,
     ) -> Result<Vec<StoreCommand>> {
         // Default implementation: store all valid events
@@ -174,59 +172,6 @@ where
             Box::new(event),
             context.subdomain.clone(),
         )])
-    }
-
-    /// Handle non-event messages with full connection state access.
-    ///
-    /// This method provides full state access for complex operations like
-    /// authentication protocols and subscription management.
-    ///
-    /// ## Message Handling Priority
-    ///
-    /// **REQ and ReqMultiFilter**: Return empty vec to use default subscription handling
-    /// **Close and Event**: Always handled by middleware - return empty vec
-    /// **All others (AUTH, COUNT, NIP-45)**: Handled entirely by your implementation
-    ///
-    /// # Arguments
-    /// * `message` - The client message to handle
-    /// * `state` - Full connection state (read/write access)
-    ///
-    /// # Returns
-    /// * `Ok(messages)` - Relay messages to send (empty = use defaults)
-    /// * `Err(Error)` - Message handling failed (will be converted to NOTICE)
-    async fn handle_message(
-        &self,
-        message: ClientMessage<'static>,
-        state: &mut NostrConnectionState<T>,
-    ) -> Result<Vec<RelayMessage<'static>>> {
-        // Default implementation: handle common message types with basic responses
-        match message {
-            ClientMessage::Auth(auth_event) => {
-                // Basic NIP-42 auth: verify and store pubkey
-                state.authed_pubkey = Some(auth_event.pubkey);
-                Ok(vec![RelayMessage::ok(auth_event.id, false, "")])
-            }
-
-            ClientMessage::Count {
-                subscription_id,
-                filter: _,
-            } => {
-                // Basic COUNT: return zero (override for actual implementation)
-                Ok(vec![RelayMessage::count(subscription_id.into_owned(), 0)])
-            }
-
-            ClientMessage::Req { .. } | ClientMessage::ReqMultiFilter { .. } => {
-                // Return empty to use middleware's generic subscription handling
-                debug!("Using generic subscription handling");
-                Ok(vec![])
-            }
-
-            // Close and Event messages are always handled by middleware
-            _ => {
-                debug!("Message handled generically by RelayMiddleware");
-                Ok(vec![])
-            }
-        }
     }
 }
 

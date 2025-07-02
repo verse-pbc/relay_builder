@@ -8,11 +8,12 @@ use crate::database::RelayDatabase;
 use crate::error::Error;
 use crate::event_processor::{EventContext, EventProcessor};
 use crate::state::NostrConnectionState;
+use crate::subscription_registry::SubscriptionRegistry;
 use async_trait::async_trait;
 use nostr_sdk::prelude::*;
 use std::sync::Arc;
 use tracing::{debug, error};
-use websocket_builder::{InboundContext, Middleware, OutboundContext, SendMessage};
+use websocket_builder::{InboundContext, Middleware, OutboundContext};
 
 /// Relay middleware that processes messages with zero-allocation performance.
 ///
@@ -35,6 +36,8 @@ where
     processor: Arc<P>,
     relay_pubkey: PublicKey,
     database: Arc<RelayDatabase>,
+    registry: Arc<SubscriptionRegistry>,
+    max_limit: usize,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -49,11 +52,20 @@ where
     /// * `processor` - The business logic implementation
     /// * `relay_pubkey` - The relay's public key
     /// * `database` - Database for storing events
-    pub fn new(processor: P, relay_pubkey: PublicKey, database: Arc<RelayDatabase>) -> Self {
+    /// * `registry` - Subscription registry for event distribution
+    pub fn new(
+        processor: P,
+        relay_pubkey: PublicKey,
+        database: Arc<RelayDatabase>,
+        registry: Arc<SubscriptionRegistry>,
+        max_limit: usize,
+    ) -> Self {
         Self {
             processor: Arc::new(processor),
             relay_pubkey,
             database,
+            registry,
+            max_limit,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -67,11 +79,11 @@ where
     async fn handle_event(
         &self,
         event: Event,
-        state: Arc<tokio::sync::RwLock<NostrConnectionState<T>>>,
+        state: Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
         message_sender: Option<websocket_builder::MessageSender<RelayMessage<'static>>>,
     ) -> Result<(), Error> {
         let (subdomain, authed_pubkey, custom_state) = {
-            let connection_state = state.read().await;
+            let connection_state = state.read();
 
             // Extract necessary state before calling handle_event
             let subdomain = connection_state.subdomain().clone();
@@ -90,14 +102,17 @@ where
 
         let commands = self
             .processor
-            .handle_event(event.clone(), custom_state, context)
+            .handle_event(event, custom_state, context)
             .await?;
 
-        let subscription_service = state.read().await;
+        let subscription_coordinator = {
+            let state_guard = state.read();
+            state_guard.subscription_coordinator().cloned()
+        };
 
-        if let Some(subscription_service) = subscription_service.subscription_service() {
+        if let Some(coordinator) = subscription_coordinator {
             for command in commands {
-                subscription_service
+                coordinator
                     .save_and_broadcast(command, message_sender.clone())
                     .await
                     .map_err(|e| Error::database(e.to_string()))?;
@@ -111,13 +126,19 @@ where
     /// Handle subscription with optimized event filtering
     async fn handle_subscription(
         &self,
-        state: Arc<tokio::sync::RwLock<NostrConnectionState<T>>>,
+        state: Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
         subscription_id: String,
         filters: Vec<Filter>,
     ) -> Result<(), Error> {
-        // First verify filters are allowed with read lock
+        let subscription_id_obj = SubscriptionId::new(subscription_id.clone());
+
+        // First check subscription limit and verify filters with write lock
         {
-            let connection_state = state.read().await;
+            let mut connection_state = state.write();
+
+            // Check if we can add this subscription
+            connection_state.can_add_subscription(&subscription_id_obj)?;
+
             let context = EventContext {
                 authed_pubkey: connection_state.authed_pubkey.as_ref(),
                 subdomain: connection_state.subdomain(),
@@ -126,11 +147,14 @@ where
 
             self.processor
                 .verify_filters(&filters, connection_state.custom.clone(), context)?;
+
+            // Track the subscription
+            connection_state.add_subscription(subscription_id_obj.clone());
         }
 
         // Extract necessary state with read lock
         let (subdomain, authed_pubkey, custom_state) = {
-            let connection_state = state.read().await;
+            let connection_state = state.read();
             let subdomain = connection_state.subdomain().clone();
             let authed_pubkey = connection_state.authed_pubkey;
             let custom_state = connection_state.custom.clone();
@@ -156,13 +180,16 @@ where
                     .unwrap_or(false)
             };
 
-        // Get subscription service and process
-        let connection_state = state.read().await;
-        let subscription_service = connection_state
-            .subscription_service()
-            .ok_or_else(|| Error::internal("No subscription service available"))?;
+        // Get subscription coordinator and process
+        let subscription_coordinator = {
+            let connection_state = state.read();
+            connection_state
+                .subscription_coordinator()
+                .ok_or_else(|| Error::internal("No subscription coordinator available"))?
+                .clone()
+        };
 
-        subscription_service
+        subscription_coordinator
             .handle_req(
                 SubscriptionId::new(subscription_id),
                 filters,
@@ -199,12 +226,18 @@ where
 
         // Initialize the subscription service for this connection
         if let Some(ref sender) = ctx.sender {
-            ctx.state
-                .write()
-                .await
-                .setup_connection(self.database.clone(), sender.clone())
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to setup connection: {}", e))?;
+            {
+                let mut state = ctx.state.write();
+                state
+                    .setup_connection(
+                        ctx.connection_id.clone(),
+                        self.database.clone(),
+                        self.registry.clone(),
+                        sender.clone(),
+                        self.max_limit,
+                    )
+                    .map_err(|e| anyhow::anyhow!("Failed to setup connection: {}", e))?;
+            }
             debug!("RelayMiddleware: Connection setup complete");
         } else {
             error!("RelayMiddleware: No message sender available for connection setup");
@@ -246,41 +279,39 @@ where
                 subscription_id,
                 filter,
             } => {
-                // First check if processor wants to handle it
-                let mut state_guard = ctx.state.write().await;
-                let processor_response = self
-                    .processor
-                    .handle_message(
-                        ClientMessage::Req {
-                            subscription_id: subscription_id.clone(),
-                            filter: filter.clone(),
-                        },
-                        &mut *state_guard,
+                // Use generic subscription handling directly
+                match self
+                    .handle_subscription(
+                        ctx.state.clone(),
+                        subscription_id.to_string(),
+                        vec![filter.into_owned()],
                     )
-                    .await?;
-                drop(state_guard);
-
-                if !processor_response.is_empty() {
-                    // Processor handled it
-                    for msg in processor_response {
-                        ctx.send_message(msg)?;
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(e) => {
+                        error!("Subscription error: {}", e);
+                        // Propagate the error up the chain so ErrorHandlingMiddleware can format it properly
+                        return Err(e.into());
                     }
-                } else {
-                    // Use generic subscription handling
-                    match self
-                        .handle_subscription(
-                            ctx.state.clone(),
-                            subscription_id.to_string(),
-                            vec![filter.into_owned()],
-                        )
-                        .await
-                    {
-                        Ok(()) => {}
-                        Err(e) => {
-                            error!("Subscription error: {}", e);
-                            // Propagate the error up the chain so ErrorHandlingMiddleware can format it properly
-                            return Err(e.into());
-                        }
+                }
+                ctx.next().await
+            }
+
+            ClientMessage::ReqMultiFilter {
+                subscription_id,
+                filters,
+            } => {
+                // Use generic subscription handling directly
+                match self
+                    .handle_subscription(ctx.state.clone(), subscription_id.to_string(), filters)
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(e) => {
+                        error!("Subscription error: {}", e);
+                        // Propagate the error up the chain so ErrorHandlingMiddleware can format it properly
+                        return Err(e.into());
                     }
                 }
                 ctx.next().await
@@ -289,29 +320,45 @@ where
             ClientMessage::Close(subscription_id) => {
                 // Handle CLOSE message
                 {
-                    let state = ctx.state.read().await;
-                    if let Some(subscription_service) = state.subscription_service() {
-                        let subscription_id = subscription_id.into_owned();
-                        let _ = subscription_service.remove_subscription(subscription_id.clone());
-                        debug!("Closed subscription: {}", subscription_id);
+                    let mut state = ctx.state.write();
+                    let subscription_id_owned = subscription_id.into_owned();
+
+                    // Remove from tracked subscriptions
+                    state.remove_tracked_subscription(&subscription_id_owned);
+
+                    if let Some(subscription_coordinator) = state.subscription_coordinator() {
+                        let _ = subscription_coordinator
+                            .remove_subscription(subscription_id_owned.clone());
+                        debug!("Closed subscription: {}", subscription_id_owned);
                     }
                 }
                 ctx.next().await
             }
 
-            // Delegate all other messages to processor
-            message => {
-                let mut state_guard = ctx.state.write().await;
-                let responses = self
-                    .processor
-                    .handle_message(message, &mut *state_guard)
-                    .await?;
-                drop(state_guard);
-                for response in responses {
-                    ctx.send_message(response)?;
+            // All other messages are not handled by default
+            _ => match &message {
+                ClientMessage::Auth(_) => {
+                    // if it was enabled, we would have handled it in the nip42 middleware
+                    debug!(
+                            "AUTH message received but authentication is not enabled on this relay, ignoring"
+                        );
+                    ctx.next().await
                 }
-                ctx.next().await
-            }
+                _ => {
+                    let msg = format!(
+                        "Message type not supported: {}",
+                        match &message {
+                            ClientMessage::Count { .. } => "COUNT",
+                            ClientMessage::NegOpen { .. } => "NEG-OPEN",
+                            ClientMessage::NegMsg { .. } => "NEG-MSG",
+                            ClientMessage::NegClose { .. } => "NEG-CLOSE",
+                            _ => "UNKNOWN",
+                        }
+                    );
+                    debug!("{msg}");
+                    Err(Error::notice(msg).into())
+                }
+            },
         }
     }
 
@@ -326,7 +373,7 @@ where
         // For broadcast events, check visibility before sending
         if let RelayMessage::Event { event, .. } = &message {
             let should_filter = {
-                let state = ctx.state.read().await;
+                let state = ctx.state.read();
                 let subdomain = state.subdomain().clone();
                 let authed_pubkey = state.authed_pubkey;
                 let context = EventContext {
@@ -361,7 +408,7 @@ where
 
         // Clean up the connection state to release database references and decrement subscription counters
         {
-            let state = ctx.state.read().await;
+            let state = ctx.state.read();
             state.cleanup();
         }
 

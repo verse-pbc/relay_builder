@@ -174,8 +174,8 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for MetricsM
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parking_lot::RwLock;
     use std::sync::{Arc, Mutex};
-    use tokio::sync::RwLock;
 
     #[derive(Debug, Default)]
     struct TestMetricsHandler {

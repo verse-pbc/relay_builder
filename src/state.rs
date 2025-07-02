@@ -3,7 +3,9 @@
 use crate::config::ScopeConfig;
 use crate::database::{DatabaseSender, RelayDatabase};
 use crate::error::Error;
-use crate::subscription_service::{StoreCommand, SubscriptionService};
+use crate::subscription_coordinator::StoreCommand;
+use crate::subscription_coordinator::SubscriptionCoordinator;
+use crate::subscription_registry::SubscriptionRegistry;
 use anyhow::Result;
 use nostr_lmdb::Scope;
 use nostr_sdk::prelude::*;
@@ -32,8 +34,8 @@ pub struct NostrConnectionState<T = ()> {
     pub challenge: Option<String>,
     /// Authenticated public key (if authenticated via NIP-42)
     pub authed_pubkey: Option<PublicKey>,
-    /// Subscription service for this connection (private - use methods below)
-    subscription_service: Option<SubscriptionService>,
+    /// Subscription coordinator for this connection (private - use methods below)
+    subscription_coordinator: Option<SubscriptionCoordinator>,
     /// Database sender for write operations
     pub(crate) db_sender: Option<DatabaseSender>,
     /// Cancellation token for this connection
@@ -41,7 +43,11 @@ pub struct NostrConnectionState<T = ()> {
     /// Subdomain/scope for this connection
     pub subdomain: Scope,
     /// Custom state for application-specific data
-    pub custom: Arc<tokio::sync::RwLock<T>>,
+    pub custom: Arc<parking_lot::RwLock<T>>,
+    /// Active subscriptions for this connection
+    pub(crate) active_subscriptions: std::collections::HashSet<SubscriptionId>,
+    /// Maximum number of subscriptions allowed (None means unlimited)
+    pub(crate) max_subscriptions: Option<usize>,
 }
 
 impl<T: Default> Default for NostrConnectionState<T> {
@@ -50,11 +56,13 @@ impl<T: Default> Default for NostrConnectionState<T> {
             relay_url: RelayUrl::parse(DEFAULT_RELAY_URL).expect("Invalid default relay URL"),
             challenge: None,
             authed_pubkey: None,
-            subscription_service: None,
+            subscription_coordinator: None,
             db_sender: None,
             connection_token: CancellationToken::new(),
             subdomain: Scope::Default,
-            custom: Arc::new(tokio::sync::RwLock::new(T::default())),
+            custom: Arc::new(parking_lot::RwLock::new(T::default())),
+            active_subscriptions: std::collections::HashSet::new(),
+            max_subscriptions: None,
         }
     }
 }
@@ -69,11 +77,13 @@ impl<T: Default> NostrConnectionState<T> {
             relay_url,
             challenge: None,
             authed_pubkey: None,
-            subscription_service: None,
+            subscription_coordinator: None,
             db_sender: None,
             connection_token: CancellationToken::new(),
             subdomain: Scope::Default,
-            custom: Arc::new(tokio::sync::RwLock::new(T::default())),
+            custom: Arc::new(parking_lot::RwLock::new(T::default())),
+            active_subscriptions: std::collections::HashSet::new(),
+            max_subscriptions: None,
         })
     }
 }
@@ -88,11 +98,13 @@ impl<T> NostrConnectionState<T> {
             relay_url,
             challenge: None,
             authed_pubkey: None,
-            subscription_service: None,
+            subscription_coordinator: None,
             db_sender: None,
             connection_token: CancellationToken::new(),
             subdomain: Scope::Default,
-            custom: Arc::new(tokio::sync::RwLock::new(custom)),
+            custom: Arc::new(parking_lot::RwLock::new(custom)),
+            active_subscriptions: std::collections::HashSet::new(),
+            max_subscriptions: None,
         })
     }
 
@@ -102,10 +114,13 @@ impl<T> NostrConnectionState<T> {
     }
 
     /// Set up the connection with a database and message sender
-    pub async fn setup_connection(
+    pub fn setup_connection(
         &mut self,
+        connection_id: String,
         database: Arc<RelayDatabase>,
+        registry: Arc<SubscriptionRegistry>,
         sender: MessageSender<RelayMessage<'static>>,
+        max_limit: usize,
     ) -> Result<(), Error> {
         debug!("Setting up connection");
 
@@ -118,20 +133,19 @@ impl<T> NostrConnectionState<T> {
 
         let metrics_handler = crate::global_metrics::get_subscription_metrics_handler();
 
-        let service = if let Some(handler) = metrics_handler {
-            SubscriptionService::new_with_metrics(database, db_sender, sender, Some(handler))
-                .await
-                .map_err(|e| {
-                    Error::internal(format!("Failed to create subscription service: {e}"))
-                })?
-        } else {
-            SubscriptionService::new(database, db_sender, sender)
-                .await
-                .map_err(|e| {
-                    Error::internal(format!("Failed to create subscription service: {e}"))
-                })?
-        };
-        self.subscription_service = Some(service);
+        let coordinator = SubscriptionCoordinator::new(
+            database,
+            db_sender,
+            registry,
+            connection_id,
+            sender,
+            self.authed_pubkey,
+            self.subdomain.clone(),
+            self.connection_token.clone(),
+            metrics_handler,
+            max_limit,
+        );
+        self.subscription_coordinator = Some(coordinator);
 
         debug!("Connection setup complete");
         Ok(())
@@ -139,12 +153,12 @@ impl<T> NostrConnectionState<T> {
 
     /// Save events to the database
     pub async fn save_events(&mut self, events: Vec<StoreCommand>) -> Result<(), Error> {
-        let Some(service) = &self.subscription_service else {
-            return Err(Error::internal("No subscription service available"));
+        let Some(coordinator) = &self.subscription_coordinator else {
+            return Err(Error::internal("No subscription coordinator available"));
         };
 
         for event in events {
-            if let Err(e) = service.save_and_broadcast(event, None).await {
+            if let Err(e) = coordinator.save_and_broadcast(event, None).await {
                 error!("Failed to save event: {}", e);
                 return Err(e);
             }
@@ -155,31 +169,31 @@ impl<T> NostrConnectionState<T> {
 
     /// Save and broadcast a single store command
     pub async fn save_and_broadcast(&self, command: StoreCommand) -> Result<(), Error> {
-        let Some(service) = &self.subscription_service else {
-            return Err(Error::internal("No subscription service available"));
+        let Some(coordinator) = &self.subscription_coordinator else {
+            return Err(Error::internal("No subscription coordinator available"));
         };
 
-        service.save_and_broadcast(command, None).await
+        coordinator.save_and_broadcast(command, None).await
     }
 
     /// Remove a subscription
     pub fn remove_subscription(&self, subscription_id: SubscriptionId) -> Result<(), Error> {
-        let Some(service) = &self.subscription_service else {
-            return Err(Error::internal("No subscription service available"));
+        let Some(coordinator) = &self.subscription_coordinator else {
+            return Err(Error::internal("No subscription coordinator available"));
         };
 
-        service.remove_subscription(subscription_id)
+        coordinator.remove_subscription(subscription_id)
     }
 
-    /// Get the subscription service (only for internal use)
-    pub(crate) fn subscription_service(&self) -> Option<&SubscriptionService> {
-        self.subscription_service.as_ref()
+    /// Get the subscription coordinator (only for internal use)
+    pub(crate) fn subscription_coordinator(&self) -> Option<&SubscriptionCoordinator> {
+        self.subscription_coordinator.as_ref()
     }
 
-    /// Set the subscription service (only for testing)
+    /// Set the subscription coordinator (only for testing)
     #[cfg(test)]
-    pub(crate) fn set_subscription_service(&mut self, service: SubscriptionService) {
-        self.subscription_service = Some(service);
+    pub(crate) fn set_subscription_coordinator(&mut self, coordinator: SubscriptionCoordinator) {
+        self.subscription_coordinator = Some(coordinator);
     }
 
     /// Get or create a challenge for NIP-42 authentication
@@ -199,8 +213,8 @@ impl<T> NostrConnectionState<T> {
     pub fn cleanup(&self) {
         debug!("Cleaning up connection");
 
-        if let Some(subscription_service) = &self.subscription_service {
-            subscription_service.cleanup();
+        if let Some(subscription_coordinator) = &self.subscription_coordinator {
+            subscription_coordinator.cleanup();
         }
 
         self.connection_token.cancel();
@@ -226,6 +240,40 @@ impl<T> NostrConnectionState<T> {
     pub fn subdomain(&self) -> &Scope {
         &self.subdomain
     }
+
+    /// Check if adding a subscription would exceed the limit
+    pub fn can_add_subscription(&self, subscription_id: &SubscriptionId) -> Result<(), Error> {
+        // If already exists, allow replacing
+        if self.active_subscriptions.contains(subscription_id) {
+            return Ok(());
+        }
+
+        // Check limit
+        if let Some(max) = self.max_subscriptions {
+            if self.active_subscriptions.len() >= max {
+                return Err(Error::restricted(format!(
+                    "Maximum subscriptions limit reached: {max}"
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Track a new subscription
+    pub fn add_subscription(&mut self, subscription_id: SubscriptionId) {
+        self.active_subscriptions.insert(subscription_id);
+    }
+
+    /// Remove a subscription
+    pub fn remove_tracked_subscription(&mut self, subscription_id: &SubscriptionId) -> bool {
+        self.active_subscriptions.remove(subscription_id)
+    }
+
+    /// Set the maximum number of subscriptions (mainly for testing)
+    pub fn set_max_subscriptions(&mut self, max: Option<usize>) {
+        self.max_subscriptions = max;
+    }
 }
 
 /// Factory for creating NostrConnectionState instances
@@ -235,8 +283,10 @@ pub struct NostrConnectionFactory<T = ()> {
     #[allow(dead_code)]
     database: Arc<RelayDatabase>,
     db_sender: DatabaseSender,
+    registry: Arc<SubscriptionRegistry>,
     scope_config: ScopeConfig,
     state_factory: Option<Arc<dyn Fn() -> T + Send + Sync>>,
+    max_subscriptions: Option<usize>,
 }
 
 /// Type alias for the original non-generic factory
@@ -248,8 +298,10 @@ impl<T> NostrConnectionFactory<T> {
         relay_url: String,
         database: Arc<RelayDatabase>,
         db_sender: DatabaseSender,
+        registry: Arc<SubscriptionRegistry>,
         scope_config: ScopeConfig,
         state_factory: Arc<dyn Fn() -> T + Send + Sync>,
+        max_subscriptions: Option<usize>,
     ) -> Result<Self, Error> {
         let relay_url = RelayUrl::parse(&relay_url)
             .map_err(|e| Error::internal(format!("Invalid relay URL: {e}")))?;
@@ -258,8 +310,10 @@ impl<T> NostrConnectionFactory<T> {
             relay_url,
             database,
             db_sender,
+            registry,
             scope_config,
             state_factory: Some(state_factory),
+            max_subscriptions,
         })
     }
 
@@ -268,7 +322,9 @@ impl<T> NostrConnectionFactory<T> {
         relay_url: String,
         database: Arc<RelayDatabase>,
         db_sender: DatabaseSender,
+        registry: Arc<SubscriptionRegistry>,
         scope_config: ScopeConfig,
+        max_subscriptions: Option<usize>,
     ) -> Result<Self, Error>
     where
         T: Default + 'static,
@@ -280,9 +336,16 @@ impl<T> NostrConnectionFactory<T> {
             relay_url,
             database,
             db_sender,
+            registry,
             scope_config,
             state_factory: None,
+            max_subscriptions,
         })
+    }
+
+    /// Get the subscription registry
+    pub fn registry(&self) -> Arc<SubscriptionRegistry> {
+        self.registry.clone()
     }
 }
 
@@ -316,6 +379,7 @@ where
         state.connection_token = token;
         state.subdomain = subdomain_scope;
         state.db_sender = Some(self.db_sender.clone());
+        state.max_subscriptions = self.max_subscriptions;
 
         state
     }

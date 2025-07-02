@@ -25,7 +25,7 @@ impl EventProcessor for MultiTenantProcessor {
     async fn handle_event(
         &self,
         event: Event,
-        _custom_state: Arc<tokio::sync::RwLock<()>>,
+        _custom_state: Arc<parking_lot::RwLock<()>>,
         context: EventContext<'_>,
     ) -> RelayResult<Vec<StoreCommand>> {
         // Log subdomain info

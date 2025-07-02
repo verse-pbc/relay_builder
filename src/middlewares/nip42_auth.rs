@@ -179,7 +179,7 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for Nip42Mid
                 );
 
                 let (expected_challenge, connection_subdomain) = {
-                    let state_guard = ctx.state.read().await;
+                    let state_guard = ctx.state.read();
                     let challenge = state_guard.challenge.as_ref().cloned();
                     let subdomain = state_guard.subdomain().clone();
                     (challenge, subdomain)
@@ -342,7 +342,7 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for Nip42Mid
 
                 // Authentication successful
                 {
-                    let mut state_write = ctx.state.write().await;
+                    let mut state_write = ctx.state.write();
                     state_write.authed_pubkey = Some(auth_event_pubkey);
                     state_write.challenge = None;
                 }
@@ -375,7 +375,7 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for Nip42Mid
             ctx.connection_id
         );
         let challenge_event = {
-            let mut state_write = ctx.state.write().await;
+            let mut state_write = ctx.state.write();
             state_write.get_challenge_event()
         };
         debug!(
@@ -442,10 +442,7 @@ mod tests {
         );
 
         assert!(middleware.process_inbound(&mut ctx).await.is_ok());
-        assert_eq!(
-            ctx.state.read().await.authed_pubkey,
-            Some(keys.public_key())
-        );
+        assert_eq!(ctx.state.read().authed_pubkey, Some(keys.public_key()));
     }
 
     #[tokio::test]
@@ -472,7 +469,7 @@ mod tests {
         );
 
         assert!(middleware.process_inbound(&mut ctx).await.is_err());
-        assert_eq!(ctx.state.read().await.authed_pubkey, None);
+        assert_eq!(ctx.state.read().authed_pubkey, None);
     }
 
     #[tokio::test]
@@ -504,7 +501,7 @@ mod tests {
         );
 
         assert!(middleware.process_inbound(&mut ctx).await.is_err());
-        assert_eq!(ctx.state.read().await.authed_pubkey, None);
+        assert_eq!(ctx.state.read().authed_pubkey, None);
     }
 
     #[tokio::test]
@@ -534,7 +531,7 @@ mod tests {
         );
 
         assert!(middleware.process_inbound(&mut ctx).await.is_err());
-        assert_eq!(ctx.state.read().await.authed_pubkey, None);
+        assert_eq!(ctx.state.read().authed_pubkey, None);
     }
 
     #[tokio::test]
@@ -565,7 +562,7 @@ mod tests {
         );
 
         assert!(middleware.process_inbound(&mut ctx).await.is_err());
-        assert_eq!(ctx.state.read().await.authed_pubkey, None);
+        assert_eq!(ctx.state.read().authed_pubkey, None);
     }
 
     #[tokio::test]
@@ -602,7 +599,7 @@ mod tests {
         );
 
         assert!(middleware.process_inbound(&mut ctx).await.is_err());
-        assert_eq!(ctx.state.read().await.authed_pubkey, None);
+        assert_eq!(ctx.state.read().authed_pubkey, None);
     }
 
     #[tokio::test]
@@ -616,7 +613,7 @@ mod tests {
             create_test_connection_context("test_conn".to_string(), None, state, chain, 0);
 
         assert!(middleware.on_connect(&mut ctx).await.is_ok());
-        assert!(ctx.state.read().await.challenge.is_some());
+        assert!(ctx.state.read().challenge.is_some());
     }
 
     #[tokio::test]
@@ -675,10 +672,7 @@ mod tests {
         }
 
         assert!(result.is_ok());
-        assert_eq!(
-            ctx.state.read().await.authed_pubkey,
-            Some(keys.public_key())
-        );
+        assert_eq!(ctx.state.read().authed_pubkey, Some(keys.public_key()));
     }
 
     #[tokio::test]
@@ -712,7 +706,7 @@ mod tests {
         );
 
         assert!(middleware.process_inbound(&mut ctx).await.is_err());
-        assert_eq!(ctx.state.read().await.authed_pubkey, None);
+        assert_eq!(ctx.state.read().authed_pubkey, None);
     }
 
     #[tokio::test]
@@ -746,6 +740,6 @@ mod tests {
         );
 
         assert!(middleware.process_inbound(&mut ctx).await.is_err());
-        assert_eq!(ctx.state.read().await.authed_pubkey, None);
+        assert_eq!(ctx.state.read().authed_pubkey, None);
     }
 }

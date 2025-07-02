@@ -2,7 +2,7 @@
 
 use crate::error::Error;
 use crate::state::NostrConnectionState;
-use crate::subscription_service::StoreCommand;
+use crate::subscription_coordinator::StoreCommand;
 use anyhow::Result;
 use async_trait::async_trait;
 use nostr_sdk::prelude::*;
@@ -194,7 +194,7 @@ impl Middleware for Nip09Middleware {
 
         if event_cow.kind == Kind::EventDeletion {
             let state_snapshot = {
-                let state_guard = ctx.state.read().await;
+                let state_guard = ctx.state.read();
                 state_guard.clone()
             };
 
