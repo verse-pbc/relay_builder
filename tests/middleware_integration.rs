@@ -2,8 +2,8 @@
 
 use async_trait::async_trait;
 use nostr_relay_builder::{
-    CryptoWorker, Error, EventContext, EventProcessor, NostrConnectionState, RelayDatabase,
-    RelayMiddleware, StoreCommand,
+    Error, EventContext, EventProcessor, NostrConnectionState, RelayDatabase, RelayMiddleware,
+    StoreCommand,
 };
 use nostr_sdk::prelude::*;
 use std::sync::Arc;
@@ -26,7 +26,7 @@ impl EventProcessor for TestEventProcessor {
     async fn handle_event(
         &self,
         event: Event,
-        _custom_state: Arc<tokio::sync::RwLock<()>>,
+        _custom_state: Arc<parking_lot::RwLock<()>>,
         context: EventContext<'_>,
     ) -> Result<Vec<StoreCommand>, Error> {
         if self.allow_all {
@@ -39,19 +39,10 @@ impl EventProcessor for TestEventProcessor {
         }
     }
 
-    async fn handle_message(
-        &self,
-        _message: ClientMessage<'static>,
-        _connection_state: &mut NostrConnectionState,
-    ) -> Result<Vec<RelayMessage<'static>>, Error> {
-        // Default implementation - return empty to use standard handlers
-        Ok(vec![])
-    }
-
     fn can_see_event(
         &self,
         _event: &Event,
-        _custom_state: Arc<tokio::sync::RwLock<()>>,
+        _custom_state: Arc<parking_lot::RwLock<()>>,
         _context: EventContext<'_>,
     ) -> Result<bool, Error> {
         Ok(self.allow_all)
@@ -67,7 +58,7 @@ impl EventProcessor for RestrictiveEventProcessor {
     async fn handle_event(
         &self,
         event: Event,
-        _custom_state: Arc<tokio::sync::RwLock<()>>,
+        _custom_state: Arc<parking_lot::RwLock<()>>,
         context: EventContext<'_>,
     ) -> Result<Vec<StoreCommand>, Error> {
         if context.authed_pubkey.is_some() {
@@ -85,7 +76,7 @@ impl EventProcessor for RestrictiveEventProcessor {
     fn can_see_event(
         &self,
         _event: &Event,
-        _custom_state: Arc<tokio::sync::RwLock<()>>,
+        _custom_state: Arc<parking_lot::RwLock<()>>,
         context: EventContext<'_>,
     ) -> Result<bool, Error> {
         Ok(context.authed_pubkey.is_some())
@@ -94,7 +85,7 @@ impl EventProcessor for RestrictiveEventProcessor {
     fn verify_filters(
         &self,
         _filters: &[Filter],
-        _custom_state: Arc<tokio::sync::RwLock<()>>,
+        _custom_state: Arc<parking_lot::RwLock<()>>,
         context: EventContext<'_>,
     ) -> Result<(), Error> {
         if context.authed_pubkey.is_some() {
@@ -114,9 +105,9 @@ mod tests {
         let tmp_dir = TempDir::new().unwrap();
         let db_path = tmp_dir.path();
         let keys = Keys::generate();
-        let task_tracker = TaskTracker::new();
-        let crypto_sender = CryptoWorker::spawn(Arc::new(keys.clone()), &task_tracker);
-        let (database, _db_sender) = RelayDatabase::new(db_path, crypto_sender).unwrap();
+        let _task_tracker = TaskTracker::new();
+        let keys_arc = Arc::new(keys.clone());
+        let (database, _db_sender) = RelayDatabase::new(db_path, keys_arc).unwrap();
         (Arc::new(database), keys, tmp_dir)
     }
 
@@ -124,7 +115,9 @@ mod tests {
     async fn test_relay_middleware_creation() {
         let (database, keys, _tmp_dir) = setup_test().await;
         let processor = TestEventProcessor::new(true);
-        let middleware = RelayMiddleware::new(processor, keys.public_key(), database);
+        let registry = Arc::new(nostr_relay_builder::SubscriptionRegistry::new(None));
+        let middleware =
+            RelayMiddleware::new(processor, keys.public_key(), database, registry, 500);
         assert!(middleware.processor().allow_all);
     }
 
@@ -144,7 +137,7 @@ mod tests {
         // Test without authentication
         let verify_result = restrict_processor.verify_filters(
             &filters,
-            Arc::new(tokio::sync::RwLock::new(())),
+            Arc::new(parking_lot::RwLock::new(())),
             context,
         );
         assert!(verify_result.is_err());
@@ -159,7 +152,7 @@ mod tests {
 
         let verify_result = restrict_processor.verify_filters(
             &filters,
-            Arc::new(tokio::sync::RwLock::new(())),
+            Arc::new(parking_lot::RwLock::new(())),
             auth_context,
         );
         assert!(verify_result.is_ok());
@@ -187,17 +180,17 @@ mod tests {
 
         // Test allow all processor
         assert!(allow_processor
-            .can_see_event(&event, Arc::new(tokio::sync::RwLock::new(())), context)
+            .can_see_event(&event, Arc::new(parking_lot::RwLock::new(())), context)
             .unwrap());
 
         // Test deny all processor
         assert!(!deny_processor
-            .can_see_event(&event, Arc::new(tokio::sync::RwLock::new(())), context)
+            .can_see_event(&event, Arc::new(parking_lot::RwLock::new(())), context)
             .unwrap());
 
         // Test restrictive processor without auth
         assert!(!restrict_processor
-            .can_see_event(&event, Arc::new(tokio::sync::RwLock::new(())), context)
+            .can_see_event(&event, Arc::new(parking_lot::RwLock::new(())), context)
             .unwrap());
 
         // Test restrictive processor with auth
@@ -208,7 +201,49 @@ mod tests {
             relay_pubkey: &relay_pubkey,
         };
         assert!(restrict_processor
-            .can_see_event(&event, Arc::new(tokio::sync::RwLock::new(())), auth_context)
+            .can_see_event(&event, Arc::new(parking_lot::RwLock::new(())), auth_context)
             .unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_subscription_limiting() {
+        let mut state = NostrConnectionState::<()>::new("ws://test".to_string()).unwrap();
+        state.set_max_subscriptions(Some(3));
+
+        // Can add first subscription
+        let sub1 = SubscriptionId::new("sub1");
+        assert!(state.can_add_subscription(&sub1).is_ok());
+        state.add_subscription(sub1.clone());
+
+        // Can add second subscription
+        let sub2 = SubscriptionId::new("sub2");
+        assert!(state.can_add_subscription(&sub2).is_ok());
+        state.add_subscription(sub2.clone());
+
+        // Can add third subscription
+        let sub3 = SubscriptionId::new("sub3");
+        assert!(state.can_add_subscription(&sub3).is_ok());
+        state.add_subscription(sub3.clone());
+
+        // Cannot add fourth subscription
+        let sub4 = SubscriptionId::new("sub4");
+        let result = state.can_add_subscription(&sub4);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Maximum subscriptions limit reached"));
+
+        // Can replace existing subscription
+        assert!(state.can_add_subscription(&sub1).is_ok());
+
+        // Remove a subscription and verify we can add a new one
+        assert!(state.remove_tracked_subscription(&sub2));
+        assert!(state.can_add_subscription(&sub4).is_ok());
+        state.add_subscription(sub4);
+
+        // Verify count is still at limit
+        let sub5 = SubscriptionId::new("sub5");
+        assert!(state.can_add_subscription(&sub5).is_err());
     }
 }

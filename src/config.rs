@@ -1,6 +1,6 @@
 //! Configuration options for the relay builder
 
-use crate::crypto_worker::CryptoSender;
+use crate::crypto_helper::CryptoHelper;
 use crate::database::RelayDatabase;
 use crate::error::Error;
 use nostr_lmdb::Scope;
@@ -79,7 +79,7 @@ pub enum DatabaseConfig {
     Instance(
         Arc<RelayDatabase>,
         crate::database::DatabaseSender,
-        CryptoSender,
+        CryptoHelper,
     ),
 }
 
@@ -99,14 +99,14 @@ impl
     From<(
         Arc<RelayDatabase>,
         crate::database::DatabaseSender,
-        CryptoSender,
+        CryptoHelper,
     )> for DatabaseConfig
 {
     fn from(
         (db, sender, crypto_sender): (
             Arc<RelayDatabase>,
             crate::database::DatabaseSender,
-            CryptoSender,
+            CryptoHelper,
         ),
     ) -> Self {
         DatabaseConfig::Instance(db, sender, crypto_sender)
@@ -134,7 +134,6 @@ pub struct RelayConfig {
     pub max_subscriptions: usize,
     /// Maximum limit value allowed in subscription filters
     pub max_limit: usize,
-    // Note: WebSocket channel_size is calculated as: max_subscriptions * max_limit * 1.10
 }
 
 impl RelayConfig {
@@ -153,31 +152,31 @@ impl RelayConfig {
             auth_config: None,
             websocket_config: WebSocketConfig::default(),
             max_subscriptions: 50,
-            max_limit: 500,
+            max_limit: 5000,
         }
     }
 
-    /// Create database instance from configuration with a provided crypto sender
+    /// Create database instance from configuration with provided keys
     pub fn create_database(
         &self,
-        crypto_sender: CryptoSender,
+        keys: Arc<Keys>,
     ) -> Result<
         (
             Arc<RelayDatabase>,
             crate::database::DatabaseSender,
-            CryptoSender,
+            CryptoHelper,
         ),
         Error,
     > {
-        let (database, db_sender) =
-            self.create_database_with_tracker(crypto_sender.clone(), None, None)?;
-        Ok((database, db_sender, crypto_sender))
+        let crypto_helper = CryptoHelper::new(keys.clone());
+        let (database, db_sender) = self.create_database_with_tracker(keys, None, None)?;
+        Ok((database, db_sender, crypto_helper))
     }
 
-    /// Create database instance from configuration with a provided crypto sender and optional TaskTracker
+    /// Create database instance from configuration with provided keys and optional TaskTracker
     pub fn create_database_with_tracker(
         &self,
-        crypto_sender: CryptoSender,
+        keys: Arc<Keys>,
         task_tracker: Option<tokio_util::task::TaskTracker>,
         cancellation_token: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<(Arc<RelayDatabase>, crate::database::DatabaseSender), Error> {
@@ -186,16 +185,16 @@ impl RelayConfig {
                 let (database, db_sender) = match (task_tracker, cancellation_token) {
                     (Some(tracker), Some(token)) => RelayDatabase::with_task_tracker_and_token(
                         path,
-                        crypto_sender,
+                        keys.clone(),
                         tracker,
                         token,
                     )?,
                     (Some(tracker), None) => {
-                        RelayDatabase::with_task_tracker(path, crypto_sender, tracker)?
+                        RelayDatabase::with_task_tracker(path, keys.clone(), tracker)?
                     }
                     _ => RelayDatabase::with_config(
                         path,
-                        crypto_sender,
+                        keys.clone(),
                         self.websocket_config.max_connections,
                         Some(self.max_subscriptions),
                     )?,
@@ -212,30 +211,50 @@ impl RelayConfig {
         }
     }
 
-    /// Create database instance from a database config with a provided crypto sender and optional TaskTracker
+    /// Create database instance from a database config with provided keys and optional TaskTracker
     pub fn create_database_from_config(
         database_config: DatabaseConfig,
         websocket_config: &WebSocketConfig,
         max_subscriptions: usize,
-        crypto_sender: CryptoSender,
+        keys: Arc<Keys>,
         task_tracker: Option<tokio_util::task::TaskTracker>,
         cancellation_token: Option<tokio_util::sync::CancellationToken>,
+        event_sender: Option<flume::Sender<Arc<nostr_sdk::Event>>>,
     ) -> Result<(Arc<RelayDatabase>, crate::database::DatabaseSender), Error> {
         match database_config {
             DatabaseConfig::Path(path) => {
-                let (database, db_sender) = match (task_tracker, cancellation_token) {
-                    (Some(tracker), Some(token)) => RelayDatabase::with_task_tracker_and_token(
+                let (database, db_sender) = match (event_sender, task_tracker, cancellation_token) {
+                    (Some(sender), Some(tracker), Some(token)) => RelayDatabase::with_event_sender(
                         &path,
-                        crypto_sender,
-                        tracker,
-                        token,
+                        keys.clone(),
+                        sender,
+                        Some(tracker),
+                        Some(token),
                     )?,
-                    (Some(tracker), None) => {
-                        RelayDatabase::with_task_tracker(&path, crypto_sender, tracker)?
+                    (Some(sender), Some(tracker), None) => RelayDatabase::with_event_sender(
+                        &path,
+                        keys.clone(),
+                        sender,
+                        Some(tracker),
+                        None,
+                    )?,
+                    (Some(sender), None, None) => {
+                        RelayDatabase::with_event_sender(&path, keys.clone(), sender, None, None)?
+                    }
+                    (None, Some(tracker), Some(token)) => {
+                        RelayDatabase::with_task_tracker_and_token(
+                            &path,
+                            keys.clone(),
+                            tracker,
+                            token,
+                        )?
+                    }
+                    (None, Some(tracker), None) => {
+                        RelayDatabase::with_task_tracker(&path, keys.clone(), tracker)?
                     }
                     _ => RelayDatabase::with_config(
                         &path,
-                        crypto_sender,
+                        keys.clone(),
                         websocket_config.max_connections,
                         Some(max_subscriptions),
                     )?,
@@ -325,10 +344,35 @@ impl RelayConfig {
         self
     }
 
-    /// Calculate the WebSocket channel size based on subscription limits
-    /// Formula: max_subscriptions * max_limit * 1.10 (10% buffer)
+    /// Calculate the WebSocket channel size based on configuration
+    /// This is used for per-connection MessageSender channels
     pub fn calculate_channel_size(&self) -> usize {
-        (self.max_subscriptions as f64 * self.max_limit as f64 * 1.10) as usize
+        // We need to handle the worst case: a single subscription requesting max_limit events
+        // Plus overhead for control messages (EOSE, notices, etc.)
+        let overhead = 5; // Space for control messages
+        let limit_based_size = self.max_limit + overhead;
+
+        self.max_subscriptions * limit_based_size
+    }
+
+    /// Calculate the global event distribution channel size
+    /// Formula: max_connections * max_subscriptions * 10
+    /// This is used for the single channel that distributes events to all connections
+    pub fn calculate_event_channel_size(&self) -> usize {
+        // Use actual max_connections if available, otherwise use a reasonable default
+        let max_connections = self.websocket_config.max_connections.unwrap_or(1000);
+
+        // Calculate: max_connections * max_subscriptions * 10
+        // This allows 10 events to be buffered per subscription across all connections
+        let channel_size = max_connections * self.max_subscriptions * 10;
+
+        // Log the calculated size for debugging
+        eprintln!(
+            "Global event distribution channel size: {channel_size} ({max_connections}x{}x10)",
+            self.max_subscriptions
+        );
+
+        channel_size
     }
 }
 

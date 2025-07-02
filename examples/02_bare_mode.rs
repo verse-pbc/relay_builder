@@ -10,7 +10,7 @@
 use async_trait::async_trait;
 use axum::{routing::get, Router};
 use nostr_relay_builder::{
-    crypto_worker::CryptoWorker, middlewares::*, Error, EventContext, EventProcessor, RelayBuilder,
+    crypto_helper::CryptoHelper, middlewares::*, Error, EventContext, EventProcessor, RelayBuilder,
     RelayConfig, RelayInfo, StoreCommand,
 };
 use nostr_sdk::prelude::*;
@@ -29,7 +29,7 @@ impl EventProcessor for SimpleProcessor {
     async fn handle_event(
         &self,
         event: Event,
-        _custom_state: Arc<tokio::sync::RwLock<()>>,
+        _custom_state: Arc<parking_lot::RwLock<()>>,
         context: EventContext<'_>,
     ) -> Result<Vec<StoreCommand>, Error> {
         info!(
@@ -65,9 +65,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_max_subscriptions(100)
         .with_max_limit(5000);
 
-    // Create a task tracker and crypto worker for event verification
+    // Create a task tracker and crypto helper for event verification
     let task_tracker = TaskTracker::new();
-    let crypto_sender = CryptoWorker::spawn(Arc::new(keys.clone()), &task_tracker);
+    let crypto_helper = CryptoHelper::new(Arc::new(keys.clone()));
 
     // Build the relay in bare mode and manually add middlewares
     let builder = RelayBuilder::new(config)
@@ -76,7 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Now manually add the middlewares that would normally be added automatically
         .with_middleware(LoggerMiddleware::new())
         .with_middleware(ErrorHandlingMiddleware::new())
-        .with_middleware(EventVerifierMiddleware::new(crypto_sender));
+        .with_middleware(EventVerifierMiddleware::new(crypto_helper));
 
     warn!("This relay is running in BARE MODE with manually configured middleware");
     warn!("The example shows how to replicate default behavior, but you can:");

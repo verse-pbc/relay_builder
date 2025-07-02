@@ -1,7 +1,7 @@
 //! RelayBuilder for constructing Nostr relays with custom state
 
 use crate::config::{DatabaseConfig, RelayConfig, ScopeConfig};
-use crate::crypto_worker::CryptoWorker;
+use crate::crypto_helper::CryptoHelper;
 use crate::database::{DatabaseSender, RelayDatabase};
 use crate::error::Error;
 use crate::event_processor::{DefaultRelayProcessor, EventContext, EventProcessor};
@@ -15,6 +15,7 @@ use nostr_sdk::prelude::*;
 use std::marker::PhantomData;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use tokio::time::Duration;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::warn;
 use websocket_builder::{Middleware, WebSocketBuilder};
@@ -83,7 +84,7 @@ impl std::fmt::Debug for HtmlOption {
 /// #     async fn handle_event(
 /// #         &self,
 /// #         event: nostr_sdk::Event,
-/// #         custom_state: std::sync::Arc<tokio::sync::RwLock<MyState>>,
+/// #         custom_state: std::sync::Arc<parking_lot::RwLock<MyState>>,
 /// #         context: EventContext<'_>,
 /// #     ) -> Result<Vec<nostr_relay_builder::StoreCommand>, nostr_relay_builder::Error> {
 /// #         Ok(vec![])
@@ -324,6 +325,8 @@ where
         db_sender: DatabaseSender,
         relay_url: String,
         scope_config: ScopeConfig,
+        registry: Arc<crate::subscription_registry::SubscriptionRegistry>,
+        max_subscriptions: Option<usize>,
     ) -> Result<NostrConnectionFactory<T>, Error>
     where
         T: Default,
@@ -333,11 +336,20 @@ where
                 relay_url,
                 database,
                 db_sender,
+                registry,
                 scope_config,
                 state_factory as Arc<dyn Fn() -> T + Send + Sync>,
+                max_subscriptions,
             )
         } else {
-            NostrConnectionFactory::new(relay_url, database, db_sender, scope_config)
+            NostrConnectionFactory::new(
+                relay_url,
+                database,
+                db_sender,
+                registry,
+                scope_config,
+                max_subscriptions,
+            )
         }
     }
 
@@ -497,10 +509,6 @@ where
     {
         let websocket_config = self.config.websocket_config.clone();
 
-        // Set the global subscription limits
-        crate::global_config::set_max_subscriptions(self.config.max_subscriptions);
-        crate::global_config::set_max_limit(self.config.max_limit);
-
         // Set the global subscription metrics handler if provided
         if let Some(handler) = self.subscription_metrics_handler.clone() {
             crate::global_metrics::set_subscription_metrics_handler(handler);
@@ -508,10 +516,25 @@ where
 
         let task_tracker = self.task_tracker.take().unwrap_or_default();
 
-        // Calculate channel size based on max_subscriptions * max_limit * 1.10
-        let calculated_channel_size = self.config.calculate_channel_size();
+        // Calculate channel sizes
+        let per_connection_channel_size = self.config.calculate_channel_size();
+        let event_distribution_channel_size = self.config.calculate_event_channel_size();
         let relay_url = self.config.relay_url.clone();
         let scope_config = self.config.scope_config.clone();
+
+        // Create subscription registry and event channel first
+        let subscription_registry =
+            Arc::new(crate::subscription_registry::SubscriptionRegistry::new(
+                self.subscription_metrics_handler.clone(),
+            ));
+
+        // Create mpsc channel for event distribution (global channel)
+        let (event_sender, event_receiver) = flume::bounded(event_distribution_channel_size);
+
+        // Start the distribution task
+        subscription_registry
+            .clone()
+            .start_distribution_task(event_receiver);
 
         // Only create crypto worker if we're creating a new database
         let database = self.config.database.take();
@@ -521,18 +544,19 @@ where
                 (db, db_sender, crypto_sender)
             }
             Some(database_config @ DatabaseConfig::Path(_)) => {
-                // Create new database with crypto worker
-                let crypto_sender =
-                    CryptoWorker::spawn(Arc::new(self.config.keys.clone()), &task_tracker);
+                // Create new database with keys
+                let keys = Arc::new(self.config.keys.clone());
+                let crypto_helper = CryptoHelper::new(keys.clone());
                 let (database, db_sender) = RelayConfig::create_database_from_config(
                     database_config,
                     &self.config.websocket_config,
                     self.config.max_subscriptions,
-                    crypto_sender.clone(),
+                    keys,
                     Some(task_tracker.clone()),
                     self.cancellation_token.clone(),
+                    Some(event_sender),
                 )?;
-                (database, db_sender, crypto_sender)
+                (database, db_sender, crypto_helper)
             }
             None => {
                 return Err(Error::internal(
@@ -542,8 +566,19 @@ where
         };
 
         let custom_middlewares = std::mem::take(&mut self.middlewares);
-        let connection_factory =
-            self.build_connection_factory(database.clone(), db_sender, relay_url, scope_config)?;
+        let max_subscriptions = if self.config.max_subscriptions > 0 {
+            Some(self.config.max_subscriptions)
+        } else {
+            None
+        };
+        let connection_factory = self.build_connection_factory(
+            database.clone(),
+            db_sender,
+            relay_url,
+            scope_config,
+            subscription_registry.clone(),
+            max_subscriptions,
+        )?;
 
         // Create a wrapper to use Arc<dyn EventProcessor<T>> with RelayMiddleware
         struct DynProcessor<T>(Arc<dyn EventProcessor<T>>);
@@ -556,7 +591,7 @@ where
             fn can_see_event(
                 &self,
                 event: &Event,
-                custom_state: Arc<tokio::sync::RwLock<T>>,
+                custom_state: Arc<parking_lot::RwLock<T>>,
                 context: EventContext<'_>,
             ) -> Result<bool, Error> {
                 self.0.can_see_event(event, custom_state, context)
@@ -565,7 +600,7 @@ where
             fn verify_filters(
                 &self,
                 filters: &[Filter],
-                custom_state: Arc<tokio::sync::RwLock<T>>,
+                custom_state: Arc<parking_lot::RwLock<T>>,
                 context: EventContext<'_>,
             ) -> Result<(), Error> {
                 self.0.verify_filters(filters, custom_state, context)
@@ -574,18 +609,10 @@ where
             async fn handle_event(
                 &self,
                 event: Event,
-                custom_state: Arc<tokio::sync::RwLock<T>>,
+                custom_state: Arc<parking_lot::RwLock<T>>,
                 context: EventContext<'_>,
-            ) -> Result<Vec<crate::subscription_service::StoreCommand>, Error> {
+            ) -> Result<Vec<crate::subscription_coordinator::StoreCommand>, Error> {
                 self.0.handle_event(event, custom_state, context).await
-            }
-
-            async fn handle_message(
-                &self,
-                message: ClientMessage<'static>,
-                state: &mut NostrConnectionState<T>,
-            ) -> Result<Vec<RelayMessage<'static>>, Error> {
-                self.0.handle_message(message, state).await
             }
         }
 
@@ -599,20 +626,20 @@ where
             DynProcessor(self.event_processor.clone()),
             self.config.keys.public_key(),
             database,
+            subscription_registry.clone(),
+            self.config.max_limit,
         );
 
         let mut builder = WebSocketBuilder::new(connection_factory, NostrMessageConverter);
 
-        builder = builder.with_channel_size(calculated_channel_size);
+        builder = builder.with_channel_size(per_connection_channel_size);
 
         // Apply other websocket configurations if supported
         if let Some(max_connections) = websocket_config.max_connections {
             builder = builder.with_max_connections(max_connections);
         }
         if let Some(max_time) = websocket_config.max_connection_time {
-            // TODO: WebSocketBuilder doesn't support max_connection_time yet
-            // builder = builder.with_max_connection_time(Duration::from_secs(max_time));
-            let _ = max_time; // Suppress unused warning
+            builder = builder.with_max_connection_time(Duration::from_secs(max_time));
         }
 
         // Add standard middlewares unless in bare mode

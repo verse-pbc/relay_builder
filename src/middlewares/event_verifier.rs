@@ -1,6 +1,6 @@
 //! Event verification middleware
 
-use crate::crypto_worker::CryptoSender;
+use crate::crypto_helper::CryptoHelper;
 use crate::state::NostrConnectionState;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -11,14 +11,14 @@ use websocket_builder::{InboundContext, Middleware, OutboundContext, SendMessage
 /// Middleware that verifies event signatures and basic validity
 #[derive(Clone, Debug)]
 pub struct EventVerifierMiddleware<T = ()> {
-    crypto_sender: CryptoSender,
+    crypto_helper: CryptoHelper,
     _phantom: std::marker::PhantomData<T>,
 }
 
 impl<T> EventVerifierMiddleware<T> {
-    pub fn new(crypto_sender: CryptoSender) -> Self {
+    pub fn new(crypto_helper: CryptoHelper) -> Self {
         Self {
-            crypto_sender,
+            crypto_helper,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -38,8 +38,8 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for EventVer
             let event_id = event_cow.id;
             let event_to_verify: Event = event_cow.as_ref().clone();
 
-            // Use the crypto sender for verification
-            let verification_failed = match self.crypto_sender.verify_event(event_to_verify).await {
+            // Verify the event
+            let verification_failed = match self.crypto_helper.verify_event(&event_to_verify) {
                 Ok(()) => false,
                 Err(_) => true,
             };
@@ -67,20 +67,18 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for EventVer
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto_worker::CryptoWorker;
+    use crate::crypto_helper::CryptoHelper;
     use crate::test_utils::create_test_inbound_context;
     use std::borrow::Cow;
     use std::sync::Arc;
-    use tokio_util::task::TaskTracker;
 
-    fn create_crypto_sender() -> CryptoSender {
+    fn create_crypto_helper() -> CryptoHelper {
         let keys = Arc::new(Keys::generate());
-        let task_tracker = TaskTracker::new();
-        CryptoWorker::spawn(keys, &task_tracker)
+        CryptoHelper::new(keys)
     }
 
     fn create_middleware_chain(
-        crypto_sender: CryptoSender,
+        crypto_helper: CryptoHelper,
     ) -> Vec<
         Arc<
             dyn Middleware<
@@ -90,7 +88,7 @@ mod tests {
             >,
         >,
     > {
-        vec![Arc::new(EventVerifierMiddleware::<()>::new(crypto_sender))]
+        vec![Arc::new(EventVerifierMiddleware::<()>::new(crypto_helper))]
     }
 
     async fn create_signed_event() -> (Keys, Event) {
@@ -106,8 +104,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_valid_event_signature() {
-        let crypto_sender = create_crypto_sender();
-        let chain = create_middleware_chain(crypto_sender);
+        let crypto_helper = create_crypto_helper();
+        let chain = create_middleware_chain(crypto_helper);
         let state = create_test_state();
         let (_, event) = create_signed_event().await;
 
@@ -126,8 +124,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalid_event_signature() {
-        let crypto_sender = create_crypto_sender();
-        let chain = create_middleware_chain(crypto_sender);
+        let crypto_helper = create_crypto_helper();
+        let chain = create_middleware_chain(crypto_helper);
         let state = create_test_state();
         let (_, mut event) = create_signed_event().await;
         let keys2 = Keys::generate();
@@ -153,8 +151,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_non_event_message_passes_through() {
-        let crypto_sender = create_crypto_sender();
-        let chain = create_middleware_chain(crypto_sender);
+        let crypto_helper = create_crypto_helper();
+        let chain = create_middleware_chain(crypto_helper);
         let state = create_test_state();
 
         let mut ctx = create_test_inbound_context(
@@ -174,8 +172,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_auth_message_passes_through() {
-        let crypto_sender = create_crypto_sender();
-        let chain = create_middleware_chain(crypto_sender);
+        let crypto_helper = create_crypto_helper();
+        let chain = create_middleware_chain(crypto_helper);
         let state = create_test_state();
         let (_, auth_event) = create_signed_event().await;
 

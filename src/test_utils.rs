@@ -1,13 +1,13 @@
 use crate::database::{DatabaseSender, RelayDatabase};
 use crate::state::NostrConnectionState;
-use crate::subscription_service::SubscriptionService;
+use crate::subscription_coordinator::SubscriptionCoordinator;
+use crate::subscription_registry::SubscriptionRegistry;
 use flume;
 use nostr_sdk::prelude::*;
+use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::Instant;
 use tempfile::TempDir;
-use tokio::sync::RwLock;
-use tokio_util::task::TaskTracker;
 use websocket_builder::{
     ConnectionContext, InboundContext, MessageSender, Middleware, OutboundContext,
 };
@@ -16,11 +16,8 @@ pub async fn setup_test() -> (TempDir, Arc<RelayDatabase>, Keys) {
     let tmp_dir = TempDir::new().unwrap();
     let db_path = tmp_dir.path().join("test.db");
     let keys = Keys::generate();
-    let task_tracker = TaskTracker::new();
-    let crypto_sender =
-        crate::crypto_worker::CryptoWorker::spawn(Arc::new(keys.clone()), &task_tracker);
-    let (database, _db_sender) =
-        RelayDatabase::new(db_path.to_str().unwrap(), crypto_sender).unwrap();
+    let keys_arc = Arc::new(keys.clone());
+    let (database, _db_sender) = RelayDatabase::new(db_path.to_str().unwrap(), keys_arc).unwrap();
     (tmp_dir, Arc::new(database), keys)
 }
 
@@ -28,11 +25,8 @@ pub async fn setup_test_with_sender() -> (TempDir, Arc<RelayDatabase>, DatabaseS
     let tmp_dir = TempDir::new().unwrap();
     let db_path = tmp_dir.path().join("test.db");
     let keys = Keys::generate();
-    let task_tracker = TaskTracker::new();
-    let crypto_sender =
-        crate::crypto_worker::CryptoWorker::spawn(Arc::new(keys.clone()), &task_tracker);
-    let (database, db_sender) =
-        RelayDatabase::new(db_path.to_str().unwrap(), crypto_sender).unwrap();
+    let keys_arc = Arc::new(keys.clone());
+    let (database, db_sender) = RelayDatabase::new(db_path.to_str().unwrap(), keys_arc).unwrap();
     (tmp_dir, Arc::new(database), db_sender, keys)
 }
 
@@ -60,6 +54,7 @@ pub fn create_test_state(pubkey: Option<nostr_sdk::PublicKey>) -> NostrConnectio
     let mut state = NostrConnectionState::new("ws://test.relay".to_string())
         .expect("Failed to create test state");
     state.authed_pubkey = pubkey;
+    state.max_subscriptions = Some(100); // Set a reasonable test limit
     state
 }
 
@@ -76,17 +71,33 @@ pub async fn create_test_state_with_subscription_service(
     // Create a db_sender for testing
     let (_tmp, _db, db_sender, _keys) = setup_test_with_sender().await;
 
-    let subscription_service = SubscriptionService::new(database, db_sender.clone(), sender)
-        .await
-        .expect("Failed to create subscription service");
+    // Create subscription registry
+    let registry = Arc::new(SubscriptionRegistry::new(None));
+
+    // Create cancellation token
+    let cancellation_token = tokio_util::sync::CancellationToken::new();
+
+    let subscription_coordinator = SubscriptionCoordinator::new(
+        database,
+        db_sender.clone(),
+        registry,
+        "test_connection".to_string(),
+        sender,
+        pubkey,
+        nostr_lmdb::Scope::Default,
+        cancellation_token,
+        None,
+        500, // max_limit
+    );
 
     let mut state = NostrConnectionState::new("ws://test.relay".to_string())
         .expect("Failed to create test state");
     state.authed_pubkey = pubkey;
     state.db_sender = Some(db_sender);
+    state.max_subscriptions = Some(100); // Set a reasonable test limit
 
-    // Use the test method to add the subscription service
-    state.set_subscription_service(subscription_service);
+    // Use the test method to add the subscription coordinator
+    state.set_subscription_coordinator(subscription_coordinator);
 
     (state, rx)
 }
@@ -102,17 +113,33 @@ pub async fn create_test_state_with_subscription_service_and_sender(
     let (tx, rx) = flume::bounded(10);
     let sender = MessageSender::new(tx, 0);
 
-    let subscription_service = SubscriptionService::new(database, db_sender.clone(), sender)
-        .await
-        .expect("Failed to create subscription service");
+    // Create subscription registry
+    let registry = Arc::new(SubscriptionRegistry::new(None));
+
+    // Create cancellation token
+    let cancellation_token = tokio_util::sync::CancellationToken::new();
+
+    let subscription_coordinator = SubscriptionCoordinator::new(
+        database,
+        db_sender.clone(),
+        registry,
+        "test_connection".to_string(),
+        sender,
+        pubkey,
+        nostr_lmdb::Scope::Default,
+        cancellation_token,
+        None,
+        500, // max_limit
+    );
 
     let mut state = NostrConnectionState::new("ws://test.relay".to_string())
         .expect("Failed to create test state");
     state.authed_pubkey = pubkey;
     state.db_sender = Some(db_sender);
+    state.max_subscriptions = Some(100); // Set a reasonable test limit
 
-    // Use the test method to add the subscription service
-    state.set_subscription_service(subscription_service);
+    // Use the test method to add the subscription coordinator
+    state.set_subscription_coordinator(subscription_coordinator);
 
     (state, rx)
 }

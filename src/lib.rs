@@ -8,11 +8,10 @@
 //! - Database abstraction
 
 pub mod config;
-pub mod crypto_worker;
+pub mod crypto_helper;
 pub mod database;
 pub mod error;
 pub mod event_processor;
-pub mod global_config;
 pub mod global_metrics;
 #[cfg(feature = "axum")]
 pub mod handlers;
@@ -23,13 +22,14 @@ pub mod relay_builder;
 pub mod relay_middleware;
 pub mod state;
 pub mod subdomain;
-pub mod subscription_service;
+pub mod subscription_coordinator;
+pub mod subscription_registry;
 #[cfg(test)]
 pub mod test_utils;
 pub mod utils;
 
 pub use config::{RelayConfig, ScopeConfig, WebSocketConfig};
-pub use crypto_worker::{CryptoSender, CryptoWorker};
+pub use crypto_helper::CryptoHelper;
 pub use database::{DatabaseSender, NostrDatabase, RelayDatabase};
 pub use error::{Error, Result};
 pub use event_processor::{DefaultRelayProcessor, EventContext, EventProcessor};
@@ -45,7 +45,8 @@ pub use state::{
     DefaultNostrConnectionFactory, DefaultNostrConnectionState, NostrConnectionFactory,
     NostrConnectionState,
 };
-pub use subscription_service::{StoreCommand, SubscriptionService};
+pub use subscription_coordinator::{StoreCommand, SubscriptionCoordinator};
+pub use subscription_registry::{EventDistributor, SubscriptionRegistry};
 
 // Re-export commonly used middlewares
 pub use middlewares::{

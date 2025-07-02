@@ -10,8 +10,8 @@
 use anyhow::Result;
 use axum::{routing::get, Router};
 use nostr_relay_builder::{
-    CryptoWorker, Nip09Middleware, Nip40ExpirationMiddleware, Nip70Middleware, RelayBuilder,
-    RelayConfig, RelayDatabase, RelayInfo,
+    Nip09Middleware, Nip40ExpirationMiddleware, Nip70Middleware, RelayBuilder, RelayConfig,
+    RelayDatabase, RelayInfo,
 };
 use nostr_sdk::prelude::*;
 use std::net::SocketAddr;
@@ -27,14 +27,11 @@ async fn main() -> Result<()> {
     let relay_url = "ws://localhost:8080";
     let keys = Keys::generate();
 
-    // Create crypto worker and database (required for NIP-09)
+    // Create database (required for NIP-09)
     let task_tracker = TaskTracker::new();
-    let crypto_sender = CryptoWorker::spawn(Arc::new(keys.clone()), &task_tracker);
-    let (database, _db_sender) = RelayDatabase::with_task_tracker(
-        "./protocol_features.db",
-        crypto_sender,
-        task_tracker.clone(),
-    )?;
+    let keys_arc = Arc::new(keys.clone());
+    let (database, _db_sender) =
+        RelayDatabase::with_task_tracker("./protocol_features.db", keys_arc, task_tracker.clone())?;
     let database = Arc::new(database);
 
     let config = RelayConfig::new(relay_url, "./protocol_features.db", keys);

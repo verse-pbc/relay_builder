@@ -1,4 +1,4 @@
-//! Test crypto worker performance
+//! Test crypto helper performance
 //!
 //! By default, these tests run with a small number of events (500) for quick testing.
 //! To run full performance tests with more events, use:
@@ -6,7 +6,7 @@
 //! PERF_TEST_EVENT_COUNT=20000 cargo test test_crypto_verification_performance
 //! ```
 
-use nostr_relay_builder::crypto_worker::CryptoWorker;
+use nostr_relay_builder::crypto_helper::CryptoHelper;
 use nostr_sdk::prelude::*;
 use std::sync::Arc;
 use std::time::Instant;
@@ -27,7 +27,7 @@ async fn test_crypto_verification_performance() {
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(500); // Default to 500 events for regular tests
 
-    // Initialize crypto worker
+    // Initialize crypto helper
     let keys = Arc::new(Keys::generate());
     let task_tracker = TaskTracker::new();
 
@@ -36,7 +36,7 @@ async fn test_crypto_verification_performance() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| {
-            // Match the default from crypto_worker.rs
+            // Match the default from crypto_helper.rs
             std::thread::available_parallelism()
                 .map(|n| (n.get().saturating_sub(1)).max(1))
                 .unwrap_or(1)
@@ -49,7 +49,7 @@ async fn test_crypto_verification_performance() {
             .unwrap_or(0)
     );
 
-    let crypto_sender = CryptoWorker::spawn(Arc::clone(&keys), &task_tracker);
+    let crypto_helper = CryptoHelper::new(Arc::clone(&keys));
 
     // Create test events
     let test_keys = Keys::generate();
@@ -94,8 +94,8 @@ async fn test_crypto_verification_performance() {
     // Send all verification requests concurrently
     let mut verify_futures = Vec::new();
     for event in events {
-        let sender = crypto_sender.clone();
-        verify_futures.push(async move { sender.verify_event(event).await });
+        let sender = crypto_helper.clone();
+        verify_futures.push(async move { sender.verify_event(&event) });
     }
 
     // Wait for all verifications to complete
@@ -121,7 +121,7 @@ async fn test_crypto_verification_performance() {
     );
 
     // Cleanup
-    drop(crypto_sender);
+    drop(crypto_helper);
     task_tracker.close();
     task_tracker.wait().await;
 }
@@ -149,7 +149,7 @@ async fn test_with_different_worker_counts() {
         // Run a performance test
         let keys = Arc::new(Keys::generate());
         let task_tracker = TaskTracker::new();
-        let crypto_sender = CryptoWorker::spawn(Arc::clone(&keys), &task_tracker);
+        let crypto_helper = CryptoHelper::new(Arc::clone(&keys));
 
         // Create test events
         let test_keys = Keys::generate();
@@ -168,8 +168,8 @@ async fn test_with_different_worker_counts() {
         let mut verify_futures = Vec::new();
 
         for event in events {
-            let sender = crypto_sender.clone();
-            verify_futures.push(async move { sender.verify_event(event).await });
+            let sender = crypto_helper.clone();
+            verify_futures.push(async move { sender.verify_event(&event) });
         }
 
         let results = futures_util::future::join_all(verify_futures).await;
@@ -187,18 +187,18 @@ async fn test_with_different_worker_counts() {
         );
 
         // Cleanup
-        drop(crypto_sender);
+        drop(crypto_helper);
         task_tracker.close();
         task_tracker.wait().await;
     }
 }
 
 #[tokio::test]
-async fn test_crypto_worker_concurrency() {
+async fn test_crypto_helper_concurrency() {
     // Test with concurrent verification
     let keys = Arc::new(Keys::generate());
     let task_tracker = TaskTracker::new();
-    let crypto_sender = CryptoWorker::spawn(Arc::clone(&keys), &task_tracker);
+    let crypto_helper = CryptoHelper::new(Arc::clone(&keys));
 
     // Create test events
     let test_keys = Keys::generate();
@@ -217,9 +217,9 @@ async fn test_crypto_worker_concurrency() {
 
     let mut handles = Vec::new();
     for event in events {
-        let sender = crypto_sender.clone();
+        let sender = crypto_helper.clone();
         let handle = tokio::spawn(async move {
-            sender.verify_event(event).await.unwrap();
+            sender.verify_event(&event).unwrap();
         });
         handles.push(handle);
     }
@@ -236,14 +236,14 @@ async fn test_crypto_worker_concurrency() {
     println!("Concurrent verification rate: {events_per_sec:.0} events/second");
 
     // Cleanup
-    drop(crypto_sender);
+    drop(crypto_helper);
     task_tracker.close();
     task_tracker.wait().await;
 }
 
 #[tokio::test]
-async fn test_crypto_worker_saturation() {
-    // Test to find the saturation point of crypto workers
+async fn test_crypto_helper_saturation() {
+    // Test to find the saturation point of crypto helper
     let task_tracker = TaskTracker::new();
     let keys = Arc::new(Keys::generate());
 
@@ -251,10 +251,10 @@ async fn test_crypto_worker_saturation() {
         .map(|n| (n.get().saturating_sub(1)).max(1))
         .unwrap_or(1);
 
-    println!("\n=== Testing Crypto Worker Saturation ===");
+    println!("\n=== Testing Crypto Helper Saturation ===");
     println!("Worker count: {worker_count}");
 
-    let crypto_sender = CryptoWorker::spawn(Arc::clone(&keys), &task_tracker);
+    let crypto_helper = CryptoHelper::new(Arc::clone(&keys));
 
     // Test with increasing concurrent operations - reduced counts for faster testing
     let test_counts = vec![100, 500, 1000, 2000];
@@ -274,8 +274,8 @@ async fn test_crypto_worker_saturation() {
         let mut futures = Vec::new();
 
         for event in events {
-            let sender = crypto_sender.clone();
-            futures.push(async move { sender.verify_event(event).await });
+            let sender = crypto_helper.clone();
+            futures.push(async move { sender.verify_event(&event) });
         }
 
         let results = futures_util::future::join_all(futures).await;
@@ -293,7 +293,7 @@ async fn test_crypto_worker_saturation() {
     }
 
     // Cleanup
-    drop(crypto_sender);
+    drop(crypto_helper);
     task_tracker.close();
     task_tracker.wait().await;
 }

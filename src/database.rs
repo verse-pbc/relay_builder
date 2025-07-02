@@ -1,23 +1,25 @@
 //! Database abstraction for Nostr relays
 
-use crate::crypto_worker::CryptoSender;
+use crate::crypto_helper::CryptoHelper;
 use crate::error::Error;
-use crate::subscription_service::StoreCommand;
+use crate::subscription_coordinator::StoreCommand;
 use flume;
 use nostr_database::nostr::{Event, Filter};
 use nostr_database::Events;
 use nostr_lmdb::{NostrLMDB, Scope};
 use nostr_sdk::prelude::*;
+use std::iter;
 use std::sync::Arc;
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
-/// Maximum number of events that can be queued for writing.
+/// Default maximum number of events that can be queued for writing.
 /// This provides backpressure to prevent unbounded memory growth.
 /// When the queue is full, writers will wait until space is available.
-const WRITE_QUEUE_CAPACITY: usize = 10_000;
+/// Can be overridden by passing max_connections and max_subscriptions to calculate dynamically.
+const DEFAULT_WRITE_QUEUE_CAPACITY: usize = 100_000;
 
 /// Response handler for database commands - supports both fire-and-forget and synchronous operations
 #[derive(Debug)]
@@ -28,20 +30,16 @@ enum ResponseHandler {
     Oneshot(oneshot::Sender<Result<(), Error>>),
 }
 
-/// Internal command that includes the StoreCommand and optional response handler
-#[derive(Debug)]
-struct CommandWithReply {
-    command: StoreCommand,
-    response_handler: Option<ResponseHandler>,
-}
-
-/// A cloneable sender for database commands following the actor pattern.
+/// A cloneable sender for database commands with direct routing.
 ///
-/// This wrapper provides a clean API for sending commands to the database actor
-/// and includes convenience methods for common operations.
+/// This wrapper provides a clean API for sending commands to the database
+/// and routes commands directly to the appropriate processor.
 #[derive(Clone)]
 pub struct DatabaseSender {
-    inner: flume::Sender<CommandWithReply>,
+    /// Channel for unsigned events that need signing
+    unsigned_sender: flume::Sender<SaveUnsignedItem>,
+    /// Unified channel for signed saves and deletes (both are LMDB write operations)
+    store_sender: flume::Sender<StoreItem>,
 }
 
 impl std::fmt::Debug for DatabaseSender {
@@ -57,9 +55,15 @@ impl Drop for DatabaseSender {
 }
 
 impl DatabaseSender {
-    /// Create a new DatabaseSender wrapping a flume sender
-    fn new(sender: flume::Sender<CommandWithReply>) -> Self {
-        Self { inner: sender }
+    /// Create a new DatabaseSender with the two internal channels
+    fn new(
+        unsigned_sender: flume::Sender<SaveUnsignedItem>,
+        store_sender: flume::Sender<StoreItem>,
+    ) -> Self {
+        Self {
+            unsigned_sender,
+            store_sender,
+        }
     }
 
     /// Send a store command to the database
@@ -73,26 +77,76 @@ impl DatabaseSender {
         command: StoreCommand,
         message_sender: Option<websocket_builder::MessageSender<RelayMessage<'static>>>,
     ) -> Result<(), Error> {
-        self.inner
-            .send_async(CommandWithReply {
-                command,
-                response_handler: message_sender.map(ResponseHandler::MessageSender),
-            })
-            .await
-            .map_err(|_| Error::internal("Database shut down"))
+        let response_handler = message_sender.map(ResponseHandler::MessageSender);
+
+        match command {
+            StoreCommand::SaveUnsignedEvent(event, scope) => self
+                .unsigned_sender
+                .send_async(SaveUnsignedItem {
+                    event: Box::new(event),
+                    scope,
+                    response_handler,
+                })
+                .await
+                .map_err(|_| Error::internal("Unsigned event processor shut down")),
+            StoreCommand::SaveSignedEvent(event, scope) => self
+                .store_sender
+                .send_async(StoreItem::Save(SaveSignedItem {
+                    event,
+                    scope,
+                    response_handler,
+                }))
+                .await
+                .map_err(|_| Error::internal("Store processor shut down")),
+            StoreCommand::DeleteEvents(filter, scope) => self
+                .store_sender
+                .send_async(StoreItem::Delete(DeleteItem {
+                    filter,
+                    scope,
+                    response_handler,
+                }))
+                .await
+                .map_err(|_| Error::internal("Store processor shut down")),
+        }
     }
 
     /// Send a store command synchronously with immediate acknowledgment
     pub async fn send_sync(&self, command: StoreCommand) -> Result<(), Error> {
         let (tx, rx) = oneshot::channel();
+        let response_handler = Some(ResponseHandler::Oneshot(tx));
 
-        self.inner
-            .send_async(CommandWithReply {
-                command,
-                response_handler: Some(ResponseHandler::Oneshot(tx)),
-            })
-            .await
-            .map_err(|_| Error::internal("Database shut down"))?;
+        match command {
+            StoreCommand::SaveUnsignedEvent(event, scope) => {
+                self.unsigned_sender
+                    .send_async(SaveUnsignedItem {
+                        event: Box::new(event),
+                        scope,
+                        response_handler,
+                    })
+                    .await
+                    .map_err(|_| Error::internal("Unsigned event processor shut down"))?;
+            }
+            StoreCommand::SaveSignedEvent(event, scope) => {
+                self.store_sender
+                    .send_async(StoreItem::Save(SaveSignedItem {
+                        event,
+                        scope,
+                        response_handler,
+                    }))
+                    .await
+                    .map_err(|_| Error::internal("Store processor shut down"))?;
+            }
+            StoreCommand::DeleteEvents(filter, scope) => {
+                self.store_sender
+                    .send_async(StoreItem::Delete(DeleteItem {
+                        filter,
+                        scope,
+                        response_handler,
+                    }))
+                    .await
+                    .map_err(|_| Error::internal("Store processor shut down"))?;
+            }
+        }
 
         rx.await
             .map_err(|_| Error::internal("Database response channel closed"))?
@@ -128,10 +182,6 @@ impl DatabaseSender {
 
 // Note: LMDB only allows one write transaction at a time, so we use a single worker
 
-/// Default broadcast channel capacity for event notifications
-/// Can be configured via BROADCAST_CHANNEL_CAPACITY environment variable
-const DEFAULT_BROADCAST_CAPACITY: usize = 10_000;
-
 /// Item for the save signed event queue
 #[derive(Debug)]
 struct SaveSignedItem {
@@ -156,49 +206,70 @@ struct DeleteItem {
     response_handler: Option<ResponseHandler>,
 }
 
-/// A Nostr relay database that wraps NostrLMDB with async operations and event broadcasting
+/// Unified store item that combines saves and deletes
+#[derive(Debug)]
+enum StoreItem {
+    Save(SaveSignedItem),
+    Delete(DeleteItem),
+}
+
+/// A Nostr relay database that wraps NostrLMDB with async operations
 #[derive(Debug)]
 pub struct RelayDatabase {
     lmdb: Arc<NostrLMDB>,
-    broadcast_sender: broadcast::Sender<Box<Event>>,
+    /// Optional event sender for distribution
+    #[allow(dead_code)] // Used in send_success_responses_and_distribute
+    event_sender: Option<flume::Sender<Arc<Event>>>,
 
     /// Queue capacity used for this instance
     queue_capacity: usize,
 }
 
 impl RelayDatabase {
-    /// Process a batch of signed save items
-    fn process_signed_batch(
+    /// Process a unified batch of store items (saves and deletes) in a single transaction
+    fn process_store_batch(
         env: &Arc<NostrLMDB>,
-        items: Vec<SaveSignedItem>,
-        broadcast_sender: &broadcast::Sender<Box<Event>>,
+        items: impl Iterator<Item = StoreItem>,
+        event_sender: Option<&flume::Sender<Arc<Event>>>,
     ) {
-        debug!("Processing batch of {} events", items.len());
+        // Separate saves and deletes
+        let mut save_items = Vec::new();
+        let mut delete_items = Vec::new();
 
-        // Pre-collect events to broadcast for all items
-        let events_to_broadcast: Vec<Box<Event>> =
-            items.iter().map(|item| item.event.clone()).collect();
+        for item in items {
+            match item {
+                StoreItem::Save(save_item) => save_items.push(save_item),
+                StoreItem::Delete(delete_item) => delete_items.push(delete_item),
+            }
+        }
 
-        // Minimize transaction scope
+        // Pre-collect events to broadcast for save items
+        let events_to_broadcast: Vec<Event> = save_items
+            .iter()
+            .map(|item| (*item.event).clone())
+            .collect();
+
+        // Process everything in a single transaction
         let commit_result = {
             let mut txn = match env.write_transaction() {
                 Ok(txn) => txn,
                 Err(e) => {
                     error!("Failed to create write transaction: {:?}", e);
-                    Self::send_error_responses(items, format!("error: {e}"));
+                    Self::send_error_responses(save_items, format!("error: {e}"));
+                    Self::send_delete_error_responses(delete_items, format!("error: {e}"));
                     return;
                 }
             };
 
             let mut all_succeeded = true;
 
-            // Save all events in the same transaction
-            for item in items.iter() {
+            // Process saves first
+            for item in save_items.iter() {
                 match env.save_event_with_txn(&mut txn, &item.scope, &item.event) {
                     Ok(status) => {
                         if !status.is_success() {
                             // Rejected is not an error, we just log it
-                            error!("Failed to save event: status={:?}", status);
+                            warn!("Failed to save event: status={:?}", status);
                         }
                     }
                     Err(e) => {
@@ -209,9 +280,28 @@ impl RelayDatabase {
                 }
             }
 
+            // Process deletes if saves succeeded
+            if all_succeeded {
+                for item in delete_items.iter() {
+                    match env.delete_with_txn(&mut txn, &item.scope, item.filter.clone()) {
+                        Ok(_) => {
+                            debug!(
+                                "Successfully deleted events matching filter for scope {:?}",
+                                item.scope
+                            );
+                        }
+                        Err(e) => {
+                            all_succeeded = false;
+                            error!("Failed to delete events: {:?}", e);
+                            break;
+                        }
+                    }
+                }
+            }
+
             if !all_succeeded {
                 drop(txn); // Abort transaction
-                Err("batch save failed")
+                Err("batch operation failed")
             } else {
                 txn.commit().map_err(|e| {
                     error!("Failed to commit transaction: {:?}", e);
@@ -220,27 +310,29 @@ impl RelayDatabase {
             }
         }; // Transaction dropped here, lock released
 
-        // Handle responses and broadcasting outside transaction
+        // Handle responses outside transaction
         match commit_result {
             Ok(()) => {
                 debug!(
-                    "Transaction committed successfully for {} events",
-                    items.len()
+                    "Transaction committed successfully for {} saves and {} deletes",
+                    save_items.len(),
+                    delete_items.len()
                 );
 
-                // All succeeded - offload response sending and broadcasting to async runtime
-                let broadcast_sender = broadcast_sender.clone();
-                tokio::spawn(async move {
-                    Self::send_success_responses_and_broadcast(
-                        items,
-                        events_to_broadcast,
-                        &broadcast_sender,
-                    );
-                });
+                // Send success responses for saves and distribute events
+                Self::send_success_responses_and_distribute_sync(
+                    save_items,
+                    events_to_broadcast,
+                    event_sender,
+                );
+
+                // Send success responses for deletes
+                Self::send_delete_success_responses(delete_items);
             }
             Err(error_msg) => {
                 // All failed - send error responses
-                Self::send_error_responses(items, format!("error: {error_msg}"));
+                Self::send_error_responses(save_items, format!("error: {error_msg}"));
+                Self::send_delete_error_responses(delete_items, format!("error: {error_msg}"));
             }
         }
     }
@@ -252,7 +344,7 @@ impl RelayDatabase {
                 match response_handler {
                     ResponseHandler::MessageSender(mut sender) => {
                         let msg = RelayMessage::ok(item.event.id, false, error_msg.clone());
-                        let _ = sender.send_bypass(msg);
+                        sender.send_bypass(msg);
                     }
                     ResponseHandler::Oneshot(oneshot_sender) => {
                         let _ = oneshot_sender.send(Err(Error::internal(error_msg.clone())));
@@ -262,12 +354,11 @@ impl RelayDatabase {
         }
     }
 
-    /// Send success responses and broadcast events
-    #[allow(clippy::vec_box)] // broadcast channel requires Box<Event>
-    fn send_success_responses_and_broadcast(
+    /// Send success responses and distribute events synchronously
+    fn send_success_responses_and_distribute_sync(
         items: Vec<SaveSignedItem>,
-        events_to_broadcast: Vec<Box<Event>>,
-        broadcast_sender: &broadcast::Sender<Box<Event>>,
+        events_to_distribute: Vec<Event>,
+        event_sender: Option<&flume::Sender<Arc<Event>>>,
     ) {
         // Send OK responses
         for item in items.into_iter() {
@@ -275,7 +366,7 @@ impl RelayDatabase {
                 match response_handler {
                     ResponseHandler::MessageSender(mut sender) => {
                         let msg = RelayMessage::ok(item.event.id, true, "");
-                        let _ = sender.send_bypass(msg);
+                        sender.send_bypass(msg);
                     }
                     ResponseHandler::Oneshot(oneshot_sender) => {
                         let _ = oneshot_sender.send(Ok(()));
@@ -284,85 +375,22 @@ impl RelayDatabase {
             }
         }
 
-        // Broadcast successful events
-        for event in events_to_broadcast {
-            let _ = broadcast_sender.send(event);
-        }
-    }
-
-    /// Process a batch of delete items
-    fn process_delete_batch(env: &NostrLMDB, items: Vec<DeleteItem>) {
-        let mut total_deleted = 0;
-
-        // Minimize transaction scope
-        let commit_result = {
-            let mut txn = match env.write_transaction() {
-                Ok(txn) => txn,
-                Err(e) => {
-                    error!("Failed to create write transaction: {:?}", e);
-                    Self::send_delete_error_responses(
-                        items,
-                        format!("Failed to create transaction: {e}"),
-                    );
-                    return;
-                }
-            };
-
-            let mut all_succeeded = true;
-
-            // Process all deletes in the same transaction
-            for item in &items {
-                match env.delete_with_txn(&mut txn, &item.scope, item.filter.clone()) {
-                    Ok(count) => {
-                        total_deleted += count;
-                    }
-                    Err(e) => {
-                        all_succeeded = false;
-                        error!("Failed to delete events: {:?}", e);
-                    }
-                }
-            }
-
-            if !all_succeeded {
-                drop(txn); // Abort transaction
-                Err("Delete operation failed")
-            } else {
-                txn.commit().map_err(|e| {
-                    error!("Failed to commit delete transaction: {:?}", e);
-                    "Failed to commit delete transaction"
-                })
-            }
-        }; // Transaction dropped here, lock released
-
-        // Handle responses outside transaction
-        match commit_result {
-            Ok(()) => {
-                debug!(
-                    "Delete transaction committed: {} events deleted",
-                    total_deleted
-                );
-                // Offload response sending to async runtime
-                tokio::spawn(async move {
-                    Self::send_delete_success_responses(items);
-                });
-            }
-            Err(error_msg) => {
-                Self::send_delete_error_responses(items, error_msg.to_string());
-            }
-        }
-    }
-
-    /// Send error responses for delete items
-    fn send_delete_error_responses(items: Vec<DeleteItem>, error_msg: String) {
-        for item in items {
-            if let Some(response_handler) = item.response_handler {
-                match response_handler {
-                    ResponseHandler::MessageSender(mut sender) => {
-                        let msg = RelayMessage::notice(error_msg.clone());
-                        let _ = sender.send_bypass(msg);
-                    }
-                    ResponseHandler::Oneshot(oneshot_sender) => {
-                        let _ = oneshot_sender.send(Err(Error::internal(error_msg.clone())));
+        // Distribute successful events
+        if let Some(event_sender) = event_sender {
+            for event in events_to_distribute {
+                // Convert Event to Arc<Event>
+                let arc_event = Arc::new(event);
+                // Use try_send for non-blocking send
+                if let Err(e) = event_sender.try_send(arc_event) {
+                    match e {
+                        flume::TrySendError::Full(_) => {
+                            error!("Event distribution channel is full - applying backpressure");
+                            // Could implement blocking here if needed
+                        }
+                        flume::TrySendError::Disconnected(_) => {
+                            error!("Event distribution channel closed");
+                            break;
+                        }
                     }
                 }
             }
@@ -375,8 +403,8 @@ impl RelayDatabase {
             if let Some(response_handler) = item.response_handler {
                 match response_handler {
                     ResponseHandler::MessageSender(mut sender) => {
-                        let msg = RelayMessage::notice("Events deleted");
-                        let _ = sender.send_bypass(msg);
+                        let msg = RelayMessage::notice("delete: success");
+                        sender.send_bypass(msg);
                     }
                     ResponseHandler::Oneshot(oneshot_sender) => {
                         let _ = oneshot_sender.send(Ok(()));
@@ -385,35 +413,56 @@ impl RelayDatabase {
             }
         }
     }
+
+    /// Send error responses for delete items
+    fn send_delete_error_responses(items: Vec<DeleteItem>, error_msg: String) {
+        for item in items {
+            if let Some(response_handler) = item.response_handler {
+                match response_handler {
+                    ResponseHandler::MessageSender(mut sender) => {
+                        let msg = RelayMessage::notice(error_msg.clone());
+                        sender.send_bypass(msg);
+                    }
+                    ResponseHandler::Oneshot(oneshot_sender) => {
+                        let _ = oneshot_sender.send(Err(Error::internal(error_msg.clone())));
+                    }
+                }
+            }
+        }
+    }
+
     /// Create a new relay database
     ///
     /// # Arguments
     /// * `db_path_param` - Path where the database should be stored
-    /// * `crypto_sender` - Crypto sender for signing unsigned events
+    /// * `keys` - Keys for signing unsigned events
     pub fn new(
         db_path_param: impl AsRef<std::path::Path>,
-        crypto_sender: CryptoSender,
+        keys: Arc<Keys>,
     ) -> Result<(Self, DatabaseSender), Error> {
-        Self::with_config_and_tracker(db_path_param, crypto_sender, None, None, None, None)
+        let crypto_helper = CryptoHelper::new(keys);
+        Self::with_config_and_tracker(db_path_param, crypto_helper, None, None, None, None, None)
     }
 
     /// Create a new relay database with a provided TaskTracker
     ///
     /// # Arguments
     /// * `db_path_param` - Path where the database should be stored
-    /// * `crypto_sender` - Crypto sender for signing unsigned events
+    /// * `keys` - Keys for signing unsigned events
     /// * `task_tracker` - TaskTracker for managing background tasks
     pub fn with_task_tracker(
         db_path_param: impl AsRef<std::path::Path>,
-        crypto_sender: CryptoSender,
+        keys: Arc<Keys>,
         task_tracker: TaskTracker,
     ) -> Result<(Self, DatabaseSender), Error> {
+        let crypto_helper = CryptoHelper::new(keys);
         Self::with_config_and_tracker(
             db_path_param,
-            crypto_sender,
+            crypto_helper,
             None,
             None,
             Some(task_tracker),
+            None,
             None,
         )
     }
@@ -422,22 +471,24 @@ impl RelayDatabase {
     ///
     /// # Arguments
     /// * `db_path_param` - Path where the database should be stored
-    /// * `crypto_sender` - Crypto sender for signing unsigned events
+    /// * `keys` - Keys for signing unsigned events
     /// * `task_tracker` - TaskTracker for managing background tasks
     /// * `cancellation_token` - CancellationToken for graceful shutdown
     pub fn with_task_tracker_and_token(
         db_path_param: impl AsRef<std::path::Path>,
-        crypto_sender: CryptoSender,
+        keys: Arc<Keys>,
         task_tracker: TaskTracker,
         cancellation_token: CancellationToken,
     ) -> Result<(Self, DatabaseSender), Error> {
+        let crypto_helper = CryptoHelper::new(keys);
         Self::with_config_and_tracker(
             db_path_param,
-            crypto_sender,
+            crypto_helper,
             None,
             None,
             Some(task_tracker),
             Some(cancellation_token),
+            None,
         )
     }
 
@@ -445,33 +496,56 @@ impl RelayDatabase {
     ///
     /// # Arguments
     /// * `db_path_param` - Path where the database should be stored
-    /// * `crypto_sender` - Crypto sender for signing unsigned events
+    /// * `keys` - Keys for signing unsigned events
     /// * `max_connections` - Maximum number of concurrent connections (for broadcast sizing)
     /// * `max_subscriptions` - Maximum subscriptions per connection (for broadcast sizing)
     pub fn with_config(
         db_path_param: impl AsRef<std::path::Path>,
-        crypto_sender: CryptoSender,
+        keys: Arc<Keys>,
         max_connections: Option<usize>,
         max_subscriptions: Option<usize>,
     ) -> Result<(Self, DatabaseSender), Error> {
+        let crypto_helper = CryptoHelper::new(keys);
         Self::with_config_and_tracker(
             db_path_param,
-            crypto_sender,
+            crypto_helper,
             max_connections,
             max_subscriptions,
             None,
             None,
+            None,
+        )
+    }
+
+    /// Create a new relay database with event sender
+    pub fn with_event_sender(
+        db_path_param: impl AsRef<std::path::Path>,
+        keys: Arc<Keys>,
+        event_sender: flume::Sender<Arc<Event>>,
+        task_tracker: Option<TaskTracker>,
+        cancellation_token: Option<CancellationToken>,
+    ) -> Result<(Self, DatabaseSender), Error> {
+        let crypto_helper = CryptoHelper::new(keys);
+        Self::with_config_and_tracker(
+            db_path_param,
+            crypto_helper,
+            None,
+            None,
+            task_tracker,
+            cancellation_token,
+            Some(event_sender),
         )
     }
 
     /// Internal constructor that supports all options
     fn with_config_and_tracker(
         db_path_param: impl AsRef<std::path::Path>,
-        crypto_sender: CryptoSender,
+        crypto_helper: CryptoHelper,
         max_connections: Option<usize>,
         max_subscriptions: Option<usize>,
         task_tracker: Option<TaskTracker>,
         cancellation_token: Option<CancellationToken>,
+        event_sender: Option<flume::Sender<Arc<Event>>>,
     ) -> Result<(Self, DatabaseSender), Error> {
         let db_path = db_path_param.as_ref().to_path_buf();
 
@@ -506,203 +580,110 @@ impl RelayDatabase {
         let lmdb = Arc::new(lmdb_instance);
 
         // Create channels for async operations
-        // Use same queue capacity for both modes to enable batching
-        let queue_capacity = WRITE_QUEUE_CAPACITY;
-        info!("Creating database - queue capacity: {}", queue_capacity);
-
-        // Create main command channel for actor pattern
-        let (command_sender, command_receiver) = flume::bounded::<CommandWithReply>(queue_capacity);
-
-        // Create three specialized queues
-        let (save_signed_sender, save_signed_receiver) =
-            flume::bounded::<SaveSignedItem>(queue_capacity);
-        let (save_unsigned_sender, save_unsigned_receiver) =
-            flume::bounded::<SaveUnsignedItem>(queue_capacity);
-        let (delete_sender, delete_receiver) = flume::bounded::<DeleteItem>(queue_capacity);
-
-        // Create broadcast channel with appropriate capacity
-        let broadcast_capacity =
-            if let (Some(max_conn), Some(max_subs)) = (max_connections, max_subscriptions) {
-                // Size for max_connections * max_subscriptions to ensure no drops
-                let calculated = max_conn * max_subs;
+        // Calculate queue capacity based on configuration or use default
+        let queue_capacity = match (max_connections, max_subscriptions) {
+            (Some(connections), Some(subscriptions)) => {
+                // Formula: max_connections * max_subscriptions * 10
+                // This allows each subscription to send 10 events without backpressure
+                let calculated = connections * subscriptions * 10;
                 info!(
-                    "Calculated broadcast capacity: {} ({}x{})",
-                    calculated, max_conn, max_subs
+                    "Calculated queue capacity: {} ({}x{}x10)",
+                    calculated, connections, subscriptions
                 );
                 calculated
-            } else {
-                // Fall back to environment variable or default
-                std::env::var("BROADCAST_CHANNEL_CAPACITY")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(DEFAULT_BROADCAST_CAPACITY)
-            };
-        info!(
-            "Creating broadcast channel with capacity: {}",
-            broadcast_capacity
-        );
-        let (broadcast_sender, _) = broadcast::channel(broadcast_capacity);
+            }
+            _ => {
+                info!(
+                    "Using default queue capacity: {}",
+                    DEFAULT_WRITE_QUEUE_CAPACITY
+                );
+                DEFAULT_WRITE_QUEUE_CAPACITY
+            }
+        };
+
+        // Create two specialized queues: one for unsigned events, one for store operations
+        let (save_unsigned_sender, save_unsigned_receiver) =
+            flume::bounded::<SaveUnsignedItem>(queue_capacity);
+        let (store_sender, store_receiver) = flume::bounded::<StoreItem>(queue_capacity);
 
         // Create task tracker for worker lifecycle management
         let task_tracker = task_tracker.unwrap_or_default();
 
-        info!("Starting single database worker per queue (LMDB limitation)");
-
-        // Spawn the command dispatcher task
-        Self::spawn_command_dispatcher(
-            command_receiver,
-            save_signed_sender.clone(),
-            save_unsigned_sender.clone(),
-            delete_sender.clone(),
-            cancellation_token,
-            &task_tracker,
-        );
+        info!("Starting database workers (2 total: unsigned processor + unified store processor)");
 
         // Spawn processor tasks
-        Self::spawn_save_signed_processor(
-            save_signed_receiver,
-            Arc::clone(&lmdb),
-            broadcast_sender.clone(),
-            &task_tracker,
-        );
-
         Self::spawn_save_unsigned_processor(
             save_unsigned_receiver,
-            save_signed_sender.clone(),
-            crypto_sender,
+            store_sender.clone(),
+            crypto_helper,
             &task_tracker,
         );
 
-        Self::spawn_delete_processor(delete_receiver, Arc::clone(&lmdb), &task_tracker);
+        Self::spawn_store_processor(
+            store_receiver,
+            Arc::clone(&lmdb),
+            event_sender.clone(),
+            &task_tracker,
+            cancellation_token,
+        );
 
         let relay_db = Self {
             lmdb,
-            broadcast_sender,
+            event_sender,
             queue_capacity,
         };
 
         // Create the DatabaseSender for external use
-        let db_sender = DatabaseSender::new(command_sender);
+        let db_sender = DatabaseSender::new(save_unsigned_sender, store_sender);
 
         Ok((relay_db, db_sender))
     }
 
-    /// Spawn the command dispatcher task that routes StoreCommand to specialized queues
-    fn spawn_command_dispatcher(
-        command_receiver: flume::Receiver<CommandWithReply>,
-        save_signed_sender: flume::Sender<SaveSignedItem>,
-        save_unsigned_sender: flume::Sender<SaveUnsignedItem>,
-        delete_sender: flume::Sender<DeleteItem>,
-        cancellation_token: Option<CancellationToken>,
+    /// Spawn unified store processor that handles both saves and deletes
+    fn spawn_store_processor(
+        receiver: flume::Receiver<StoreItem>,
+        env: Arc<NostrLMDB>,
+        event_sender: Option<flume::Sender<Arc<Event>>>,
         task_tracker: &TaskTracker,
+        cancellation_token: Option<CancellationToken>,
     ) {
-        task_tracker.spawn(async move {
-            info!("Command dispatcher started");
+        // Use a simple tokio::spawn loop instead of batching runtime
+        task_tracker.spawn_blocking(move || {
+            info!("Store processor started on tokio runtime");
 
             let cancellation_token = cancellation_token.unwrap_or_default();
 
             loop {
-                tokio::select! {
-                    _ = cancellation_token.cancelled() => {
-                        info!("Command dispatcher shutting down due to cancellation");
-                        break;
-                    }
+                // // Check for cancellation
+                // if cancellation_token.is_cancelled() {
+                //     info!("Store processor shutting down due to cancellation");
+                //     break;
+                // }
 
-                    result = command_receiver.recv_async() => {
-                        match result {
-                            Ok(CommandWithReply { command, response_handler }) => {
-                                debug!("Dispatching command: {:?}", command);
-
-                                let dispatch_result: Result<(), anyhow::Error> = match command {
-                                    StoreCommand::SaveSignedEvent(event, scope) => {
-                                        save_signed_sender.send_async(SaveSignedItem {
-                                            event,
-                                            scope,
-                                            response_handler,
-                                        }).await
-                                        .map_err(|e| anyhow::anyhow!("Failed to send SaveSignedItem: {:?}", e))
-                                    }
-                                    StoreCommand::SaveUnsignedEvent(event, scope) => {
-                                        save_unsigned_sender.send_async(SaveUnsignedItem {
-                                            event: Box::new(event),
-                                            scope,
-                                            response_handler,
-                                        }).await
-                                        .map_err(|e| anyhow::anyhow!("Failed to send SaveUnsignedItem: {:?}", e))
-                                    }
-                                    StoreCommand::DeleteEvents(filter, scope) => {
-                                        delete_sender.send_async(DeleteItem {
-                                            filter,
-                                            scope,
-                                            response_handler,
-                                        }).await
-                                        .map_err(|e| anyhow::anyhow!("Failed to send DeleteItem: {:?}", e))
-                                    }
-                                };
-
-                                if let Err(e) = dispatch_result {
-                                    error!("Failed to dispatch command: {:?}", e);
-                                    // Channel closed, exit
-                                    break;
-                                }
-                            }
-                            Err(_) => {
-                                info!("Command dispatcher channel closed");
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            info!("Command dispatcher completed");
-
-            // Close all internal channels to trigger shutdown of processor tasks
-            drop(save_signed_sender);
-            drop(save_unsigned_sender);
-            drop(delete_sender);
-
-            cancellation_token.cancel();
-        });
-    }
-
-    /// Spawn processor for signed events
-    fn spawn_save_signed_processor(
-        receiver: flume::Receiver<SaveSignedItem>,
-        env: Arc<NostrLMDB>,
-        broadcast_sender: broadcast::Sender<Box<Event>>,
-        task_tracker: &TaskTracker,
-    ) {
-        task_tracker.spawn_blocking(move || {
-            info!("Save signed processor started");
-
-            loop {
+                // Wait for at least one item asynchronously
                 let first_item = match receiver.recv() {
                     Ok(item) => item,
                     Err(_) => {
-                        info!("Save signed processor channel closed - all senders dropped");
+                        info!("Store processor channel closed - all senders dropped");
                         break;
                     }
                 };
 
-                let mut batch = vec![first_item];
-                batch.extend(receiver.drain());
+                let batch = iter::once(first_item).chain(receiver.drain());
 
-                debug!("Processing batch of {} save items", batch.len());
-
-                // Process the entire batch in one transaction
-                Self::process_signed_batch(&env, batch, &broadcast_sender);
+                Self::process_store_batch(&env, batch, event_sender.as_ref());
             }
 
-            info!("Save signed processor completed");
+            info!("Store processor completed");
+            cancellation_token.cancel();
         });
     }
 
     /// Spawn the processor for unsigned events
     fn spawn_save_unsigned_processor(
         receiver: flume::Receiver<SaveUnsignedItem>,
-        save_signed_sender: flume::Sender<SaveSignedItem>,
-        crypto_sender: CryptoSender,
+        store_sender: flume::Sender<StoreItem>,
+        crypto_helper: CryptoHelper,
         task_tracker: &TaskTracker,
     ) {
         task_tracker.spawn(async move {
@@ -712,7 +693,7 @@ impl RelayDatabase {
                 debug!("Processing unsigned event");
 
                 let response_handler = item.response_handler;
-                match crypto_sender.sign_event(*item.event).await {
+                match crypto_helper.sign_event(*item.event) {
                     Ok(signed_event) => {
                         let _event_id = signed_event.id;
                         let signed_item = SaveSignedItem {
@@ -721,12 +702,13 @@ impl RelayDatabase {
                             response_handler,
                         };
 
-                        if let Err(e) = save_signed_sender.send_async(signed_item).await {
-                            error!("Failed to forward signed event: {:?}", e);
+                        if let Err(e) = store_sender.send_async(StoreItem::Save(signed_item)).await
+                        {
+                            error!("Failed to forward signed event to store: {:?}", e);
                             // The response_handler was already moved into signed_item
                             // So we can't send an error response here - the channel is closed anyway
                         }
-                        // If successful, the signed processor will handle the response
+                        // If successful, the store processor will handle the response
                     }
                     Err(e) => {
                         error!("Failed to sign event: {:?}", e);
@@ -738,7 +720,7 @@ impl RelayDatabase {
                                 ResponseHandler::MessageSender(mut sender) => {
                                     let msg =
                                         RelayMessage::notice(format!("Failed to sign event: {e}"));
-                                    let _ = sender.send_bypass(msg);
+                                    sender.send_bypass(msg);
                                 }
                                 ResponseHandler::Oneshot(oneshot_sender) => {
                                     let _ = oneshot_sender.send(Err(Error::internal(format!(
@@ -755,48 +737,13 @@ impl RelayDatabase {
         });
     }
 
-    /// Spawn processor for deletions
-    fn spawn_delete_processor(
-        receiver: flume::Receiver<DeleteItem>,
-        env: Arc<NostrLMDB>,
-        task_tracker: &TaskTracker,
-    ) {
-        task_tracker.spawn_blocking(move || {
-            info!("Delete processor started");
-
-            loop {
-                let first_item = match receiver.recv() {
-                    Ok(item) => item,
-                    Err(_) => {
-                        info!("Delete processor channel closed - all senders dropped");
-                        break;
-                    }
-                };
-
-                let mut batch = vec![first_item];
-                batch.extend(receiver.drain());
-
-                debug!("Processing batch of {} delete operations", batch.len());
-
-                // Process the entire batch in one transaction
-                Self::process_delete_batch(&env, batch);
-            }
-
-            info!("Delete processor completed");
-        });
-    }
     /// Subscribe to receive all saved events
     ///
     /// Note: This uses a broadcast channel with bounded capacity. If subscribers
     /// cannot keep up with the rate of events being saved, older events may be
     /// dropped. The channel capacity is automatically sized based on:
     /// - max_connections * max_subscriptions (if provided during creation)
-    /// - BROADCAST_CHANNEL_CAPACITY environment variable
-    /// - Default: 10,000 events
-    pub fn subscribe(&self) -> broadcast::Receiver<Box<Event>> {
-        self.broadcast_sender.subscribe()
-    }
-
+    ///
     /// Save an event directly (synchronous)
     pub async fn save_event(&self, event: &Event, scope: &Scope) -> Result<()> {
         let env = self.get_env(scope).await?;
@@ -909,7 +856,7 @@ pub type NostrDatabase = Arc<RelayDatabase>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto_worker::CryptoWorker;
+
     use tempfile::TempDir;
     use tokio_util::task::TaskTracker;
 
@@ -931,9 +878,9 @@ mod tests {
         {
             let keys = Keys::generate();
             let task_tracker = TaskTracker::new();
-            let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
+            let keys_arc = Arc::new(keys);
             let (_database, db_sender) =
-                RelayDatabase::with_task_tracker(&db_path, crypto_sender, task_tracker.clone())
+                RelayDatabase::with_task_tracker(&db_path, keys_arc.clone(), task_tracker.clone())
                     .expect("Failed to create database");
 
             // Send events rapidly
@@ -959,10 +906,9 @@ mod tests {
         // Re-open database and verify all events were saved
         {
             let keys = Keys::generate();
-            let task_tracker = TaskTracker::new();
-            let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
+            let keys_arc = Arc::new(keys);
             let (database, _db_sender) =
-                RelayDatabase::new(&db_path, crypto_sender).expect("Failed to create database");
+                RelayDatabase::new(&db_path, keys_arc.clone()).expect("Failed to create database");
             let database = Arc::new(database);
 
             let count = database
@@ -993,9 +939,9 @@ mod tests {
         // Create and populate database
         {
             let keys = Keys::generate();
-            let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
+            let keys_arc = Arc::new(keys);
             let (database, db_sender) =
-                RelayDatabase::with_task_tracker(&db_path, crypto_sender, task_tracker.clone())
+                RelayDatabase::with_task_tracker(&db_path, keys_arc.clone(), task_tracker.clone())
                     .expect("Failed to create database");
             let database = Arc::new(database);
 
@@ -1023,10 +969,9 @@ mod tests {
         // Re-open and verify events were saved
         {
             let keys = Keys::generate();
-            let task_tracker = TaskTracker::new();
-            let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
+            let keys_arc = Arc::new(keys);
             let (database, _db_sender) =
-                RelayDatabase::new(&db_path, crypto_sender).expect("Failed to create database");
+                RelayDatabase::new(&db_path, keys_arc.clone()).expect("Failed to create database");
             let database = Arc::new(database);
 
             let count = database
@@ -1057,9 +1002,9 @@ mod tests {
         {
             let keys = Keys::generate();
             let task_tracker = TaskTracker::new();
-            let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
+            let keys_arc = Arc::new(keys);
             let (_database, db_sender) =
-                RelayDatabase::with_task_tracker(&db_path, crypto_sender, task_tracker.clone())
+                RelayDatabase::with_task_tracker(&db_path, keys_arc.clone(), task_tracker.clone())
                     .expect("Failed to create database");
 
             // Send many events to ensure some are queued
@@ -1085,10 +1030,9 @@ mod tests {
         // Verify all events were saved
         {
             let keys = Keys::generate();
-            let task_tracker = TaskTracker::new();
-            let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
+            let keys_arc = Arc::new(keys);
             let (database, _db_sender) =
-                RelayDatabase::new(&db_path, crypto_sender).expect("Failed to create database");
+                RelayDatabase::new(&db_path, keys_arc.clone()).expect("Failed to create database");
             let database = Arc::new(database);
 
             let count = database
@@ -1115,9 +1059,9 @@ mod tests {
         // Create database
         let keys = Keys::generate();
         let task_tracker = TaskTracker::new();
-        let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
+        let keys_arc = Arc::new(keys);
         let (database, db_sender) =
-            RelayDatabase::with_task_tracker(&db_path, crypto_sender, task_tracker.clone())
+            RelayDatabase::with_task_tracker(&db_path, keys_arc.clone(), task_tracker.clone())
                 .expect("Failed to create database");
         let database = Arc::new(database);
 
@@ -1200,10 +1144,10 @@ mod tests {
         let db_path = tmp_dir.path().join("test.db");
         let keys = Keys::generate();
         let task_tracker = TaskTracker::new();
-        let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
+        let keys_arc = Arc::new(keys);
         // Create in optimistic mode (default)
         let (database, db_sender) =
-            RelayDatabase::new(&db_path, crypto_sender).expect("Failed to create database");
+            RelayDatabase::new(&db_path, keys_arc.clone()).expect("Failed to create database");
         let database = Arc::new(database);
 
         let event = generate_test_event(0).await;

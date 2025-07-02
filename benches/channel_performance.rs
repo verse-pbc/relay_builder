@@ -1,10 +1,9 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use nostr_relay_builder::{CryptoWorker, RelayDatabase};
+use nostr_relay_builder::RelayDatabase;
 use nostr_sdk::prelude::*;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
-use tokio_util::task::TaskTracker;
 
 /// Generate a test event
 async fn generate_event(index: usize) -> Event {
@@ -36,10 +35,8 @@ fn bench_write_throughput(c: &mut Criterion) {
                     let tmp_dir = TempDir::new().unwrap();
                     let db_path = tmp_dir.path().join("bench.db");
                     let keys = Arc::new(Keys::generate());
-                    let task_tracker = TaskTracker::new();
-                    let crypto_sender = CryptoWorker::spawn(keys.clone(), &task_tracker);
-                    let (database, db_sender) = RelayDatabase::new(&db_path, crypto_sender)
-                        .expect("Failed to create database");
+                    let (database, db_sender) =
+                        RelayDatabase::new(&db_path, keys).expect("Failed to create database");
                     let _database = Arc::new(database);
 
                     // Send events
@@ -81,10 +78,8 @@ fn bench_backpressure(c: &mut Criterion) {
             let tmp_dir = TempDir::new().unwrap();
             let db_path = tmp_dir.path().join("bench.db");
             let keys = Arc::new(Keys::generate());
-            let task_tracker = TaskTracker::new();
-            let crypto_sender = CryptoWorker::spawn(keys.clone(), &task_tracker);
             let (database, db_sender) =
-                RelayDatabase::new(&db_path, crypto_sender).expect("Failed to create database");
+                RelayDatabase::new(&db_path, keys).expect("Failed to create database");
             let _database = Arc::new(database);
 
             // Send many events rapidly to trigger backpressure
