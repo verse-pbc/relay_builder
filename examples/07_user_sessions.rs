@@ -71,10 +71,7 @@ impl EventProcessor<UserSession> for SessionTrackingProcessor {
         }
 
         // Accept the event
-        Ok(vec![StoreCommand::SaveSignedEvent(
-            Box::new(event),
-            context.subdomain.clone(),
-        )])
+        Ok(vec![(event, context.subdomain.clone()).into()])
     }
 }
 

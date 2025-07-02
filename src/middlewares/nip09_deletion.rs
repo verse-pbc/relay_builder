@@ -105,7 +105,7 @@ impl Nip09Middleware {
                         );
 
                         let delete_command =
-                            StoreCommand::DeleteEvents(filter, state.subdomain().clone());
+                            StoreCommand::DeleteEvents(filter, state.subdomain().clone(), None);
 
                         // Use DatabaseSender directly for deletion
                         let db_sender = state
@@ -156,7 +156,7 @@ impl Nip09Middleware {
                             .custom_tag(SingleLetterTag::lowercase(Alphabet::D), d_tag);
 
                         let delete_command =
-                            StoreCommand::DeleteEvents(filter, state.subdomain().clone());
+                            StoreCommand::DeleteEvents(filter, state.subdomain().clone(), None);
 
                         // Use DatabaseSender directly for deletion
                         let db_sender = state

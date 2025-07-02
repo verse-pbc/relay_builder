@@ -61,10 +61,7 @@ impl EventProcessor for SpamFilterProcessor {
         // Event passed all checks - accept it
         tracing::debug!("Accepted event from {}", event.pubkey);
 
-        Ok(vec![StoreCommand::SaveSignedEvent(
-            Box::new(event),
-            context.subdomain.clone(),
-        )])
+        Ok(vec![(event, context.subdomain.clone()).into()])
     }
 }
 

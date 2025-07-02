@@ -20,10 +20,7 @@ impl EventProcessor for PublicEventProcessor {
         context: EventContext<'_>,
     ) -> Result<Vec<StoreCommand>, Error> {
         // Public relay accepts all events
-        Ok(vec![StoreCommand::SaveSignedEvent(
-            Box::new(event),
-            context.subdomain.clone(),
-        )])
+        Ok(vec![(event, context.subdomain.clone()).into()])
     }
 }
 
@@ -41,10 +38,7 @@ impl EventProcessor for AuthRequiredEventProcessor {
     ) -> Result<Vec<StoreCommand>, Error> {
         // Only accept events from authenticated users
         if context.authed_pubkey.is_some() {
-            Ok(vec![StoreCommand::SaveSignedEvent(
-                Box::new(event),
-                context.subdomain.clone(),
-            )])
+            Ok(vec![(event, context.subdomain.clone()).into()])
         } else {
             Err(Error::auth_required(
                 "Authentication required to publish events",
@@ -104,7 +98,7 @@ async fn test_public_event_processor() {
     let commands = result.unwrap();
     assert_eq!(commands.len(), 1);
     match &commands[0] {
-        StoreCommand::SaveSignedEvent(e, _) => assert_eq!(e.id, event.id),
+        StoreCommand::SaveSignedEvent(e, _, _) => assert_eq!(e.id, event.id),
         _ => panic!("Expected SaveSignedEvent command"),
     }
 
@@ -214,10 +208,7 @@ impl EventProcessor for FilteringProcessor {
             }
         }
 
-        Ok(vec![StoreCommand::SaveSignedEvent(
-            Box::new(event),
-            context.subdomain.clone(),
-        )])
+        Ok(vec![(event, context.subdomain.clone()).into()])
     }
 
     fn can_see_event(

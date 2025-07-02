@@ -2,7 +2,7 @@
 
 use crate::crypto_helper::CryptoHelper;
 use crate::error::Error;
-use crate::subscription_coordinator::StoreCommand;
+use crate::subscription_coordinator::{ResponseHandler, StoreCommand};
 use flume;
 use nostr_database::nostr::{Event, Filter};
 use nostr_database::Events;
@@ -21,15 +21,6 @@ use tracing::{debug, error, info, warn};
 /// Can be overridden by passing max_connections and max_subscriptions to calculate dynamically.
 const DEFAULT_WRITE_QUEUE_CAPACITY: usize = 100_000;
 
-/// Response handler for database commands - supports both fire-and-forget and synchronous operations
-#[derive(Debug)]
-enum ResponseHandler {
-    /// WebSocket message sender for fire-and-forget client responses (high performance)
-    MessageSender(websocket_builder::MessageSender<RelayMessage<'static>>),
-    /// Oneshot channel for immediate synchronous acknowledgment (tests and critical operations)
-    Oneshot(oneshot::Sender<Result<(), Error>>),
-}
-
 /// A cloneable sender for database commands with direct routing.
 ///
 /// This wrapper provides a clean API for sending commands to the database
@@ -37,9 +28,9 @@ enum ResponseHandler {
 #[derive(Clone)]
 pub struct DatabaseSender {
     /// Channel for unsigned events that need signing
-    unsigned_sender: flume::Sender<SaveUnsignedItem>,
+    unsigned_sender: flume::Sender<StoreCommand>,
     /// Unified channel for signed saves and deletes (both are LMDB write operations)
-    store_sender: flume::Sender<StoreItem>,
+    store_sender: flume::Sender<StoreCommand>,
 }
 
 impl std::fmt::Debug for DatabaseSender {
@@ -57,8 +48,8 @@ impl Drop for DatabaseSender {
 impl DatabaseSender {
     /// Create a new DatabaseSender with the two internal channels
     fn new(
-        unsigned_sender: flume::Sender<SaveUnsignedItem>,
-        store_sender: flume::Sender<StoreItem>,
+        unsigned_sender: flume::Sender<StoreCommand>,
+        store_sender: flume::Sender<StoreCommand>,
     ) -> Self {
         Self {
             unsigned_sender,
@@ -74,75 +65,65 @@ impl DatabaseSender {
     /// Send a store command with an optional message sender for responses (fire-and-forget)
     pub async fn send_with_sender(
         &self,
-        command: StoreCommand,
+        mut command: StoreCommand,
         message_sender: Option<websocket_builder::MessageSender<RelayMessage<'static>>>,
     ) -> Result<(), Error> {
-        let response_handler = message_sender.map(ResponseHandler::MessageSender);
+        // Set the response handler in the command
+        match &mut command {
+            StoreCommand::SaveUnsignedEvent(_, _, ref mut handler) => {
+                *handler = message_sender.map(ResponseHandler::MessageSender);
+            }
+            StoreCommand::SaveSignedEvent(_, _, ref mut handler) => {
+                *handler = message_sender.map(ResponseHandler::MessageSender);
+            }
+            StoreCommand::DeleteEvents(_, _, ref mut handler) => {
+                *handler = message_sender.map(ResponseHandler::MessageSender);
+            }
+        }
 
-        match command {
-            StoreCommand::SaveUnsignedEvent(event, scope) => self
+        // Route to appropriate channel
+        match &command {
+            StoreCommand::SaveUnsignedEvent(_, _, _) => self
                 .unsigned_sender
-                .send_async(SaveUnsignedItem {
-                    event: Box::new(event),
-                    scope,
-                    response_handler,
-                })
+                .send_async(command)
                 .await
                 .map_err(|_| Error::internal("Unsigned event processor shut down")),
-            StoreCommand::SaveSignedEvent(event, scope) => self
+            StoreCommand::SaveSignedEvent(_, _, _) | StoreCommand::DeleteEvents(_, _, _) => self
                 .store_sender
-                .send_async(StoreItem::Save(SaveSignedItem {
-                    event,
-                    scope,
-                    response_handler,
-                }))
-                .await
-                .map_err(|_| Error::internal("Store processor shut down")),
-            StoreCommand::DeleteEvents(filter, scope) => self
-                .store_sender
-                .send_async(StoreItem::Delete(DeleteItem {
-                    filter,
-                    scope,
-                    response_handler,
-                }))
+                .send_async(command)
                 .await
                 .map_err(|_| Error::internal("Store processor shut down")),
         }
     }
 
     /// Send a store command synchronously with immediate acknowledgment
-    pub async fn send_sync(&self, command: StoreCommand) -> Result<(), Error> {
+    pub async fn send_sync(&self, mut command: StoreCommand) -> Result<(), Error> {
         let (tx, rx) = oneshot::channel();
-        let response_handler = Some(ResponseHandler::Oneshot(tx));
 
-        match command {
-            StoreCommand::SaveUnsignedEvent(event, scope) => {
+        // Set the response handler in the command
+        match &mut command {
+            StoreCommand::SaveUnsignedEvent(_, _, ref mut handler) => {
+                *handler = Some(ResponseHandler::Oneshot(tx));
+            }
+            StoreCommand::SaveSignedEvent(_, _, ref mut handler) => {
+                *handler = Some(ResponseHandler::Oneshot(tx));
+            }
+            StoreCommand::DeleteEvents(_, _, ref mut handler) => {
+                *handler = Some(ResponseHandler::Oneshot(tx));
+            }
+        }
+
+        // Route to appropriate channel
+        match &command {
+            StoreCommand::SaveUnsignedEvent(_, _, _) => {
                 self.unsigned_sender
-                    .send_async(SaveUnsignedItem {
-                        event: Box::new(event),
-                        scope,
-                        response_handler,
-                    })
+                    .send_async(command)
                     .await
                     .map_err(|_| Error::internal("Unsigned event processor shut down"))?;
             }
-            StoreCommand::SaveSignedEvent(event, scope) => {
+            StoreCommand::SaveSignedEvent(_, _, _) | StoreCommand::DeleteEvents(_, _, _) => {
                 self.store_sender
-                    .send_async(StoreItem::Save(SaveSignedItem {
-                        event,
-                        scope,
-                        response_handler,
-                    }))
-                    .await
-                    .map_err(|_| Error::internal("Store processor shut down"))?;
-            }
-            StoreCommand::DeleteEvents(filter, scope) => {
-                self.store_sender
-                    .send_async(StoreItem::Delete(DeleteItem {
-                        filter,
-                        scope,
-                        response_handler,
-                    }))
+                    .send_async(command)
                     .await
                     .map_err(|_| Error::internal("Store processor shut down"))?;
             }
@@ -154,13 +135,13 @@ impl DatabaseSender {
 
     /// Save a signed event to the database (fire-and-forget)
     pub async fn save_signed_event(&self, event: Event, scope: Scope) -> Result<(), Error> {
-        self.send(StoreCommand::SaveSignedEvent(Box::new(event), scope))
+        self.send(StoreCommand::SaveSignedEvent(Box::new(event), scope, None))
             .await
     }
 
     /// Save a signed event to the database with immediate acknowledgment (for tests)
     pub async fn save_signed_event_sync(&self, event: Event, scope: Scope) -> Result<(), Error> {
-        self.send_sync(StoreCommand::SaveSignedEvent(Box::new(event), scope))
+        self.send_sync(StoreCommand::SaveSignedEvent(Box::new(event), scope, None))
             .await
     }
 
@@ -170,48 +151,18 @@ impl DatabaseSender {
         event: UnsignedEvent,
         scope: Scope,
     ) -> Result<(), Error> {
-        self.send(StoreCommand::SaveUnsignedEvent(event, scope))
+        self.send(StoreCommand::SaveUnsignedEvent(event, scope, None))
             .await
     }
 
     /// Delete events matching the filter from the database
     pub async fn delete_events(&self, filter: Filter, scope: Scope) -> Result<(), Error> {
-        self.send(StoreCommand::DeleteEvents(filter, scope)).await
+        self.send(StoreCommand::DeleteEvents(filter, scope, None))
+            .await
     }
 }
 
 // Note: LMDB only allows one write transaction at a time, so we use a single worker
-
-/// Item for the save signed event queue
-#[derive(Debug)]
-struct SaveSignedItem {
-    event: Box<Event>,
-    scope: Scope,
-    response_handler: Option<ResponseHandler>,
-}
-
-/// Item for the save unsigned event queue
-#[derive(Debug)]
-struct SaveUnsignedItem {
-    event: Box<UnsignedEvent>,
-    scope: Scope,
-    response_handler: Option<ResponseHandler>,
-}
-
-/// Item for the deletion queue
-#[derive(Debug)]
-struct DeleteItem {
-    filter: Filter,
-    scope: Scope,
-    response_handler: Option<ResponseHandler>,
-}
-
-/// Unified store item that combines saves and deletes
-#[derive(Debug)]
-enum StoreItem {
-    Save(SaveSignedItem),
-    Delete(DeleteItem),
-}
 
 /// A Nostr relay database that wraps NostrLMDB with async operations
 #[derive(Debug)]
@@ -229,25 +180,25 @@ impl RelayDatabase {
     /// Process a unified batch of store items (saves and deletes) in a single transaction
     fn process_store_batch(
         env: &Arc<NostrLMDB>,
-        items: impl Iterator<Item = StoreItem>,
+        items: impl Iterator<Item = StoreCommand>,
         event_sender: Option<&flume::Sender<Arc<Event>>>,
     ) {
         // Separate saves and deletes
-        let mut save_items = Vec::new();
-        let mut delete_items = Vec::new();
+        let mut save_commands = Vec::new();
+        let mut delete_commands = Vec::new();
 
-        for item in items {
-            match item {
-                StoreItem::Save(save_item) => save_items.push(save_item),
-                StoreItem::Delete(delete_item) => delete_items.push(delete_item),
+        for command in items {
+            match command {
+                StoreCommand::SaveSignedEvent(_, _, _) => save_commands.push(command),
+                StoreCommand::DeleteEvents(_, _, _) => delete_commands.push(command),
+                StoreCommand::SaveUnsignedEvent(_, _, _) => {
+                    error!("Unsigned event should not reach store processor");
+                }
             }
         }
 
-        // Pre-collect events to broadcast for save items
-        let events_to_broadcast: Vec<Event> = save_items
-            .iter()
-            .map(|item| (*item.event).clone())
-            .collect();
+        // Pre-collect event references for broadcasting (avoiding clone)
+        let mut events_to_broadcast = Vec::new();
 
         // Process everything in a single transaction
         let commit_result = {
@@ -255,8 +206,8 @@ impl RelayDatabase {
                 Ok(txn) => txn,
                 Err(e) => {
                     error!("Failed to create write transaction: {:?}", e);
-                    Self::send_error_responses(save_items, format!("error: {e}"));
-                    Self::send_delete_error_responses(delete_items, format!("error: {e}"));
+                    Self::send_error_responses(save_commands, format!("error: {e}"));
+                    Self::send_delete_error_responses(delete_commands, format!("error: {e}"));
                     return;
                 }
             };
@@ -264,36 +215,43 @@ impl RelayDatabase {
             let mut all_succeeded = true;
 
             // Process saves first
-            for item in save_items.iter() {
-                match env.save_event_with_txn(&mut txn, &item.scope, &item.event) {
-                    Ok(status) => {
-                        if !status.is_success() {
-                            // Rejected is not an error, we just log it
-                            warn!("Failed to save event: status={:?}", status);
+            for command in save_commands.iter() {
+                if let StoreCommand::SaveSignedEvent(event, scope, _) = command {
+                    match env.save_event_with_txn(&mut txn, scope, event) {
+                        Ok(status) => {
+                            if status.is_success() {
+                                // Collect event for broadcasting
+                                events_to_broadcast.push((**event).clone());
+                            } else {
+                                // Rejected is not an error, we just log it
+                                warn!("Failed to save event: status={:?}", status);
+                            }
                         }
-                    }
-                    Err(e) => {
-                        all_succeeded = false;
-                        error!("Failed to save event: {:?}", e);
-                        break; // Stop on first failure
+                        Err(e) => {
+                            all_succeeded = false;
+                            error!("Failed to save event: {:?}", e);
+                            break; // Stop on first failure
+                        }
                     }
                 }
             }
 
             // Process deletes if saves succeeded
             if all_succeeded {
-                for item in delete_items.iter() {
-                    match env.delete_with_txn(&mut txn, &item.scope, item.filter.clone()) {
-                        Ok(_) => {
-                            debug!(
-                                "Successfully deleted events matching filter for scope {:?}",
-                                item.scope
-                            );
-                        }
-                        Err(e) => {
-                            all_succeeded = false;
-                            error!("Failed to delete events: {:?}", e);
-                            break;
+                for command in delete_commands.iter() {
+                    if let StoreCommand::DeleteEvents(filter, scope, _) = command {
+                        match env.delete_with_txn(&mut txn, scope, filter.clone()) {
+                            Ok(_) => {
+                                debug!(
+                                    "Successfully deleted events matching filter for scope {:?}",
+                                    scope
+                                );
+                            }
+                            Err(e) => {
+                                all_succeeded = false;
+                                error!("Failed to delete events: {:?}", e);
+                                break;
+                            }
                         }
                     }
                 }
@@ -315,35 +273,35 @@ impl RelayDatabase {
             Ok(()) => {
                 debug!(
                     "Transaction committed successfully for {} saves and {} deletes",
-                    save_items.len(),
-                    delete_items.len()
+                    save_commands.len(),
+                    delete_commands.len()
                 );
 
                 // Send success responses for saves and distribute events
                 Self::send_success_responses_and_distribute_sync(
-                    save_items,
+                    save_commands,
                     events_to_broadcast,
                     event_sender,
                 );
 
                 // Send success responses for deletes
-                Self::send_delete_success_responses(delete_items);
+                Self::send_delete_success_responses(delete_commands);
             }
             Err(error_msg) => {
                 // All failed - send error responses
-                Self::send_error_responses(save_items, format!("error: {error_msg}"));
-                Self::send_delete_error_responses(delete_items, format!("error: {error_msg}"));
+                Self::send_error_responses(save_commands, format!("error: {error_msg}"));
+                Self::send_delete_error_responses(delete_commands, format!("error: {error_msg}"));
             }
         }
     }
 
     /// Send error responses for save items
-    fn send_error_responses(items: Vec<SaveSignedItem>, error_msg: String) {
-        for item in items {
-            if let Some(response_handler) = item.response_handler {
-                match response_handler {
+    fn send_error_responses(commands: Vec<StoreCommand>, error_msg: String) {
+        for command in commands {
+            if let StoreCommand::SaveSignedEvent(event, _, Some(handler)) = command {
+                match handler {
                     ResponseHandler::MessageSender(mut sender) => {
-                        let msg = RelayMessage::ok(item.event.id, false, error_msg.clone());
+                        let msg = RelayMessage::ok(event.id, false, error_msg.clone());
                         sender.send_bypass(msg);
                     }
                     ResponseHandler::Oneshot(oneshot_sender) => {
@@ -356,16 +314,16 @@ impl RelayDatabase {
 
     /// Send success responses and distribute events synchronously
     fn send_success_responses_and_distribute_sync(
-        items: Vec<SaveSignedItem>,
+        commands: Vec<StoreCommand>,
         events_to_distribute: Vec<Event>,
         event_sender: Option<&flume::Sender<Arc<Event>>>,
     ) {
         // Send OK responses
-        for item in items.into_iter() {
-            if let Some(response_handler) = item.response_handler {
-                match response_handler {
+        for command in commands {
+            if let StoreCommand::SaveSignedEvent(event, _, Some(handler)) = command {
+                match handler {
                     ResponseHandler::MessageSender(mut sender) => {
-                        let msg = RelayMessage::ok(item.event.id, true, "");
+                        let msg = RelayMessage::ok(event.id, true, "");
                         sender.send_bypass(msg);
                     }
                     ResponseHandler::Oneshot(oneshot_sender) => {
@@ -398,10 +356,10 @@ impl RelayDatabase {
     }
 
     /// Send success responses for delete items
-    fn send_delete_success_responses(items: Vec<DeleteItem>) {
-        for item in items {
-            if let Some(response_handler) = item.response_handler {
-                match response_handler {
+    fn send_delete_success_responses(commands: Vec<StoreCommand>) {
+        for command in commands {
+            if let StoreCommand::DeleteEvents(_, _, Some(handler)) = command {
+                match handler {
                     ResponseHandler::MessageSender(mut sender) => {
                         let msg = RelayMessage::notice("delete: success");
                         sender.send_bypass(msg);
@@ -415,10 +373,10 @@ impl RelayDatabase {
     }
 
     /// Send error responses for delete items
-    fn send_delete_error_responses(items: Vec<DeleteItem>, error_msg: String) {
-        for item in items {
-            if let Some(response_handler) = item.response_handler {
-                match response_handler {
+    fn send_delete_error_responses(commands: Vec<StoreCommand>, error_msg: String) {
+        for command in commands {
+            if let StoreCommand::DeleteEvents(_, _, Some(handler)) = command {
+                match handler {
                     ResponseHandler::MessageSender(mut sender) => {
                         let msg = RelayMessage::notice(error_msg.clone());
                         sender.send_bypass(msg);
@@ -603,8 +561,8 @@ impl RelayDatabase {
 
         // Create two specialized queues: one for unsigned events, one for store operations
         let (save_unsigned_sender, save_unsigned_receiver) =
-            flume::bounded::<SaveUnsignedItem>(queue_capacity);
-        let (store_sender, store_receiver) = flume::bounded::<StoreItem>(queue_capacity);
+            flume::bounded::<StoreCommand>(queue_capacity);
+        let (store_sender, store_receiver) = flume::bounded::<StoreCommand>(queue_capacity);
 
         // Create task tracker for worker lifecycle management
         let task_tracker = task_tracker.unwrap_or_default();
@@ -641,7 +599,7 @@ impl RelayDatabase {
 
     /// Spawn unified store processor that handles both saves and deletes
     fn spawn_store_processor(
-        receiver: flume::Receiver<StoreItem>,
+        receiver: flume::Receiver<StoreCommand>,
         env: Arc<NostrLMDB>,
         event_sender: Option<flume::Sender<Arc<Event>>>,
         task_tracker: &TaskTracker,
@@ -681,55 +639,57 @@ impl RelayDatabase {
 
     /// Spawn the processor for unsigned events
     fn spawn_save_unsigned_processor(
-        receiver: flume::Receiver<SaveUnsignedItem>,
-        store_sender: flume::Sender<StoreItem>,
+        receiver: flume::Receiver<StoreCommand>,
+        store_sender: flume::Sender<StoreCommand>,
         crypto_helper: CryptoHelper,
         task_tracker: &TaskTracker,
     ) {
         task_tracker.spawn(async move {
             info!("Save unsigned processor started");
 
-            while let Ok(item) = receiver.recv_async().await {
-                debug!("Processing unsigned event");
+            while let Ok(command) = receiver.recv_async().await {
+                if let StoreCommand::SaveUnsignedEvent(event, scope, response_handler) = command {
+                    debug!("Processing unsigned event");
 
-                let response_handler = item.response_handler;
-                match crypto_helper.sign_event(*item.event) {
-                    Ok(signed_event) => {
-                        let _event_id = signed_event.id;
-                        let signed_item = SaveSignedItem {
-                            event: Box::new(signed_event),
-                            scope: item.scope,
-                            response_handler,
-                        };
+                    match crypto_helper.sign_event(event) {
+                        Ok(signed_event) => {
+                            let signed_command = StoreCommand::SaveSignedEvent(
+                                Box::new(signed_event),
+                                scope,
+                                response_handler,
+                            );
 
-                        if let Err(e) = store_sender.send_async(StoreItem::Save(signed_item)).await
-                        {
-                            error!("Failed to forward signed event to store: {:?}", e);
-                            // The response_handler was already moved into signed_item
-                            // So we can't send an error response here - the channel is closed anyway
+                            if let Err(e) = store_sender.send_async(signed_command).await {
+                                error!("Failed to forward signed event to store: {:?}", e);
+                                // The response_handler was already moved into signed_command
+                                // So we can't send an error response here - the channel is closed anyway
+                            }
+                            // If successful, the store processor will handle the response
                         }
-                        // If successful, the store processor will handle the response
-                    }
-                    Err(e) => {
-                        error!("Failed to sign event: {:?}", e);
+                        Err(e) => {
+                            error!("Failed to sign event: {:?}", e);
 
-                        // Send error response if response handler present
-                        // Note: We can't send a proper OK message without an event ID
-                        if let Some(response_handler) = response_handler {
-                            match response_handler {
-                                ResponseHandler::MessageSender(mut sender) => {
-                                    let msg =
-                                        RelayMessage::notice(format!("Failed to sign event: {e}"));
-                                    sender.send_bypass(msg);
-                                }
-                                ResponseHandler::Oneshot(oneshot_sender) => {
-                                    let _ = oneshot_sender.send(Err(Error::internal(format!(
-                                        "Failed to sign event: {e}"
-                                    ))));
+                            // Send error response if response handler present
+                            // Note: We can't send a proper OK message without an event ID
+                            if let Some(response_handler) = response_handler {
+                                match response_handler {
+                                    ResponseHandler::MessageSender(mut sender) => {
+                                        let msg = RelayMessage::notice(format!(
+                                            "Failed to sign event: {e}"
+                                        ));
+                                        sender.send_bypass(msg);
+                                    }
+                                    ResponseHandler::Oneshot(oneshot_sender) => {
+                                        let _ = oneshot_sender.send(Err(Error::internal(format!(
+                                            "Failed to sign event: {e}"
+                                        ))));
+                                    }
                                 }
                             }
                         }
                     }
+                } else {
+                    error!("Non-unsigned event received in unsigned processor");
                 }
             }
 

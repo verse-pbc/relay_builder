@@ -30,10 +30,7 @@ impl EventProcessor for TestEventProcessor {
         context: EventContext<'_>,
     ) -> Result<Vec<StoreCommand>, Error> {
         if self.allow_all {
-            Ok(vec![StoreCommand::SaveSignedEvent(
-                Box::new(event),
-                context.subdomain.clone(),
-            )])
+            Ok(vec![(event, context.subdomain.clone()).into()])
         } else {
             Err(Error::restricted("Events not allowed"))
         }
@@ -62,10 +59,7 @@ impl EventProcessor for RestrictiveEventProcessor {
         context: EventContext<'_>,
     ) -> Result<Vec<StoreCommand>, Error> {
         if context.authed_pubkey.is_some() {
-            Ok(vec![StoreCommand::SaveSignedEvent(
-                Box::new(event),
-                context.subdomain.clone(),
-            )])
+            Ok(vec![(event, context.subdomain.clone()).into()])
         } else {
             Err(Error::auth_required(
                 "Authentication required to publish events",

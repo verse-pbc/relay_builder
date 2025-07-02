@@ -13,42 +13,52 @@ use nostr_sdk::prelude::*;
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::sync::Arc;
+use tokio::sync::oneshot;
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 use websocket_builder::MessageSender;
 
+/// Response handler for database commands - supports both fire-and-forget and synchronous operations
+#[derive(Debug)]
+pub enum ResponseHandler {
+    /// WebSocket message sender for fire-and-forget client responses (high performance)
+    MessageSender(websocket_builder::MessageSender<RelayMessage<'static>>),
+    /// Oneshot channel for immediate synchronous acknowledgment (tests and critical operations)
+    Oneshot(oneshot::Sender<Result<(), crate::error::Error>>),
+}
+
 /// Commands that can be executed against the database
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub enum StoreCommand {
     /// Save an unsigned event to the database
-    SaveUnsignedEvent(UnsignedEvent, Scope),
+    SaveUnsignedEvent(UnsignedEvent, Scope, Option<ResponseHandler>),
     /// Save a signed event to the database
-    SaveSignedEvent(Box<Event>, Scope),
+    SaveSignedEvent(Box<Event>, Scope, Option<ResponseHandler>),
     /// Delete events matching the filter from the database
-    DeleteEvents(Filter, Scope),
+    DeleteEvents(Filter, Scope, Option<ResponseHandler>),
 }
 
 impl StoreCommand {
     /// Get the scope for this store command
     pub fn subdomain_scope(&self) -> &Scope {
         match self {
-            StoreCommand::SaveSignedEvent(_, scope) => scope,
-            StoreCommand::SaveUnsignedEvent(_, scope) => scope,
-            StoreCommand::DeleteEvents(_, scope) => scope,
+            StoreCommand::SaveSignedEvent(_, scope, _) => scope,
+            StoreCommand::SaveUnsignedEvent(_, scope, _) => scope,
+            StoreCommand::DeleteEvents(_, scope, _) => scope,
         }
     }
 
     /// Check if this command contains a replaceable event
     pub fn is_replaceable(&self) -> bool {
         match self {
-            StoreCommand::SaveUnsignedEvent(event, _) => {
+            StoreCommand::SaveUnsignedEvent(event, _, _) => {
                 event.kind.is_replaceable() || event.kind.is_addressable()
             }
-            StoreCommand::SaveSignedEvent(event, _) => {
+            StoreCommand::SaveSignedEvent(event, _, _) => {
                 event.kind.is_replaceable() || event.kind.is_addressable()
             }
-            StoreCommand::DeleteEvents(_, _) => false,
+            StoreCommand::DeleteEvents(_, _, _) => false,
         }
     }
 
@@ -58,6 +68,20 @@ impl StoreCommand {
             Scope::Named { name, .. } => Some(name),
             Scope::Default => None,
         }
+    }
+}
+
+/// Implement conversion from (Event, Scope) tuple to StoreCommand
+impl From<(Event, Scope)> for StoreCommand {
+    fn from((event, scope): (Event, Scope)) -> Self {
+        StoreCommand::SaveSignedEvent(Box::new(event), scope, None)
+    }
+}
+
+/// Implement conversion from (Box<Event>, Scope) tuple to StoreCommand
+impl From<(Box<Event>, Scope)> for StoreCommand {
+    fn from((event, scope): (Box<Event>, Scope)) -> Self {
+        StoreCommand::SaveSignedEvent(event, scope, None)
     }
 }
 
@@ -109,7 +133,7 @@ impl ReplaceableEventsBuffer {
 
         for ((_, _, scope), event) in self.buffer.drain() {
             if let Err(e) = db_sender
-                .send(StoreCommand::SaveUnsignedEvent(event, scope))
+                .send(StoreCommand::SaveUnsignedEvent(event, scope, None))
                 .await
             {
                 error!("Failed to flush replaceable event: {:?}", e);
@@ -254,7 +278,7 @@ impl SubscriptionCoordinator {
     ) -> Result<(), Error> {
         // For replaceable events, queue them for buffering
         if command.is_replaceable() {
-            if let StoreCommand::SaveUnsignedEvent(event, scope) = command {
+            if let StoreCommand::SaveUnsignedEvent(event, scope, _) = command {
                 self.replaceable_event_queue
                     .send_async((event, scope))
                     .await
@@ -518,6 +542,7 @@ mod tests {
                 .send(StoreCommand::SaveSignedEvent(
                     Box::new(event),
                     Scope::Default,
+                    None,
                 ))
                 .await
                 .unwrap();
@@ -621,6 +646,7 @@ mod tests {
                 .send(StoreCommand::SaveSignedEvent(
                     Box::new(event),
                     Scope::Default,
+                    None,
                 ))
                 .await
                 .unwrap();
@@ -706,6 +732,7 @@ mod tests {
                 .send(StoreCommand::SaveSignedEvent(
                     Box::new(event),
                     Scope::Default,
+                    None,
                 ))
                 .await
                 .unwrap();
@@ -806,6 +833,7 @@ mod tests {
             .send(StoreCommand::SaveSignedEvent(
                 Box::new(event),
                 Scope::Default,
+                None,
             ))
             .await
             .unwrap();
@@ -819,6 +847,7 @@ mod tests {
                 .send(StoreCommand::SaveSignedEvent(
                     Box::new(event),
                     Scope::Default,
+                    None,
                 ))
                 .await
                 .unwrap();
@@ -912,6 +941,7 @@ mod tests {
                 .send(StoreCommand::SaveSignedEvent(
                     Box::new(event),
                     Scope::Default,
+                    None,
                 ))
                 .await
                 .unwrap();
@@ -1026,6 +1056,7 @@ mod tests {
                 .send(StoreCommand::SaveSignedEvent(
                     Box::new(event),
                     Scope::Default,
+                    None,
                 ))
                 .await
                 .unwrap();
@@ -1107,6 +1138,7 @@ mod tests {
                 .send(StoreCommand::SaveSignedEvent(
                     Box::new(event),
                     Scope::Default,
+                    None,
                 ))
                 .await
                 .unwrap();

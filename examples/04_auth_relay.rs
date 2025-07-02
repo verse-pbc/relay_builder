@@ -31,10 +31,7 @@ impl EventProcessor for AuthRequiredProcessor {
         // Check if user is authenticated
         if let Some(pubkey) = &context.authed_pubkey {
             tracing::info!("Accepted event from authenticated user: {}", pubkey);
-            Ok(vec![StoreCommand::SaveSignedEvent(
-                Box::new(event),
-                context.subdomain.clone(),
-            )])
+            Ok(vec![(event, context.subdomain.clone()).into()])
         } else {
             // Reject with auth-required message
             tracing::info!("Rejected event from unauthenticated user");

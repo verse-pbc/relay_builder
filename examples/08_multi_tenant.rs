@@ -37,10 +37,7 @@ impl EventProcessor for MultiTenantProcessor {
 
         // Events are automatically isolated by subdomain
         // No need to do anything special!
-        Ok(vec![StoreCommand::SaveSignedEvent(
-            Box::new(event),
-            context.subdomain.clone(), // This ensures isolation
-        )])
+        Ok(vec![(event, context.subdomain.clone()).into()])
     }
 }
 

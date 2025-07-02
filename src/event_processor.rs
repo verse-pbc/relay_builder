@@ -88,6 +88,7 @@ pub struct EventContext<'a> {
 ///         Ok(vec![StoreCommand::SaveSignedEvent(
 ///             Box::new(event),
 ///             context.subdomain.clone(),
+///             None,
 ///         )])
 ///     }
 /// }
@@ -168,10 +169,7 @@ where
     ) -> Result<Vec<StoreCommand>> {
         // Default implementation: store all valid events
         let _ = custom_state; // Unused in default implementation
-        Ok(vec![StoreCommand::SaveSignedEvent(
-            Box::new(event),
-            context.subdomain.clone(),
-        )])
+        Ok(vec![(event, context.subdomain.clone()).into()])
     }
 }
 

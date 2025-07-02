@@ -75,10 +75,7 @@ impl EventProcessor for PrivateRelayProcessor {
     ) -> Result<Vec<StoreCommand>> {
         // Simple business logic
         if self.allowed_pubkeys.contains(&event.pubkey) {
-            Ok(vec![StoreCommand::SaveSignedEvent(
-                Box::new(event),
-                context.subdomain.clone(),
-            )])
+            Ok(vec![(event, context.subdomain.clone()).into()])
         } else {
             Ok(vec![]) // Reject silently
         }

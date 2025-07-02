@@ -38,10 +38,7 @@ impl EventProcessor for SimpleProcessor {
         );
 
         // Store all valid events
-        Ok(vec![StoreCommand::SaveSignedEvent(
-            Box::new(event),
-            context.subdomain.clone(),
-        )])
+        Ok(vec![(event, context.subdomain.clone()).into()])
     }
 }
 
