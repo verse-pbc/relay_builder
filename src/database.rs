@@ -831,7 +831,7 @@ mod tests {
     #[tokio::test]
     async fn test_shutdown_processes_all_events() {
         let tmp_dir = TempDir::new().unwrap();
-        let db_path = tmp_dir.path().join("test.db");
+        let db_path = tmp_dir.path().join("test_shutdown_processes.db");
         let event_count = 100;
 
         // Create and populate database
@@ -890,7 +890,7 @@ mod tests {
     async fn test_drop_completes_pending_work() {
         // This test verifies that dropping the database still processes pending events
         let tmp_dir = TempDir::new().unwrap();
-        let db_path = tmp_dir.path().join("test.db");
+        let db_path = tmp_dir.path().join("test_drop_completes.db");
         let event_count = 50;
 
         // Create a task tracker that we'll wait on
@@ -955,7 +955,7 @@ mod tests {
     #[tokio::test]
     async fn test_shutdown_with_many_events() {
         let tmp_dir = TempDir::new().unwrap();
-        let db_path = tmp_dir.path().join("test.db");
+        let db_path = tmp_dir.path().join("test_shutdown_many.db");
         let event_count = 500;
 
         // Create and populate database with many events
@@ -1014,7 +1014,7 @@ mod tests {
     async fn test_batch_save_handles_rejected_events() {
         // This test verifies that batch saves continue processing even when some events are rejected
         let tmp_dir = TempDir::new().unwrap();
-        let db_path = tmp_dir.path().join("test.db");
+        let db_path = tmp_dir.path().join("test_batch_save.db");
 
         // Create database
         let keys = Keys::generate();
@@ -1101,7 +1101,7 @@ mod tests {
     async fn test_sync_save_in_optimistic_mode() {
         // Test that sync saves work in optimistic mode
         let tmp_dir = TempDir::new().unwrap();
-        let db_path = tmp_dir.path().join("test.db");
+        let db_path = tmp_dir.path().join("test_sync_save.db");
         let keys = Keys::generate();
         let task_tracker = TaskTracker::new();
         let keys_arc = Arc::new(keys);
