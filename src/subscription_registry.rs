@@ -62,11 +62,24 @@ pub struct ConnectionHandle {
 impl Drop for ConnectionHandle {
     fn drop(&mut self) {
         debug!("Connection {} dropped, removing from registry", self.id);
+
+        // Count subscriptions before removing the connection
+        let subscription_count = if let Some(connection) = self.registry.connections.get(&self.id) {
+            connection.subscriptions.read().len()
+        } else {
+            0
+        };
+
         self.registry.connections.remove(&self.id);
+
         if let Some(handler) = &self.registry.metrics_handler {
-            // Count remaining subscriptions that were removed
-            // Note: We can't access the subscriptions here as the connection is already gone
-            handler.decrement_active_subscriptions(1); // Conservative estimate
+            if subscription_count > 0 {
+                handler.decrement_active_subscriptions(subscription_count);
+                debug!(
+                    "Decremented {} subscriptions for dropped connection {}",
+                    subscription_count, self.id
+                );
+            }
         }
     }
 }
