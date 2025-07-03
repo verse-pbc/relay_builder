@@ -987,6 +987,9 @@ mod tests {
             task_tracker.wait().await;
         }
 
+        // Small delay to ensure LMDB environment is fully closed
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
         // Verify all events were saved
         {
             let keys = Keys::generate();
