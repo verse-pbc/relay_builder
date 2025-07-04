@@ -259,11 +259,11 @@ impl SubscriptionCoordinator {
 
     /// Remove a subscription
     pub fn remove_subscription(&self, subscription_id: SubscriptionId) -> Result<(), Error> {
-        let registry = self.registry.clone();
-        let connection_id = self.connection_id.clone();
-
         // Just call directly now since it's not async
-        if let Err(e) = registry.remove_subscription(&connection_id, &subscription_id) {
+        if let Err(e) = self
+            .registry
+            .remove_subscription(&self.connection_id, &subscription_id)
+        {
             warn!("Failed to remove subscription: {:?}", e);
         }
 
@@ -307,7 +307,7 @@ impl SubscriptionCoordinator {
         // Process historical events first
         self.process_historical_events(
             subscription_id.clone(),
-            filters.clone(),
+            &filters,
             authed_pubkey,
             subdomain,
             self.outgoing_sender.clone(),
@@ -324,7 +324,7 @@ impl SubscriptionCoordinator {
     async fn process_historical_events(
         &self,
         subscription_id: SubscriptionId,
-        filters: Vec<Filter>,
+        filters: &[Filter],
         authed_pubkey: Option<PublicKey>,
         subdomain: &Scope,
         mut sender: MessageSender<RelayMessage<'static>>,
@@ -339,8 +339,8 @@ impl SubscriptionCoordinator {
             .min(self.max_limit);
 
         let filters: Vec<Filter> = filters
-            .into_iter()
-            .map(|filter| filter.limit(smallest_limit))
+            .iter()
+            .map(|filter| filter.clone().limit(smallest_limit))
             .collect();
 
         let mut sent_events = HashSet::new();
