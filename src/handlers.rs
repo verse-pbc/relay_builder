@@ -4,7 +4,7 @@
 //! Currently supports Axum, with other frameworks planned.
 
 use axum::{
-    extract::{ws::WebSocketUpgrade, ConnectInfo},
+    extract::ConnectInfo,
     http::HeaderMap,
     response::{IntoResponse, Json},
 };
@@ -15,8 +15,8 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info};
-use websocket_builder::AxumWebSocketExt;
+use tracing::{debug, info};
+use websocket_builder::{UnifiedWebSocketExt, WebSocketUpgrade};
 
 /// Helper struct for automatic connection counting
 struct ConnectionCounter {
@@ -341,33 +341,28 @@ where
                 let cancellation_token = handlers.cancellation_token.clone();
                 let connection_counter = handlers.connection_counter.clone();
 
-                ws.on_upgrade(move |socket| async move {
-                    // Create isolated span for this connection
-                    let span = tracing::info_span!(
-                        parent: None,
-                        "websocket_connection",
-                        ip = %real_ip,
-                        subdomain = ?subdomain
-                    );
-                    let _guard = span.enter();
+                // Create isolated span for this connection
+                let span = tracing::info_span!(
+                    parent: None,
+                    "websocket_connection",
+                    ip = %real_ip,
+                    subdomain = ?subdomain
+                );
+                let _guard = span.enter();
 
-                    let _counter = ConnectionCounter::new(connection_counter);
+                let _counter = ConnectionCounter::new(connection_counter);
 
-                    info!("New WebSocket connection from {}", real_ip);
+                info!("New WebSocket connection from {}", real_ip);
 
-                    // Set the host in task-local storage for subdomain extraction
-                    crate::state::CURRENT_REQUEST_HOST
-                        .scope(host, async move {
-                            if let Err(e) = ws_handler
-                                .start_axum(socket, real_ip.clone(), cancellation_token)
-                                .await
-                            {
-                                error!("WebSocket error for connection {}: {}", real_ip, e);
-                            }
-                        })
-                        .await;
-                })
-                .into_response()
+                // Set the host in task-local storage for subdomain extraction
+                crate::state::CURRENT_REQUEST_HOST
+                    .scope(host, async move {
+                        // Use the unified API for WebSocket handling
+                        ws_handler
+                            .handle_upgrade(ws, real_ip, cancellation_token)
+                            .await
+                    })
+                    .await
             })
         }
     }
@@ -425,34 +420,27 @@ where
                     let cancellation_token = handlers.cancellation_token.clone();
                     let connection_counter = handlers.connection_counter.clone();
 
-                    return ws
-                        .on_upgrade(move |socket| async move {
-                            // Create isolated span for this connection
-                            let span = tracing::info_span!(
-                                parent: None,
-                                "websocket_connection",
-                                ip = %real_ip,
-                                subdomain = ?subdomain
-                            );
-                            let _guard = span.enter();
+                    // Create isolated span for this connection
+                    let span = tracing::info_span!(
+                        parent: None,
+                        "websocket_connection",
+                        ip = %real_ip,
+                        subdomain = ?subdomain
+                    );
+                    let _guard = span.enter();
 
-                            let _counter = ConnectionCounter::new(connection_counter);
+                    let _counter = ConnectionCounter::new(connection_counter);
 
-                            info!("New WebSocket connection from {}", real_ip);
+                    info!("New WebSocket connection from {}", real_ip);
 
-                            // Set the host in task-local storage for subdomain extraction
-                            crate::state::CURRENT_REQUEST_HOST
-                                .scope(host, async move {
-                                    if let Err(e) = ws_handler
-                                        .start_axum(socket, real_ip.clone(), cancellation_token)
-                                        .await
-                                    {
-                                        error!("WebSocket error for connection {}: {}", real_ip, e);
-                                    }
-                                })
-                                .await;
+                    return crate::state::CURRENT_REQUEST_HOST
+                        .scope(host, async move {
+                            // Use the unified API for WebSocket handling
+                            ws_handler
+                                .handle_upgrade(ws, real_ip, cancellation_token)
+                                .await
                         })
-                        .into_response();
+                        .await;
                 }
 
                 // 2. NIP-11 JSON

@@ -3,6 +3,10 @@
 //! This example shows the absolute minimum code needed to run a functional Nostr relay.
 //! It accepts all events without any filtering or authentication.
 //!
+//! This example works with both tungstenite (default) and fastwebsockets backends.
+//! To use fastwebsockets, modify the websocket_builder dependency in Cargo.toml:
+//! websocket_builder = { path = "../websocket_builder", default-features = false, features = ["fastwebsockets"] }
+//!
 //! Run with: cargo run --example minimal_relay --features axum
 
 use anyhow::Result;

@@ -385,7 +385,7 @@ where
         self,
     ) -> Result<
         impl Fn(
-                Option<axum::extract::ws::WebSocketUpgrade>,
+                Option<websocket_builder::WebSocketUpgrade>,
                 axum::extract::ConnectInfo<std::net::SocketAddr>,
                 axum::http::HeaderMap,
             ) -> std::pin::Pin<
@@ -402,7 +402,7 @@ where
         let service = self.build_relay_service_internal().await?;
 
         Ok(
-            move |ws: Option<axum::extract::ws::WebSocketUpgrade>,
+            move |ws: Option<websocket_builder::WebSocketUpgrade>,
                   connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
                   headers: axum::http::HeaderMap| {
                 let service = service.clone();

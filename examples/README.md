@@ -11,6 +11,16 @@ This guide walks through nostr_relay_builder features with progressive examples.
 - Each builds on previous concepts
 - Run with: `cargo run --example 01_minimal_relay --features axum`
 
+## WebSocket Backend Support
+All examples work with both WebSocket backends:
+- **tungstenite** (default): Standard WebSocket implementation
+- **fastwebsockets**: High-performance alternative
+
+To run examples with fastwebsockets, modify the `websocket_builder` dependency in `Cargo.toml`:
+```toml
+websocket_builder = { path = "../websocket_builder", default-features = false, features = ["fastwebsockets"] }
+```
+
 ## Step 1: Minimal Relay
 
 Basic relay with default configuration.

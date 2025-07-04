@@ -2,6 +2,8 @@
 
 A framework for building custom Nostr relays in Rust.
 
+> **⚠️ Alpha Software**: This crate is under active development (v0.5.0-alpha.1). Breaking changes are expected between releases as we refine the API based on user feedback and implementation experience.
+
 ## Features
 
 - Built on async Rust with Tokio
@@ -10,6 +12,7 @@ A framework for building custom Nostr relays in Rust.
 - Built-in NIPs: 09 (deletion), 40 (expiration), 42 (auth), 70 (protected)
 - Subdomain isolation for multi-tenant deployments
 - Metrics, monitoring, and graceful shutdown
+- WebSocket backend support: tungstenite (default) or fastwebsockets
 
 ## Quick Start
 
@@ -52,6 +55,21 @@ async fn main() -> Result<()> {
     axum::serve(listener, app.into_make_service()).await?;
     Ok(())
 }
+```
+
+## WebSocket Backend Configuration
+
+The framework supports two WebSocket backends via the `websocket_builder` dependency:
+
+- **tungstenite** (default): Mature, widely-used WebSocket implementation
+- **fastwebsockets**: High-performance alternative with lower latency
+
+To use fastwebsockets, modify your `Cargo.toml`:
+
+```toml
+[dependencies]
+websocket_builder = { version = "0.2.0-alpha.1", default-features = false, features = ["fastwebsockets"] }
+nostr_relay_builder = { git = "https://github.com/verse-pbc/nostr_relay_builder", features = ["axum"] }
 ```
 
 ## Documentation
