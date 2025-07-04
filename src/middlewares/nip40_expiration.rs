@@ -63,7 +63,7 @@ impl Middleware for Nip40ExpirationMiddleware {
                     let filter = Filter::new().id(event_ref.id);
                     let delete_command = StoreCommand::DeleteEvents(
                         filter,
-                        ctx.state.read().subdomain().clone(),
+                        (**ctx.state.read().subdomain()).clone(),
                         None,
                     );
 

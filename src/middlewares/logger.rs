@@ -43,7 +43,7 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for LoggerMi
         // Extract subdomain from connection state
         let subdomain = {
             let state_guard = ctx.state.read();
-            match &state_guard.subdomain {
+            match state_guard.subdomain.as_ref() {
                 Scope::Named { name, .. } => Some(name.to_string()),
                 Scope::Default => None,
             }
@@ -107,7 +107,7 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for LoggerMi
         // Extract subdomain from connection state
         let subdomain = {
             let state_guard = ctx.state.read();
-            match &state_guard.subdomain {
+            match state_guard.subdomain.as_ref() {
                 Scope::Named { name, .. } => Some(name.to_string()),
                 Scope::Default => None,
             }
@@ -174,7 +174,7 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for LoggerMi
         // Extract subdomain from connection state
         let subdomain = {
             let state_guard = ctx.state.read();
-            match &state_guard.subdomain {
+            match state_guard.subdomain.as_ref() {
                 Scope::Named { name, .. } => Some(name.to_string()),
                 Scope::Default => None,
             }
@@ -202,7 +202,7 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for LoggerMi
         // Extract subdomain from connection state
         let subdomain = {
             let state_guard = ctx.state.read();
-            match &state_guard.subdomain {
+            match state_guard.subdomain.as_ref() {
                 Scope::Named { name, .. } => Some(name.to_string()),
                 Scope::Default => None,
             }

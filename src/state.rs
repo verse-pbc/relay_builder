@@ -40,8 +40,8 @@ pub struct NostrConnectionState<T = ()> {
     pub(crate) db_sender: Option<DatabaseSender>,
     /// Cancellation token for this connection
     pub connection_token: CancellationToken,
-    /// Subdomain/scope for this connection
-    pub subdomain: Scope,
+    /// Subdomain/scope for this connection (Arc for cheap clones)
+    pub subdomain: Arc<Scope>,
     /// Custom state for application-specific data
     pub custom: Arc<parking_lot::RwLock<T>>,
     /// Active subscriptions for this connection
@@ -59,7 +59,7 @@ impl<T: Default> Default for NostrConnectionState<T> {
             subscription_coordinator: None,
             db_sender: None,
             connection_token: CancellationToken::new(),
-            subdomain: Scope::Default,
+            subdomain: Arc::new(Scope::Default),
             custom: Arc::new(parking_lot::RwLock::new(T::default())),
             active_subscriptions: std::collections::HashSet::new(),
             max_subscriptions: None,
@@ -80,7 +80,7 @@ impl<T: Default> NostrConnectionState<T> {
             subscription_coordinator: None,
             db_sender: None,
             connection_token: CancellationToken::new(),
-            subdomain: Scope::Default,
+            subdomain: Arc::new(Scope::Default),
             custom: Arc::new(parking_lot::RwLock::new(T::default())),
             active_subscriptions: std::collections::HashSet::new(),
             max_subscriptions: None,
@@ -101,7 +101,7 @@ impl<T> NostrConnectionState<T> {
             subscription_coordinator: None,
             db_sender: None,
             connection_token: CancellationToken::new(),
-            subdomain: Scope::Default,
+            subdomain: Arc::new(Scope::Default),
             custom: Arc::new(parking_lot::RwLock::new(custom)),
             active_subscriptions: std::collections::HashSet::new(),
             max_subscriptions: None,
@@ -222,7 +222,7 @@ impl<T> NostrConnectionState<T> {
 
     /// Convert the Scope to an Option<&str> for backward compatibility
     pub fn subdomain_str(&self) -> Option<&str> {
-        match &self.subdomain {
+        match self.subdomain.as_ref() {
             Scope::Named { name, .. } => Some(name),
             Scope::Default => None,
         }
@@ -230,14 +230,14 @@ impl<T> NostrConnectionState<T> {
 
     /// Get subdomain as owned string to avoid borrowing issues
     pub fn subdomain_string(&self) -> Option<String> {
-        match &self.subdomain {
+        match self.subdomain.as_ref() {
             Scope::Named { name, .. } => Some(name.clone()),
             Scope::Default => None,
         }
     }
 
     /// Get the subdomain scope
-    pub fn subdomain(&self) -> &Scope {
+    pub fn subdomain(&self) -> &Arc<Scope> {
         &self.subdomain
     }
 
@@ -377,7 +377,7 @@ where
             .unwrap_or_else(|_| panic!("Failed to create NostrConnectionState"));
 
         state.connection_token = token;
-        state.subdomain = subdomain_scope;
+        state.subdomain = Arc::new(subdomain_scope);
         state.db_sender = Some(self.db_sender.clone());
         state.max_subscriptions = self.max_subscriptions;
 

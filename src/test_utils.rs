@@ -84,7 +84,7 @@ pub async fn create_test_state_with_subscription_service(
         "test_connection".to_string(),
         sender,
         pubkey,
-        nostr_lmdb::Scope::Default,
+        Arc::new(nostr_lmdb::Scope::Default),
         cancellation_token,
         None,
         500, // max_limit
@@ -126,7 +126,7 @@ pub async fn create_test_state_with_subscription_service_and_sender(
         "test_connection".to_string(),
         sender,
         pubkey,
-        nostr_lmdb::Scope::Default,
+        Arc::new(nostr_lmdb::Scope::Default),
         cancellation_token,
         None,
         500, // max_limit

@@ -8,6 +8,7 @@ use crate::database::RelayDatabase;
 use crate::error::Error;
 use crate::event_processor::{EventContext, EventProcessor};
 use crate::state::NostrConnectionState;
+use crate::subscription_coordinator::StoreCommand;
 use crate::subscription_registry::SubscriptionRegistry;
 use async_trait::async_trait;
 use nostr_sdk::prelude::*;
@@ -87,7 +88,7 @@ where
             let connection_state = state.read();
             (
                 connection_state.authed_pubkey,
-                connection_state.subdomain().clone(), // Cheap clone with Arc<str>
+                Arc::clone(connection_state.subdomain()), // Clone the Arc pointer
                 connection_state.custom.clone(),
             )
         };
@@ -98,23 +99,53 @@ where
             relay_pubkey: &self.relay_pubkey,
         };
 
-        let commands = self
+        let mut commands = self
             .processor
             .handle_event(event, custom_state, context)
             .await?;
 
         let subscription_coordinator = {
             let state_guard = state.read();
-            state_guard.subscription_coordinator().cloned()
+            state_guard
+                .subscription_coordinator()
+                .ok_or_else(|| Error::internal("No subscription coordinator available"))?
+                .clone()
         };
 
-        if let Some(coordinator) = subscription_coordinator {
-            for command in commands {
-                coordinator
-                    .save_and_broadcast(command, message_sender.clone())
-                    .await
-                    .map_err(|e| Error::database(e.to_string()))?;
-            }
+        // TODO: Refactor to attach message_sender early in the middleware chain.
+        // Instead of passing a raw Event to handle_event, we should pass an InboundEvent that already
+        // carries the message_sender for OK/error responses. This would:
+        // - Eliminate the need to search through commands to find SaveSignedEvent
+        // - Make the primary event's response channel explicit from the start
+        // - Allow EventProcessor to return a cleaner result type without mixing concerns
+        // Architecture: The first middleware in the chain should wrap the incoming Event with its
+        // message_sender, creating an InboundEvent { event: Event, response_sender: MessageSender }.
+        // The EventProcessor would then return something like:
+        // enum EventResult {
+        //     Accept { derived_events: Vec<UnsignedEvent> },
+        //     Reject { reason: String }
+        // }
+        // The OK response would be handled automatically based on the InboundEvent's sender.
+        // Extract the SaveSignedEvent command if it exists (there should be only one)
+        let event_command_idx = commands
+            .iter()
+            .position(|cmd| matches!(cmd, StoreCommand::SaveSignedEvent(_, _, _)));
+
+        // If we found a SaveSignedEvent command, remove it and process it with message_sender
+        if let Some(idx) = event_command_idx {
+            let event_command = commands.swap_remove(idx);
+            subscription_coordinator
+                .save_and_broadcast(event_command, message_sender)
+                .await
+                .map_err(|e| Error::database(e.to_string()))?;
+        }
+
+        // Process all remaining commands without message_sender
+        for command in commands {
+            subscription_coordinator
+                .save_and_broadcast(command, None)
+                .await
+                .map_err(|e| Error::database(e.to_string()))?;
         }
 
         // Database layer will send OK after persistence
@@ -153,7 +184,7 @@ where
         // Extract necessary state with read lock
         let (subdomain, authed_pubkey, custom_state) = {
             let connection_state = state.read();
-            let subdomain = connection_state.subdomain().clone();
+            let subdomain = Arc::clone(connection_state.subdomain());
             let authed_pubkey = connection_state.authed_pubkey;
             let custom_state = connection_state.custom.clone();
             (subdomain, authed_pubkey, custom_state)
@@ -372,7 +403,7 @@ where
         if let RelayMessage::Event { event, .. } = &message {
             let should_filter = {
                 let state = ctx.state.read();
-                let subdomain = state.subdomain().clone();
+                let subdomain = Arc::clone(state.subdomain());
                 let authed_pubkey = state.authed_pubkey;
                 let context = EventContext {
                     authed_pubkey: authed_pubkey.as_ref(),

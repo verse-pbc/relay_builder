@@ -66,18 +66,18 @@ impl DatabaseSender {
     pub async fn send_with_sender(
         &self,
         mut command: StoreCommand,
-        message_sender: Option<websocket_builder::MessageSender<RelayMessage<'static>>>,
+        message_sender: Option<ResponseHandler>,
     ) -> Result<(), Error> {
         // Set the response handler in the command
         match &mut command {
             StoreCommand::SaveUnsignedEvent(_, _, ref mut handler) => {
-                *handler = message_sender.map(ResponseHandler::MessageSender);
+                *handler = message_sender;
             }
             StoreCommand::SaveSignedEvent(_, _, ref mut handler) => {
-                *handler = message_sender.map(ResponseHandler::MessageSender);
+                *handler = message_sender;
             }
             StoreCommand::DeleteEvents(_, _, ref mut handler) => {
-                *handler = message_sender.map(ResponseHandler::MessageSender);
+                *handler = message_sender;
             }
         }
 

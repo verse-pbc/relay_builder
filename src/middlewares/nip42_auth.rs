@@ -286,7 +286,7 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for Nip42Mid
                         // Validate the relay URL against the current connection
                         if !self.validate_relay_url(client_relay_url, &connection_subdomain) {
                             let conn_id_err = ctx.connection_id.clone();
-                            let subdomain_msg = match &connection_subdomain {
+                            let subdomain_msg = match connection_subdomain.as_ref() {
                                 Scope::Named { name, .. } => format!(" with subdomain '{name}'"),
                                 Scope::Default => String::new(),
                             };
@@ -626,10 +626,10 @@ mod tests {
         let mut state = create_test_state(None);
         let challenge = "test_challenge".to_string();
         state.challenge = Some(challenge.clone());
-        state.subdomain = Scope::named("test").unwrap(); // Connection is for test.example.com
+        state.subdomain = Arc::new(Scope::named("test").unwrap()); // Connection is for test.example.com
 
         // Debug connection state before creating context
-        let subdomain_str = match &state.subdomain {
+        let subdomain_str = match state.subdomain.as_ref() {
             Scope::Named { name, .. } => name.clone(),
             Scope::Default => "Default".to_string(),
         };
@@ -683,7 +683,7 @@ mod tests {
         let mut state = create_test_state(None);
         let challenge = "test_challenge".to_string();
         state.challenge = Some(challenge.clone());
-        state.subdomain = Scope::named("test").unwrap(); // Connection is for test.example.com
+        state.subdomain = Arc::new(Scope::named("test").unwrap()); // Connection is for test.example.com
 
         println!("Wrong subdomain test - connection subdomain: test, auth_url: {auth_url}");
 
@@ -717,7 +717,7 @@ mod tests {
         let mut state = create_test_state(None);
         let challenge = "test_challenge".to_string();
         state.challenge = Some(challenge.clone());
-        state.subdomain = Scope::named("test").unwrap(); // Connection is for test.example.com
+        state.subdomain = Arc::new(Scope::named("test").unwrap()); // Connection is for test.example.com
 
         println!("Different base domain test - connection subdomain: test, auth_url: {auth_url}");
 

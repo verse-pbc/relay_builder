@@ -211,7 +211,7 @@ impl SubscriptionCoordinator {
         connection_id: String,
         outgoing_sender: MessageSender<RelayMessage<'static>>,
         auth_pubkey: Option<PublicKey>,
-        subdomain: Scope,
+        subdomain: Arc<Scope>,
         cancellation_token: CancellationToken,
         metrics_handler: Option<Arc<dyn SubscriptionMetricsHandler>>,
         max_limit: usize,
@@ -291,7 +291,7 @@ impl SubscriptionCoordinator {
 
         // For other events, send directly
         self.db_sender
-            .send_with_sender(command, message_sender)
+            .send_with_sender(command, message_sender.map(ResponseHandler::MessageSender))
             .await
     }
 
@@ -525,7 +525,7 @@ mod tests {
             "test_conn".to_string(),
             MessageSender::new(tx, 0),
             None,
-            Scope::Default,
+            Arc::new(Scope::Default),
             cancellation_token.clone(),
             None,
             1000, // max_limit
@@ -629,7 +629,7 @@ mod tests {
             "test_conn".to_string(),
             MessageSender::new(tx, 0),
             None,
-            Scope::Default,
+            Arc::new(Scope::Default),
             cancellation_token.clone(),
             None,
             1000,
@@ -715,7 +715,7 @@ mod tests {
             "test_conn".to_string(),
             MessageSender::new(tx, 0),
             None,
-            Scope::Default,
+            Arc::new(Scope::Default),
             cancellation_token.clone(),
             None,
             1000,
@@ -818,7 +818,7 @@ mod tests {
             "test_conn".to_string(),
             MessageSender::new(tx, 0),
             None,
-            Scope::Default,
+            Arc::new(Scope::Default),
             cancellation_token.clone(),
             None,
             1000,
@@ -924,7 +924,7 @@ mod tests {
             "test_conn".to_string(),
             MessageSender::new(tx, 0),
             None,
-            Scope::Default,
+            Arc::new(Scope::Default),
             cancellation_token.clone(),
             None,
             1000,
@@ -1040,7 +1040,7 @@ mod tests {
             "test_conn".to_string(),
             MessageSender::new(tx, 0),
             None,
-            Scope::Default,
+            Arc::new(Scope::Default),
             cancellation_token.clone(),
             None,
             max_limit,
@@ -1122,7 +1122,7 @@ mod tests {
             "test_conn".to_string(),
             MessageSender::new(tx, 0),
             None,
-            Scope::Default,
+            Arc::new(Scope::Default),
             cancellation_token.clone(),
             None,
             1000,

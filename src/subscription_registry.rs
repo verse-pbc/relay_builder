@@ -47,8 +47,8 @@ pub struct ConnectionSubscriptions {
     sender: MessageSender<RelayMessage<'static>>,
     /// Authenticated public key if any
     auth_pubkey: Option<PublicKey>,
-    /// Subdomain/scope for this connection
-    subdomain: Scope,
+    /// Subdomain/scope for this connection (Arc for cheap clones)
+    subdomain: Arc<Scope>,
 }
 
 /// Handle for a connection that ensures cleanup on drop
@@ -99,7 +99,7 @@ impl SubscriptionRegistry {
         connection_id: String,
         sender: MessageSender<RelayMessage<'static>>,
         auth_pubkey: Option<PublicKey>,
-        subdomain: Scope,
+        subdomain: Arc<Scope>,
     ) -> ConnectionHandle {
         let connection_data = Arc::new(ConnectionSubscriptions {
             subscriptions: RwLock::new(HashMap::new()),
@@ -169,10 +169,13 @@ impl SubscriptionRegistry {
     }
 
     /// Get connection info for REQ processing
-    pub fn get_connection_info(&self, connection_id: &str) -> Option<(Option<PublicKey>, Scope)> {
+    pub fn get_connection_info(
+        &self,
+        connection_id: &str,
+    ) -> Option<(Option<PublicKey>, Arc<Scope>)> {
         self.connections
             .get(connection_id)
-            .map(|conn| (conn.auth_pubkey, conn.subdomain.clone()))
+            .map(|conn| (conn.auth_pubkey, Arc::clone(&conn.subdomain)))
     }
 
     /// Start the event distribution task
@@ -265,8 +268,12 @@ mod tests {
         let sender = MessageSender::new(tx, 0);
 
         {
-            let _handle =
-                registry.register_connection("conn1".to_string(), sender, None, Scope::Default);
+            let _handle = registry.register_connection(
+                "conn1".to_string(),
+                sender,
+                None,
+                Arc::new(Scope::Default),
+            );
 
             // Connection should exist
             assert!(registry.connections.contains_key("conn1"));
@@ -285,8 +292,12 @@ mod tests {
         // Register a connection
         let (tx, _rx) = flume::bounded::<(RelayMessage<'static>, usize)>(100);
         let sender = MessageSender::new(tx, 0);
-        let _handle =
-            registry.register_connection("conn1".to_string(), sender, None, Scope::Default);
+        let _handle = registry.register_connection(
+            "conn1".to_string(),
+            sender,
+            None,
+            Arc::new(Scope::Default),
+        );
 
         // Add subscription
         let sub_id = SubscriptionId::new("sub1");
