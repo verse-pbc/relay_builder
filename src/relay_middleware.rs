@@ -82,18 +82,16 @@ where
         state: Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
         message_sender: Option<websocket_builder::MessageSender<RelayMessage<'static>>>,
     ) -> Result<(), Error> {
-        let (subdomain, authed_pubkey, custom_state) = {
+        // Extract necessary state before async call
+        let (authed_pubkey, subdomain, custom_state) = {
             let connection_state = state.read();
-
-            // Extract necessary state before calling handle_event
-            let subdomain = connection_state.subdomain().clone();
-            let authed_pubkey = connection_state.authed_pubkey.as_ref().cloned();
-            let custom_state = connection_state.custom.clone();
-
-            (subdomain, authed_pubkey, custom_state)
+            (
+                connection_state.authed_pubkey,
+                connection_state.subdomain().clone(), // Cheap clone with Arc<str>
+                connection_state.custom.clone(),
+            )
         };
 
-        // Process with direct custom state access
         let context = EventContext {
             authed_pubkey: authed_pubkey.as_ref(),
             subdomain: &subdomain,
