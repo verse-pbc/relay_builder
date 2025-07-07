@@ -41,10 +41,7 @@ pub use message_converter::NostrMessageConverter;
 pub use relay_builder::HtmlOption;
 pub use relay_builder::{DefaultRelayWebSocketHandler, RelayBuilder, RelayWebSocketHandler};
 pub use relay_middleware::RelayMiddleware;
-pub use state::{
-    DefaultNostrConnectionFactory, DefaultNostrConnectionState, NostrConnectionFactory,
-    NostrConnectionState,
-};
+pub use state::{DefaultNostrConnectionState, NostrConnectionState};
 pub use subscription_coordinator::{StoreCommand, SubscriptionCoordinator};
 pub use subscription_registry::{EventDistributor, SubscriptionRegistry};
 
@@ -53,3 +50,8 @@ pub use middlewares::{
     AuthConfig, ClientMessageId, ErrorHandlingMiddleware, EventVerifierMiddleware,
     LoggerMiddleware, Nip09Middleware, Nip40ExpirationMiddleware, Nip42Middleware, Nip70Middleware,
 };
+
+// Re-export websocket_builder types to avoid version conflicts
+pub use websocket_builder::MessageSender;
+#[cfg(feature = "axum")]
+pub use websocket_builder::WebSocketUpgrade;

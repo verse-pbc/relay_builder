@@ -39,6 +39,9 @@ where
     database: Arc<RelayDatabase>,
     registry: Arc<SubscriptionRegistry>,
     max_limit: usize,
+    relay_url: RelayUrl,
+    db_sender: crate::database::DatabaseSender,
+    max_subscriptions: Option<usize>,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -54,12 +57,20 @@ where
     /// * `relay_pubkey` - The relay's public key
     /// * `database` - Database for storing events
     /// * `registry` - Subscription registry for event distribution
+    /// * `max_limit` - Maximum limit for subscriptions
+    /// * `relay_url` - The relay URL
+    /// * `db_sender` - Database sender for async operations
+    /// * `max_subscriptions` - Maximum subscriptions per connection
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         processor: P,
         relay_pubkey: PublicKey,
         database: Arc<RelayDatabase>,
         registry: Arc<SubscriptionRegistry>,
         max_limit: usize,
+        relay_url: RelayUrl,
+        db_sender: crate::database::DatabaseSender,
+        max_subscriptions: Option<usize>,
     ) -> Self {
         Self {
             processor: Arc::new(processor),
@@ -67,6 +78,9 @@ where
             database,
             registry,
             max_limit,
+            relay_url,
+            db_sender,
+            max_subscriptions,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -84,14 +98,19 @@ where
         message_sender: Option<websocket_builder::MessageSender<RelayMessage<'static>>>,
     ) -> Result<(), Error> {
         // Extract necessary state before async call
-        let (authed_pubkey, subdomain, custom_state) = {
+        let (authed_pubkey, subdomain) = {
             let connection_state = state.read();
             (
                 connection_state.authed_pubkey,
-                Arc::clone(connection_state.subdomain()), // Clone the Arc pointer
-                connection_state.custom.clone(),
+                Arc::clone(&connection_state.subdomain), // Clone the Arc pointer
             )
         };
+
+        // Create custom state wrapper
+        let custom_state_wrapper = Arc::new(parking_lot::RwLock::new({
+            let connection_state = state.read();
+            connection_state.custom_state.clone()
+        }));
 
         let context = EventContext {
             authed_pubkey: authed_pubkey.as_ref(),
@@ -101,7 +120,7 @@ where
 
         let mut commands = self
             .processor
-            .handle_event(event, custom_state, context)
+            .handle_event(event, custom_state_wrapper, context)
             .await?;
 
         let subscription_coordinator = {
@@ -166,16 +185,21 @@ where
             let mut connection_state = state.write();
 
             // Check if we can add this subscription
-            connection_state.can_add_subscription(&subscription_id_obj)?;
+            connection_state.try_add_subscription(subscription_id_obj.clone())?;
 
             let context = EventContext {
                 authed_pubkey: connection_state.authed_pubkey.as_ref(),
-                subdomain: connection_state.subdomain(),
+                subdomain: &connection_state.subdomain,
                 relay_pubkey: &self.relay_pubkey,
             };
 
+            // Create custom state wrapper
+            let custom_state_wrapper = Arc::new(parking_lot::RwLock::new(
+                connection_state.custom_state.clone(),
+            ));
+
             self.processor
-                .verify_filters(&filters, connection_state.custom.clone(), context)?;
+                .verify_filters(&filters, custom_state_wrapper, context)?;
 
             // Track the subscription
             connection_state.add_subscription(subscription_id_obj.clone());
@@ -184,9 +208,9 @@ where
         // Extract necessary state with read lock
         let (subdomain, authed_pubkey, custom_state) = {
             let connection_state = state.read();
-            let subdomain = Arc::clone(connection_state.subdomain());
+            let subdomain = Arc::clone(&connection_state.subdomain);
             let authed_pubkey = connection_state.authed_pubkey;
-            let custom_state = connection_state.custom.clone();
+            let custom_state = connection_state.custom_state.clone();
             (subdomain, authed_pubkey, custom_state)
         };
 
@@ -204,8 +228,11 @@ where
                     relay_pubkey: &relay_pubkey,
                 };
 
+                // Create custom state wrapper for each call
+                let custom_state_wrapper = Arc::new(parking_lot::RwLock::new(custom_state.clone()));
+
                 processor
-                    .can_see_event(event, custom_state.clone(), context)
+                    .can_see_event(event, custom_state_wrapper, context)
                     .unwrap_or(false)
             };
 
@@ -253,17 +280,27 @@ where
     ) -> anyhow::Result<()> {
         debug!("RelayMiddleware: Setting up connection");
 
+        // Initialize state fields that were previously set by the factory
+        {
+            let mut state = ctx.state.write();
+            state.relay_url = self.relay_url.clone();
+            state.db_sender = Some(self.db_sender.clone());
+            state.registry = Some(self.registry.clone());
+            state.max_subscriptions = self.max_subscriptions;
+            // TODO: subdomain resolution needs to be handled differently without factory pattern
+        }
+
         // Initialize the subscription service for this connection
         if let Some(ref sender) = ctx.sender {
             {
                 let mut state = ctx.state.write();
                 state
                     .setup_connection(
-                        ctx.connection_id.clone(),
                         self.database.clone(),
                         self.registry.clone(),
+                        ctx.connection_id.clone(),
                         sender.clone(),
-                        self.max_limit,
+                        Some(self.max_limit),
                     )
                     .map_err(|e| anyhow::anyhow!("Failed to setup connection: {}", e))?;
             }
@@ -403,17 +440,21 @@ where
         if let RelayMessage::Event { event, .. } = &message {
             let should_filter = {
                 let state = ctx.state.read();
-                let subdomain = Arc::clone(state.subdomain());
+                let subdomain = Arc::clone(&state.subdomain);
                 let authed_pubkey = state.authed_pubkey;
+                let custom_state = state.custom_state.clone();
                 let context = EventContext {
                     authed_pubkey: authed_pubkey.as_ref(),
                     subdomain: &subdomain,
                     relay_pubkey: &self.relay_pubkey,
                 };
 
+                // Create custom state wrapper
+                let custom_state_wrapper = Arc::new(parking_lot::RwLock::new(custom_state));
+
                 !self
                     .processor
-                    .can_see_event(event, state.custom.clone(), context)?
+                    .can_see_event(event, custom_state_wrapper, context)?
             };
 
             if should_filter {

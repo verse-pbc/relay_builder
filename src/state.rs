@@ -1,6 +1,5 @@
 //! Connection state management
 
-use crate::config::ScopeConfig;
 use crate::database::{DatabaseSender, RelayDatabase};
 use crate::error::Error;
 use crate::subscription_coordinator::StoreCommand;
@@ -11,16 +10,10 @@ use nostr_lmdb::Scope;
 use nostr_sdk::prelude::*;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, warn};
-use websocket_builder::{MessageSender, StateFactory};
+use tracing::{debug, error};
+use websocket_builder::MessageSender;
 
 const DEFAULT_RELAY_URL: &str = "wss://default.relay";
-
-tokio::task_local! {
-    /// Task-local storage for the current request host.
-    /// This is set by the HTTP handler before processing WebSocket connections.
-    pub static CURRENT_REQUEST_HOST: Option<String>;
-}
 
 /// Type alias for the default NostrConnectionState without custom state
 pub type DefaultNostrConnectionState = NostrConnectionState<()>;
@@ -36,63 +29,70 @@ pub struct NostrConnectionState<T = ()> {
     pub authed_pubkey: Option<PublicKey>,
     /// Subscription coordinator for this connection (private - use methods below)
     subscription_coordinator: Option<SubscriptionCoordinator>,
-    /// Database sender for write operations
+    /// Database sender for saving events (set by the connection factory)
     pub(crate) db_sender: Option<DatabaseSender>,
-    /// Cancellation token for this connection
-    pub connection_token: CancellationToken,
-    /// Subdomain/scope for this connection (Arc for cheap clones)
-    pub subdomain: Arc<Scope>,
-    /// Custom state for application-specific data
-    pub custom: Arc<parking_lot::RwLock<T>>,
-    /// Active subscriptions for this connection
-    pub(crate) active_subscriptions: std::collections::HashSet<SubscriptionId>,
-    /// Maximum number of subscriptions allowed (None means unlimited)
+    /// Maximum number of subscriptions allowed (set by the connection factory)
     pub(crate) max_subscriptions: Option<usize>,
+    /// Track active subscriptions
+    active_subscriptions: std::collections::HashSet<SubscriptionId>,
+    /// Connection cancellation token
+    pub connection_token: CancellationToken,
+    /// Registry for looking up subscriptions (used to set up subscription coordinator)
+    pub(crate) registry: Option<Arc<SubscriptionRegistry>>,
+    /// The subdomain scope for this connection
+    pub subdomain: Arc<Scope>,
+    /// Custom state that can be managed by middleware
+    pub custom_state: T,
 }
 
-impl<T: Default> Default for NostrConnectionState<T> {
+impl<T> Default for NostrConnectionState<T>
+where
+    T: Default,
+{
     fn default() -> Self {
         Self {
-            relay_url: RelayUrl::parse(DEFAULT_RELAY_URL).expect("Invalid default relay URL"),
+            relay_url: RelayUrl::parse(DEFAULT_RELAY_URL).expect("Default URL should be valid"),
             challenge: None,
             authed_pubkey: None,
             subscription_coordinator: None,
             db_sender: None,
-            connection_token: CancellationToken::new(),
-            subdomain: Arc::new(Scope::Default),
-            custom: Arc::new(parking_lot::RwLock::new(T::default())),
-            active_subscriptions: std::collections::HashSet::new(),
             max_subscriptions: None,
+            active_subscriptions: std::collections::HashSet::new(),
+            connection_token: CancellationToken::new(),
+            registry: None,
+            subdomain: Arc::new(Scope::Default),
+            custom_state: T::default(),
         }
     }
 }
 
-impl<T: Default> NostrConnectionState<T> {
-    /// Create a new connection state
-    pub fn new(relay_url: String) -> Result<Self, Error> {
-        let relay_url = RelayUrl::parse(&relay_url)
-            .map_err(|e| Error::internal(format!("Invalid relay URL: {e}")))?;
-
+impl<T> NostrConnectionState<T>
+where
+    T: Default,
+{
+    /// Create a new connection state with default custom state
+    pub fn new(relay_url: RelayUrl) -> Result<Self> {
         Ok(Self {
             relay_url,
             challenge: None,
             authed_pubkey: None,
             subscription_coordinator: None,
             db_sender: None,
-            connection_token: CancellationToken::new(),
-            subdomain: Arc::new(Scope::Default),
-            custom: Arc::new(parking_lot::RwLock::new(T::default())),
-            active_subscriptions: std::collections::HashSet::new(),
             max_subscriptions: None,
+            active_subscriptions: std::collections::HashSet::new(),
+            connection_token: CancellationToken::new(),
+            registry: None,
+            subdomain: Arc::new(Scope::Default),
+            custom_state: T::default(),
         })
     }
 }
 
 impl<T> NostrConnectionState<T> {
-    /// Create a new connection state with custom data
-    pub fn with_custom(relay_url: String, custom: T) -> Result<Self, Error> {
+    /// Create a new connection state with a custom state value
+    pub fn with_custom(relay_url: String, custom_state: T) -> Result<Self, Error> {
         let relay_url = RelayUrl::parse(&relay_url)
-            .map_err(|e| Error::internal(format!("Invalid relay URL: {e}")))?;
+            .map_err(|e| Error::internal(format!("Invalid URL: {e}")))?;
 
         Ok(Self {
             relay_url,
@@ -100,31 +100,37 @@ impl<T> NostrConnectionState<T> {
             authed_pubkey: None,
             subscription_coordinator: None,
             db_sender: None,
-            connection_token: CancellationToken::new(),
-            subdomain: Arc::new(Scope::Default),
-            custom: Arc::new(parking_lot::RwLock::new(custom)),
-            active_subscriptions: std::collections::HashSet::new(),
             max_subscriptions: None,
+            active_subscriptions: std::collections::HashSet::new(),
+            connection_token: CancellationToken::new(),
+            registry: None,
+            subdomain: Arc::new(Scope::Default),
+            custom_state,
         })
     }
 
-    /// Check if the connection is authenticated
+    /// Set the authenticated public key
+    pub fn set_authenticated(&mut self, pubkey: PublicKey) {
+        self.authed_pubkey = Some(pubkey);
+        self.challenge = None; // Clear challenge after successful auth
+    }
+
+    /// Check if the user is authenticated
     pub fn is_authenticated(&self) -> bool {
         self.authed_pubkey.is_some()
     }
 
-    /// Set up the connection with a database and message sender
+    /// Setup the connection with database and registry
     pub fn setup_connection(
         &mut self,
-        connection_id: String,
         database: Arc<RelayDatabase>,
         registry: Arc<SubscriptionRegistry>,
+        connection_id: String,
         sender: MessageSender<RelayMessage<'static>>,
-        max_limit: usize,
+        max_limit: Option<usize>,
     ) -> Result<(), Error> {
-        debug!("Setting up connection");
+        debug!("Setting up connection for {}", connection_id);
 
-        // db_sender should already be set by the connection factory
         let db_sender = self
             .db_sender
             .as_ref()
@@ -143,7 +149,7 @@ impl<T> NostrConnectionState<T> {
             self.subdomain.clone(),
             self.connection_token.clone(),
             metrics_handler,
-            max_limit,
+            max_limit.unwrap_or(1000), // Default to 1000 if not specified
         );
         self.subscription_coordinator = Some(coordinator);
 
@@ -216,43 +222,47 @@ impl<T> NostrConnectionState<T> {
         if let Some(subscription_coordinator) = &self.subscription_coordinator {
             subscription_coordinator.cleanup();
         }
-
-        self.connection_token.cancel();
     }
 
-    /// Convert the Scope to an Option<&str> for backward compatibility
-    pub fn subdomain_str(&self) -> Option<&str> {
-        match self.subdomain.as_ref() {
-            Scope::Named { name, .. } => Some(name),
-            Scope::Default => None,
-        }
-    }
-
-    /// Get subdomain as owned string to avoid borrowing issues
-    pub fn subdomain_string(&self) -> Option<String> {
-        match self.subdomain.as_ref() {
-            Scope::Named { name, .. } => Some(name.clone()),
-            Scope::Default => None,
-        }
-    }
-
-    /// Get the subdomain scope
-    pub fn subdomain(&self) -> &Arc<Scope> {
-        &self.subdomain
-    }
-
-    /// Check if adding a subscription would exceed the limit
-    pub fn can_add_subscription(&self, subscription_id: &SubscriptionId) -> Result<(), Error> {
-        // If already exists, allow replacing
-        if self.active_subscriptions.contains(subscription_id) {
-            return Ok(());
-        }
-
-        // Check limit
+    /// Check if we can accept more subscriptions
+    pub fn can_accept_subscription(&self) -> bool {
         if let Some(max) = self.max_subscriptions {
-            if self.active_subscriptions.len() >= max {
-                return Err(Error::restricted(format!(
-                    "Maximum subscriptions limit reached: {max}"
+            self.active_subscriptions.len() < max
+        } else {
+            true
+        }
+    }
+
+    /// Get count of active subscriptions
+    pub fn subscription_count(&self) -> usize {
+        self.active_subscriptions.len()
+    }
+
+    /// Get remaining subscription capacity
+    pub fn remaining_subscription_capacity(&self) -> Option<usize> {
+        self.max_subscriptions
+            .map(|max| max.saturating_sub(self.active_subscriptions.len()))
+    }
+
+    /// Try to add a subscription, returns error if limit exceeded
+    pub fn try_add_subscription(&mut self, subscription_id: SubscriptionId) -> Result<(), Error> {
+        if !self.can_accept_subscription() {
+            let count = self.active_subscriptions.len();
+            let max = self.max_subscriptions.unwrap_or(0);
+            return Err(Error::internal(format!(
+                "Subscription limit exceeded: {count}/{max} active subscriptions"
+            )));
+        }
+
+        self.add_subscription(subscription_id.clone());
+
+        // Double-check we haven't exceeded the limit
+        if let Some(max) = self.max_subscriptions {
+            if self.active_subscriptions.len() > max {
+                self.remove_tracked_subscription(&subscription_id);
+                let count = self.active_subscriptions.len();
+                return Err(Error::internal(format!(
+                    "Subscription limit exceeded after adding: {count}/{max}"
                 )));
             }
         }
@@ -273,114 +283,5 @@ impl<T> NostrConnectionState<T> {
     /// Set the maximum number of subscriptions (mainly for testing)
     pub fn set_max_subscriptions(&mut self, max: Option<usize>) {
         self.max_subscriptions = max;
-    }
-}
-
-/// Factory for creating NostrConnectionState instances
-#[derive(Clone)]
-pub struct NostrConnectionFactory<T = ()> {
-    relay_url: RelayUrl,
-    #[allow(dead_code)]
-    database: Arc<RelayDatabase>,
-    db_sender: DatabaseSender,
-    registry: Arc<SubscriptionRegistry>,
-    scope_config: ScopeConfig,
-    state_factory: Option<Arc<dyn Fn() -> T + Send + Sync>>,
-    max_subscriptions: Option<usize>,
-}
-
-/// Type alias for the original non-generic factory
-pub type DefaultNostrConnectionFactory = NostrConnectionFactory<()>;
-
-impl<T> NostrConnectionFactory<T> {
-    /// Create a new connection factory with a state factory function
-    pub fn new_with_factory(
-        relay_url: String,
-        database: Arc<RelayDatabase>,
-        db_sender: DatabaseSender,
-        registry: Arc<SubscriptionRegistry>,
-        scope_config: ScopeConfig,
-        state_factory: Arc<dyn Fn() -> T + Send + Sync>,
-        max_subscriptions: Option<usize>,
-    ) -> Result<Self, Error> {
-        let relay_url = RelayUrl::parse(&relay_url)
-            .map_err(|e| Error::internal(format!("Invalid relay URL: {e}")))?;
-
-        Ok(Self {
-            relay_url,
-            database,
-            db_sender,
-            registry,
-            scope_config,
-            state_factory: Some(state_factory),
-            max_subscriptions,
-        })
-    }
-
-    /// Create a new connection factory that uses Default::default() for state
-    pub fn new(
-        relay_url: String,
-        database: Arc<RelayDatabase>,
-        db_sender: DatabaseSender,
-        registry: Arc<SubscriptionRegistry>,
-        scope_config: ScopeConfig,
-        max_subscriptions: Option<usize>,
-    ) -> Result<Self, Error>
-    where
-        T: Default + 'static,
-    {
-        let relay_url = RelayUrl::parse(&relay_url)
-            .map_err(|e| Error::internal(format!("Invalid relay URL: {e}")))?;
-
-        Ok(Self {
-            relay_url,
-            database,
-            db_sender,
-            registry,
-            scope_config,
-            state_factory: None,
-            max_subscriptions,
-        })
-    }
-
-    /// Get the subscription registry
-    pub fn registry(&self) -> Arc<SubscriptionRegistry> {
-        self.registry.clone()
-    }
-}
-
-impl<T: Send + Sync + 'static> StateFactory<NostrConnectionState<T>> for NostrConnectionFactory<T>
-where
-    T: Default,
-{
-    fn create_state(&self, token: CancellationToken) -> NostrConnectionState<T> {
-        // Try to get host information from task-local storage
-        let host_opt: Option<String> = CURRENT_REQUEST_HOST
-            .try_with(|current_host_opt_ref| current_host_opt_ref.clone())
-            .unwrap_or_else(|_| {
-                warn!(
-                    "CURRENT_REQUEST_HOST task_local not found when creating NostrConnectionState."
-                );
-                None
-            });
-
-        // Resolve scope based on configuration
-        let subdomain_scope = self.scope_config.resolve_scope(host_opt.as_deref());
-
-        let custom = if let Some(ref factory) = self.state_factory {
-            factory()
-        } else {
-            T::default()
-        };
-
-        let mut state = NostrConnectionState::with_custom(self.relay_url.to_string(), custom)
-            .unwrap_or_else(|_| panic!("Failed to create NostrConnectionState"));
-
-        state.connection_token = token;
-        state.subdomain = Arc::new(subdomain_scope);
-        state.db_sender = Some(self.db_sender.clone());
-        state.max_subscriptions = self.max_subscriptions;
-
-        state
     }
 }

@@ -101,8 +101,6 @@ async fn main() -> Result<()> {
     let handler = RelayBuilder::<UserSession>::new(config)
         // Enable custom state type
         .with_custom_state::<UserSession>()
-        // Factory function for creating initial state
-        .with_state_factory(UserSession::default)
         // Our processor that uses the custom state
         .with_event_processor(SessionTrackingProcessor)
         .with_relay_info(relay_info)

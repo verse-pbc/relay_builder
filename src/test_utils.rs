@@ -51,8 +51,9 @@ pub async fn create_test_event(keys: &Keys, kind: u16, tags: Vec<Tag>) -> nostr_
 }
 
 pub fn create_test_state(pubkey: Option<nostr_sdk::PublicKey>) -> NostrConnectionState {
-    let mut state = NostrConnectionState::new("ws://test.relay".to_string())
-        .expect("Failed to create test state");
+    let mut state =
+        NostrConnectionState::new(RelayUrl::parse("ws://test.relay").expect("Valid URL"))
+            .expect("Failed to create test state");
     state.authed_pubkey = pubkey;
     state.max_subscriptions = Some(100); // Set a reasonable test limit
     state
@@ -90,8 +91,9 @@ pub async fn create_test_state_with_subscription_service(
         500, // max_limit
     );
 
-    let mut state = NostrConnectionState::new("ws://test.relay".to_string())
-        .expect("Failed to create test state");
+    let mut state =
+        NostrConnectionState::new(RelayUrl::parse("ws://test.relay").expect("Valid URL"))
+            .expect("Failed to create test state");
     state.authed_pubkey = pubkey;
     state.db_sender = Some(db_sender);
     state.max_subscriptions = Some(100); // Set a reasonable test limit
@@ -132,8 +134,9 @@ pub async fn create_test_state_with_subscription_service_and_sender(
         500, // max_limit
     );
 
-    let mut state = NostrConnectionState::new("ws://test.relay".to_string())
-        .expect("Failed to create test state");
+    let mut state =
+        NostrConnectionState::new(RelayUrl::parse("ws://test.relay").expect("Valid URL"))
+            .expect("Failed to create test state");
     state.authed_pubkey = pubkey;
     state.db_sender = Some(db_sender);
     state.max_subscriptions = Some(100); // Set a reasonable test limit

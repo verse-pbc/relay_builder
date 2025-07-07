@@ -231,7 +231,8 @@ mod tests {
     use std::sync::Arc;
 
     fn create_test_state() -> NostrConnectionState<()> {
-        NostrConnectionState::new("wss://test.relay".to_string()).expect("Valid URL")
+        NostrConnectionState::new(RelayUrl::parse("wss://test.relay").expect("Valid URL"))
+            .expect("Valid state")
     }
 
     fn create_middleware_chain() -> Vec<

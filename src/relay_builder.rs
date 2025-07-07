@@ -1,15 +1,14 @@
 //! RelayBuilder for constructing Nostr relays with custom state
 
-use crate::config::{DatabaseConfig, RelayConfig, ScopeConfig};
+use crate::config::{DatabaseConfig, RelayConfig};
 use crate::crypto_helper::CryptoHelper;
-use crate::database::{DatabaseSender, RelayDatabase};
 use crate::error::Error;
 use crate::event_processor::{DefaultRelayProcessor, EventContext, EventProcessor};
 use crate::message_converter::NostrMessageConverter;
 use crate::metrics::SubscriptionMetricsHandler;
 use crate::middlewares::MetricsHandler;
 use crate::relay_middleware::RelayMiddleware;
-use crate::state::{NostrConnectionFactory, NostrConnectionState};
+use crate::state::NostrConnectionState;
 use async_trait::async_trait;
 use nostr_sdk::prelude::*;
 use std::marker::PhantomData;
@@ -94,7 +93,7 @@ impl std::fmt::Debug for HtmlOption {
 /// # let keys = Keys::generate();
 /// # let config = RelayConfig::new("ws://localhost:8080", "./data", keys);
 /// let builder = RelayBuilder::<MyState>::new(config)
-///     .with_state_factory(|| MyState::default())
+///     .with_custom_state::<MyState>()
 ///     .with_event_processor(MyProcessor);
 ///
 /// let handler = builder.build().await?;
@@ -113,8 +112,6 @@ pub struct RelayBuilder<T = ()> {
             >,
         >,
     >,
-    /// State factory for creating initial state for each connection
-    state_factory: Option<Arc<dyn Fn() -> T + Send + Sync>>,
     /// Optional cancellation token for graceful shutdown
     cancellation_token: Option<CancellationToken>,
     /// Optional connection counter for metrics
@@ -147,7 +144,6 @@ where
         Self {
             config,
             middlewares: Vec::new(),
-            state_factory: None,
             cancellation_token: None,
             connection_counter: None,
             metrics_handler: None,
@@ -161,16 +157,6 @@ where
             relay_info: None,
             _phantom: PhantomData,
         }
-    }
-
-    /// Set the state factory for creating initial custom state
-    #[must_use]
-    pub fn with_state_factory<F>(mut self, factory: F) -> Self
-    where
-        F: Fn() -> T + Send + Sync + 'static,
-    {
-        self.state_factory = Some(Arc::new(factory));
-        self
     }
 
     /// Set a cancellation token for graceful shutdown
@@ -258,7 +244,6 @@ where
         RelayBuilder {
             config: self.config,
             middlewares: Vec::new(),
-            state_factory: None,
             cancellation_token: self.cancellation_token,
             connection_counter: self.connection_counter,
             metrics_handler: None,
@@ -316,41 +301,6 @@ where
     {
         self.middlewares.push(Arc::new(middleware));
         self
-    }
-
-    /// Build the connection factory
-    fn build_connection_factory(
-        &mut self,
-        database: Arc<RelayDatabase>,
-        db_sender: DatabaseSender,
-        relay_url: String,
-        scope_config: ScopeConfig,
-        registry: Arc<crate::subscription_registry::SubscriptionRegistry>,
-        max_subscriptions: Option<usize>,
-    ) -> Result<NostrConnectionFactory<T>, Error>
-    where
-        T: Default,
-    {
-        if let Some(state_factory) = self.state_factory.take() {
-            NostrConnectionFactory::new_with_factory(
-                relay_url,
-                database,
-                db_sender,
-                registry,
-                scope_config,
-                state_factory as Arc<dyn Fn() -> T + Send + Sync>,
-                max_subscriptions,
-            )
-        } else {
-            NostrConnectionFactory::new(
-                relay_url,
-                database,
-                db_sender,
-                registry,
-                scope_config,
-                max_subscriptions,
-            )
-        }
     }
 
     // ===== New Clean API Methods =====
@@ -520,7 +470,7 @@ where
         let per_connection_channel_size = self.config.calculate_channel_size();
         let event_distribution_channel_size = self.config.calculate_event_channel_size();
         let relay_url = self.config.relay_url.clone();
-        let scope_config = self.config.scope_config.clone();
+        let _scope_config = self.config.scope_config.clone();
 
         // Create subscription registry and event channel first
         let subscription_registry =
@@ -566,19 +516,6 @@ where
         };
 
         let custom_middlewares = std::mem::take(&mut self.middlewares);
-        let max_subscriptions = if self.config.max_subscriptions > 0 {
-            Some(self.config.max_subscriptions)
-        } else {
-            None
-        };
-        let connection_factory = self.build_connection_factory(
-            database.clone(),
-            db_sender,
-            relay_url,
-            scope_config,
-            subscription_registry.clone(),
-            max_subscriptions,
-        )?;
 
         // Create a wrapper to use Arc<dyn EventProcessor<T>> with RelayMiddleware
         struct DynProcessor<T>(Arc<dyn EventProcessor<T>>);
@@ -622,15 +559,29 @@ where
             }
         }
 
+        let max_subscriptions = if self.config.max_subscriptions > 0 {
+            Some(self.config.max_subscriptions)
+        } else {
+            None
+        };
+
         let relay_middleware = RelayMiddleware::new(
             DynProcessor(self.event_processor.clone()),
             self.config.keys.public_key(),
             database,
             subscription_registry.clone(),
             self.config.max_limit,
+            RelayUrl::parse(&relay_url).expect("Valid relay URL"),
+            db_sender.clone(),
+            max_subscriptions,
         );
 
-        let mut builder = WebSocketBuilder::new(connection_factory, NostrMessageConverter);
+        let mut builder = WebSocketBuilder::<
+            NostrConnectionState<T>,
+            ClientMessage<'static>,
+            RelayMessage<'static>,
+            NostrMessageConverter,
+        >::new(NostrMessageConverter);
 
         builder = builder.with_channel_size(per_connection_channel_size);
 
@@ -702,7 +653,6 @@ pub type RelayWebSocketHandler<T> = websocket_builder::WebSocketHandler<
     ClientMessage<'static>,
     RelayMessage<'static>,
     NostrMessageConverter,
-    NostrConnectionFactory<T>,
 >;
 
 /// Type alias for the default relay handler (with unit state for backward compatibility)

@@ -7,6 +7,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use nostr_lmdb::Scope;
 use nostr_sdk::prelude::*;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::Duration;
 use tracing::{debug, error};
@@ -181,7 +182,7 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for Nip42Mid
                 let (expected_challenge, connection_subdomain) = {
                     let state_guard = ctx.state.read();
                     let challenge = state_guard.challenge.as_ref().cloned();
-                    let subdomain = state_guard.subdomain().clone();
+                    let subdomain = Arc::clone(&state_guard.subdomain);
                     (challenge, subdomain)
                 };
 
@@ -286,7 +287,7 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for Nip42Mid
                         // Validate the relay URL against the current connection
                         if !self.validate_relay_url(client_relay_url, &connection_subdomain) {
                             let conn_id_err = ctx.connection_id.clone();
-                            let subdomain_msg = match connection_subdomain.as_ref() {
+                            let subdomain_msg = match &*connection_subdomain {
                                 Scope::Named { name, .. } => format!(" with subdomain '{name}'"),
                                 Scope::Default => String::new(),
                             };

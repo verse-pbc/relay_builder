@@ -3,6 +3,7 @@
 //! This module provides pre-built handlers that can be used with various web frameworks.
 //! Currently supports Axum, with other frameworks planned.
 
+use crate::NostrConnectionState;
 use axum::{
     extract::ConnectInfo,
     http::HeaderMap,
@@ -354,14 +355,27 @@ where
 
                 info!("New WebSocket connection from {}", real_ip);
 
-                // Set the host in task-local storage for subdomain extraction
-                crate::state::CURRENT_REQUEST_HOST
-                    .scope(host, async move {
-                        // Use the unified API for WebSocket handling
-                        ws_handler
-                            .handle_upgrade(ws, real_ip, cancellation_token)
-                            .await
-                    })
+                // Create state with subdomain information
+                let mut state = NostrConnectionState::<T>::default();
+
+                // Set subdomain based on host header and scope config
+                if let Some(host_str) = &host {
+                    if let crate::config::ScopeConfig::Subdomain { base_domain_parts } =
+                        &handlers.scope_config
+                    {
+                        if let Some(subdomain_name) =
+                            crate::subdomain::extract_subdomain(host_str, *base_domain_parts)
+                        {
+                            if let Ok(scope) = nostr_lmdb::Scope::named(&subdomain_name) {
+                                state.subdomain = Arc::new(scope);
+                            }
+                        }
+                    }
+                }
+
+                // Use the unified API for WebSocket handling with pre-configured state
+                ws_handler
+                    .handle_upgrade(ws, real_ip, cancellation_token, state)
                     .await
             })
         }
@@ -433,13 +447,27 @@ where
 
                     info!("New WebSocket connection from {}", real_ip);
 
-                    return crate::state::CURRENT_REQUEST_HOST
-                        .scope(host, async move {
-                            // Use the unified API for WebSocket handling
-                            ws_handler
-                                .handle_upgrade(ws, real_ip, cancellation_token)
-                                .await
-                        })
+                    // Create state with subdomain information
+                    let mut state = NostrConnectionState::<T>::default();
+
+                    // Set subdomain based on host header and scope config
+                    if let Some(host_str) = &host {
+                        if let crate::config::ScopeConfig::Subdomain { base_domain_parts } =
+                            &handlers.scope_config
+                        {
+                            if let Some(subdomain_name) =
+                                crate::subdomain::extract_subdomain(host_str, *base_domain_parts)
+                            {
+                                if let Ok(scope) = nostr_lmdb::Scope::named(&subdomain_name) {
+                                    state.subdomain = Arc::new(scope);
+                                }
+                            }
+                        }
+                    }
+
+                    // Use the unified API for WebSocket handling with pre-configured state
+                    return ws_handler
+                        .handle_upgrade(ws, real_ip, cancellation_token, state)
                         .await;
                 }
 

@@ -5,6 +5,7 @@ use nostr_relay_builder::{
     Error, EventContext, EventProcessor, NostrConnectionState, StoreCommand,
 };
 use nostr_sdk::prelude::*;
+use nostr_sdk::RelayUrl;
 use std::sync::Arc;
 
 /// Basic public event processor implementation for testing
@@ -74,7 +75,7 @@ impl EventProcessor for AuthRequiredEventProcessor {
 #[tokio::test]
 async fn test_public_event_processor() {
     let processor = PublicEventProcessor;
-    let state = NostrConnectionState::<()>::new("ws://test".to_string()).unwrap();
+    let state = NostrConnectionState::<()>::new(RelayUrl::parse("ws://test").unwrap()).unwrap();
     let keys = Keys::generate();
     let unsigned_event = EventBuilder::text_note("test").build(keys.public_key());
     let event = keys.sign_event(unsigned_event).await.unwrap();
@@ -82,7 +83,7 @@ async fn test_public_event_processor() {
 
     let context = EventContext {
         authed_pubkey: state.authed_pubkey.as_ref(),
-        subdomain: state.subdomain(),
+        subdomain: &state.subdomain,
         relay_pubkey: &relay_pubkey,
     };
 
@@ -118,7 +119,7 @@ async fn test_public_event_processor() {
 #[tokio::test]
 async fn test_auth_required_event_processor() {
     let processor = AuthRequiredEventProcessor;
-    let mut state = NostrConnectionState::<()>::new("ws://test".to_string()).unwrap();
+    let mut state = NostrConnectionState::<()>::new(RelayUrl::parse("ws://test").unwrap()).unwrap();
     let keys = Keys::generate();
     let unsigned_event = EventBuilder::text_note("test").build(keys.public_key());
     let event = keys.sign_event(unsigned_event).await.unwrap();
@@ -127,7 +128,7 @@ async fn test_auth_required_event_processor() {
     // Test without authentication
     let context = EventContext {
         authed_pubkey: None,
-        subdomain: state.subdomain(),
+        subdomain: &state.subdomain,
         relay_pubkey: &relay_pubkey,
     };
 
@@ -157,7 +158,7 @@ async fn test_auth_required_event_processor() {
 
     let auth_context = EventContext {
         authed_pubkey: state.authed_pubkey.as_ref(),
-        subdomain: state.subdomain(),
+        subdomain: &state.subdomain,
         relay_pubkey: &relay_pubkey,
     };
 
@@ -232,13 +233,13 @@ async fn test_filtering_processor() {
     let processor = FilteringProcessor {
         blocked_keywords: vec!["spam".to_string(), "test123".to_string()],
     };
-    let state = NostrConnectionState::<()>::new("ws://test".to_string()).unwrap();
+    let state = NostrConnectionState::<()>::new(RelayUrl::parse("ws://test").unwrap()).unwrap();
     let keys = Keys::generate();
     let relay_pubkey = Keys::generate().public_key();
 
     let context = EventContext {
         authed_pubkey: state.authed_pubkey.as_ref(),
-        subdomain: state.subdomain(),
+        subdomain: &state.subdomain,
         relay_pubkey: &relay_pubkey,
     };
 

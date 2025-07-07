@@ -68,7 +68,7 @@ To use fastwebsockets, modify your `Cargo.toml`:
 
 ```toml
 [dependencies]
-websocket_builder = { version = "0.2.0-alpha.1", default-features = false, features = ["fastwebsockets"] }
+websocket_builder = { git = "https://github.com/verse-pbc/websocket_builder", default-features = false, features = ["fastwebsockets"] }
 nostr_relay_builder = { git = "https://github.com/verse-pbc/nostr_relay_builder", features = ["axum"] }
 ```
 

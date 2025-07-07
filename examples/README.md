@@ -18,7 +18,7 @@ All examples work with both WebSocket backends:
 
 To run examples with fastwebsockets, modify the `websocket_builder` dependency in `Cargo.toml`:
 ```toml
-websocket_builder = { path = "../websocket_builder", default-features = false, features = ["fastwebsockets"] }
+websocket_builder = { git = "https://github.com/verse-pbc/websocket_builder", default-features = false, features = ["fastwebsockets"] }
 ```
 
 ## Step 1: Minimal Relay
@@ -132,7 +132,7 @@ Maintain state for each connection.
 **Library Features:**
 - `EventProcessor<T>` - Generic over state type
 - `.with_custom_state::<T>()` - Change state type
-- `.with_state_factory()` - Initialize state
+- State initialized via `Default` trait
 - Mutable state in async contexts
 
 **Use cases:**
@@ -188,8 +188,7 @@ RelayBuilder::new(config)
     .bare()                              // Disable defaults
     
     // State
-    .with_custom_state::<T>()            // Custom state type
-    .with_state_factory(|| T::default()) // State initialization
+    .with_custom_state::<T>()            // Custom state type (uses T::default())
     
     // Features
     .with_auth(AuthConfig {...})         // NIP-42 authentication
