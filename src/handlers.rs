@@ -307,6 +307,83 @@ where
             .map(|counter| counter.load(Ordering::Relaxed))
     }
 
+    /// Common WebSocket upgrade handling logic
+    async fn handle_websocket_upgrade(
+        &self,
+        ws: WebSocketUpgrade,
+        addr: SocketAddr,
+        headers: &HeaderMap,
+    ) -> axum::response::Response {
+        let real_ip = get_real_ip(headers, addr);
+        let host = headers
+            .get("host")
+            .and_then(|h| h.to_str().ok())
+            .map(String::from);
+
+        // Extract subdomain for logging
+        let subdomain = host.as_ref().and_then(|h| match &self.scope_config {
+            crate::config::ScopeConfig::Subdomain { base_domain_parts } => {
+                crate::subdomain::extract_subdomain(h, *base_domain_parts)
+            }
+            _ => None,
+        });
+
+        let display_info = if let Some(sub) = &subdomain {
+            if !sub.is_empty() {
+                format!(" @{sub}")
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+
+        // Log the upgrade request with real IP and subdomain
+        debug!(
+            "WebSocket upgrade requested from {}{}",
+            real_ip, display_info
+        );
+
+        let ws_handler = self.ws_handler.clone();
+        let cancellation_token = self.cancellation_token.clone();
+        let connection_counter = self.connection_counter.clone();
+
+        // Create isolated span for this connection
+        let span = tracing::info_span!(
+            parent: None,
+            "websocket_connection",
+            ip = %real_ip,
+            subdomain = ?subdomain
+        );
+        let _guard = span.enter();
+
+        let _counter = ConnectionCounter::new(connection_counter);
+
+        info!("New WebSocket connection from {}", real_ip);
+
+        // Create state with subdomain information
+        let mut state = NostrConnectionState::<T>::default();
+
+        // Set subdomain based on host header and scope config
+        if let Some(host_str) = &host {
+            if let crate::config::ScopeConfig::Subdomain { base_domain_parts } = &self.scope_config
+            {
+                if let Some(subdomain_name) =
+                    crate::subdomain::extract_subdomain(host_str, *base_domain_parts)
+                {
+                    if let Ok(scope) = nostr_lmdb::Scope::named(&subdomain_name) {
+                        state.subdomain = Arc::new(scope);
+                    }
+                }
+            }
+        }
+
+        // Use the unified API for WebSocket handling with pre-configured state
+        ws_handler
+            .handle_upgrade(ws, real_ip, cancellation_token, state)
+            .await
+    }
+
     /// Creates an Axum-compatible WebSocket-only handler function
     pub fn axum_ws_handler(
         self: Arc<Self>,
@@ -323,61 +400,7 @@ where
               headers: HeaderMap| {
             let handlers = self.clone();
 
-            Box::pin(async move {
-                let real_ip = get_real_ip(&headers, addr);
-                let host = headers
-                    .get("host")
-                    .and_then(|h| h.to_str().ok())
-                    .map(String::from);
-
-                // Extract subdomain for logging
-                let subdomain = host.as_ref().and_then(|h| match &handlers.scope_config {
-                    crate::config::ScopeConfig::Subdomain { base_domain_parts } => {
-                        crate::subdomain::extract_subdomain(h, *base_domain_parts)
-                    }
-                    _ => None,
-                });
-
-                let ws_handler = handlers.ws_handler.clone();
-                let cancellation_token = handlers.cancellation_token.clone();
-                let connection_counter = handlers.connection_counter.clone();
-
-                // Create isolated span for this connection
-                let span = tracing::info_span!(
-                    parent: None,
-                    "websocket_connection",
-                    ip = %real_ip,
-                    subdomain = ?subdomain
-                );
-                let _guard = span.enter();
-
-                let _counter = ConnectionCounter::new(connection_counter);
-
-                info!("New WebSocket connection from {}", real_ip);
-
-                // Create state with subdomain information
-                let mut state = NostrConnectionState::<T>::default();
-
-                // Set subdomain based on host header and scope config
-                if let Some(host_str) = &host {
-                    if let crate::config::ScopeConfig::Subdomain { base_domain_parts } =
-                        &handlers.scope_config
-                    {
-                        if let Some(subdomain_name) =
-                            crate::subdomain::extract_subdomain(host_str, *base_domain_parts)
-                        {
-                            if let Ok(scope) = nostr_lmdb::Scope::named(&subdomain_name) {
-                                state.subdomain = Arc::new(scope);
-                            }
-                        }
-                    }
-                }
-
-                // Use the unified API for WebSocket handling with pre-configured state
-                ws_handler
-                    .handle_upgrade(ws, real_ip, cancellation_token, state)
-                    .await
-            })
+            Box::pin(async move { handlers.handle_websocket_upgrade(ws, addr, &headers).await })
         }
     }
 
@@ -400,75 +423,7 @@ where
             Box::pin(async move {
                 // 1. WebSocket upgrade
                 if let Some(ws) = ws {
-                    let real_ip = get_real_ip(&headers, addr);
-                    let host = headers
-                        .get("host")
-                        .and_then(|h| h.to_str().ok())
-                        .map(String::from);
-
-                    // Extract subdomain for logging
-                    let subdomain = host.as_ref().and_then(|h| match &handlers.scope_config {
-                        crate::config::ScopeConfig::Subdomain { base_domain_parts } => {
-                            crate::subdomain::extract_subdomain(h, *base_domain_parts)
-                        }
-                        _ => None,
-                    });
-
-                    let display_info = if let Some(sub) = &subdomain {
-                        if !sub.is_empty() {
-                            format!(" @{sub}")
-                        } else {
-                            String::new()
-                        }
-                    } else {
-                        String::new()
-                    };
-
-                    // Log the upgrade request with real IP and subdomain
-                    debug!(
-                        "WebSocket upgrade requested from {}{} at root path",
-                        real_ip, display_info
-                    );
-
-                    let ws_handler = handlers.ws_handler.clone();
-                    let cancellation_token = handlers.cancellation_token.clone();
-                    let connection_counter = handlers.connection_counter.clone();
-
-                    // Create isolated span for this connection
-                    let span = tracing::info_span!(
-                        parent: None,
-                        "websocket_connection",
-                        ip = %real_ip,
-                        subdomain = ?subdomain
-                    );
-                    let _guard = span.enter();
-
-                    let _counter = ConnectionCounter::new(connection_counter);
-
-                    info!("New WebSocket connection from {}", real_ip);
-
-                    // Create state with subdomain information
-                    let mut state = NostrConnectionState::<T>::default();
-
-                    // Set subdomain based on host header and scope config
-                    if let Some(host_str) = &host {
-                        if let crate::config::ScopeConfig::Subdomain { base_domain_parts } =
-                            &handlers.scope_config
-                        {
-                            if let Some(subdomain_name) =
-                                crate::subdomain::extract_subdomain(host_str, *base_domain_parts)
-                            {
-                                if let Ok(scope) = nostr_lmdb::Scope::named(&subdomain_name) {
-                                    state.subdomain = Arc::new(scope);
-                                }
-                            }
-                        }
-                    }
-
-                    // Use the unified API for WebSocket handling with pre-configured state
-                    return ws_handler
-                        .handle_upgrade(ws, real_ip, cancellation_token, state)
-                        .await;
+                    return handlers.handle_websocket_upgrade(ws, addr, &headers).await;
                 }
 
                 // 2. NIP-11 JSON

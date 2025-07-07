@@ -66,42 +66,10 @@ pub async fn create_test_state_with_subscription_service(
     NostrConnectionState,
     flume::Receiver<(RelayMessage<'static>, usize)>,
 ) {
-    let (tx, rx) = flume::bounded(10);
-    let sender = MessageSender::new(tx, 0);
-
     // Create a db_sender for testing
     let (_tmp, _db, db_sender, _keys) = setup_test_with_sender().await;
 
-    // Create subscription registry
-    let registry = Arc::new(SubscriptionRegistry::new(None));
-
-    // Create cancellation token
-    let cancellation_token = tokio_util::sync::CancellationToken::new();
-
-    let subscription_coordinator = SubscriptionCoordinator::new(
-        database,
-        db_sender.clone(),
-        registry,
-        "test_connection".to_string(),
-        sender,
-        pubkey,
-        Arc::new(nostr_lmdb::Scope::Default),
-        cancellation_token,
-        None,
-        500, // max_limit
-    );
-
-    let mut state =
-        NostrConnectionState::new(RelayUrl::parse("ws://test.relay").expect("Valid URL"))
-            .expect("Failed to create test state");
-    state.authed_pubkey = pubkey;
-    state.db_sender = Some(db_sender);
-    state.max_subscriptions = Some(100); // Set a reasonable test limit
-
-    // Use the test method to add the subscription coordinator
-    state.set_subscription_coordinator(subscription_coordinator);
-
-    (state, rx)
+    create_test_state_with_subscription_service_and_sender(pubkey, database, db_sender).await
 }
 
 pub async fn create_test_state_with_subscription_service_and_sender(
