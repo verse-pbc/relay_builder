@@ -160,13 +160,13 @@ impl<T> NostrConnectionState<T> {
     }
 
     /// Save events to the database
-    pub async fn save_events(&mut self, events: Vec<StoreCommand>) -> Result<(), Error> {
+    pub async fn save_events(&mut self, store_commands: Vec<StoreCommand>) -> Result<(), Error> {
         let Some(coordinator) = &self.subscription_coordinator else {
             return Err(Error::internal("No subscription coordinator available"));
         };
 
-        for event in events {
-            if let Err(e) = coordinator.save_and_broadcast(event, None).await {
+        for store_command in store_commands {
+            if let Err(e) = coordinator.save_and_broadcast(store_command).await {
                 error!("Failed to save event: {}", e);
                 return Err(e);
             }
@@ -181,7 +181,7 @@ impl<T> NostrConnectionState<T> {
             return Err(Error::internal("No subscription coordinator available"));
         };
 
-        coordinator.save_and_broadcast(command, None).await
+        coordinator.save_and_broadcast(command).await
     }
 
     /// Remove a subscription

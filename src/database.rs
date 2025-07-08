@@ -1,5 +1,6 @@
 //! Database abstraction for Nostr relays
 
+use crate::crypto_helper::CryptoHelper;
 use crate::error::Error;
 use crate::subscription_coordinator::{ResponseHandler, StoreCommand};
 use flume;
@@ -20,13 +21,9 @@ use tracing::{debug, error, info, warn};
 /// Can be overridden by passing max_connections and max_subscriptions to calculate dynamically.
 const DEFAULT_WRITE_QUEUE_CAPACITY: usize = 100_000;
 
-/// A cloneable sender for database commands.
-///
-/// This wrapper provides a clean API for sending commands to the database.
-/// Only accepts SaveSignedEvent and DeleteEvents commands.
+/// This wrapper provides a clean API for sending commands to the database
 #[derive(Clone)]
 pub struct DatabaseSender {
-    /// Unified channel for signed saves and deletes (both are LMDB write operations)
     store_sender: flume::Sender<StoreCommand>,
 }
 
@@ -43,70 +40,34 @@ impl Drop for DatabaseSender {
 }
 
 impl DatabaseSender {
-    /// Create a new DatabaseSender with the store channel
+    /// Create a new DatabaseSender with the two internal channels
     fn new(store_sender: flume::Sender<StoreCommand>) -> Self {
         Self { store_sender }
     }
 
-    /// Send a store command to the database
-    pub async fn send(&self, command: StoreCommand) -> Result<(), Error> {
-        self.send_with_sender(command, None).await
-    }
-
     /// Send a store command with an optional message sender for responses (fire-and-forget)
-    pub async fn send_with_sender(
-        &self,
-        mut command: StoreCommand,
-        message_sender: Option<ResponseHandler>,
-    ) -> Result<(), Error> {
-        // Reject SaveUnsignedEvent - signing should happen before reaching the database
-        if matches!(command, StoreCommand::SaveUnsignedEvent(_, _, _)) {
-            return Err(Error::internal(
-                "SaveUnsignedEvent should not be sent directly to database. Events must be signed first.",
-            ));
+    pub async fn send(&self, command: StoreCommand) -> Result<(), Error> {
+        match &command {
+            StoreCommand::SaveUnsignedEvent(_, _, _) => Err(Error::internal(
+                "SaveUnsignedEvent should not be sent to database",
+            )),
+            StoreCommand::SaveSignedEvent(_, _, _) | StoreCommand::DeleteEvents(_, _, _) => self
+                .store_sender
+                .send_async(command)
+                .await
+                .map_err(|_| Error::internal("Store processor shut down")),
         }
-
-        // Set the response handler in the command
-        match &mut command {
-            StoreCommand::SaveSignedEvent(_, _, ref mut handler) => {
-                *handler = message_sender;
-            }
-            StoreCommand::DeleteEvents(_, _, ref mut handler) => {
-                *handler = message_sender;
-            }
-            StoreCommand::SaveUnsignedEvent(_, _, _) => unreachable!(),
-        }
-
-        // Send to store processor
-        self.store_sender
-            .send_async(command)
-            .await
-            .map_err(|_| Error::internal("Store processor shut down"))
     }
 
-    /// Send a store command synchronously with immediate acknowledgment
-    pub async fn send_sync(&self, mut command: StoreCommand) -> Result<(), Error> {
-        // Reject SaveUnsignedEvent - signing should happen before reaching the database
-        if matches!(command, StoreCommand::SaveUnsignedEvent(_, _, _)) {
-            return Err(Error::internal(
-                "SaveUnsignedEvent should not be sent directly to database. Events must be signed first.",
-            ));
-        }
-
+    /// Save a signed event to the database with immediate acknowledgment (for tests)
+    pub async fn save_signed_event_sync(&self, event: Event, scope: Scope) -> Result<(), Error> {
         let (tx, rx) = oneshot::channel();
 
-        // Set the response handler in the command
-        match &mut command {
-            StoreCommand::SaveSignedEvent(_, _, ref mut handler) => {
-                *handler = Some(ResponseHandler::Oneshot(tx));
-            }
-            StoreCommand::DeleteEvents(_, _, ref mut handler) => {
-                *handler = Some(ResponseHandler::Oneshot(tx));
-            }
-            StoreCommand::SaveUnsignedEvent(_, _, _) => unreachable!(),
-        }
-
-        // Send to store processor
+        let command = StoreCommand::SaveSignedEvent(
+            Box::new(event),
+            scope,
+            Some(ResponseHandler::Oneshot(tx)),
+        );
         self.store_sender
             .send_async(command)
             .await
@@ -119,12 +80,6 @@ impl DatabaseSender {
     /// Save a signed event to the database (fire-and-forget)
     pub async fn save_signed_event(&self, event: Event, scope: Scope) -> Result<(), Error> {
         self.send(StoreCommand::SaveSignedEvent(Box::new(event), scope, None))
-            .await
-    }
-
-    /// Save a signed event to the database with immediate acknowledgment (for tests)
-    pub async fn save_signed_event_sync(&self, event: Event, scope: Scope) -> Result<(), Error> {
-        self.send_sync(StoreCommand::SaveSignedEvent(Box::new(event), scope, None))
             .await
     }
 
@@ -342,15 +297,7 @@ impl RelayDatabase {
     fn send_delete_success_responses(commands: Vec<StoreCommand>) {
         for command in commands {
             if let StoreCommand::DeleteEvents(_, _, Some(handler)) = command {
-                match handler {
-                    ResponseHandler::MessageSender(mut sender) => {
-                        let msg = RelayMessage::notice("delete: success");
-                        sender.send_bypass(msg);
-                    }
-                    ResponseHandler::Oneshot(oneshot_sender) => {
-                        let _ = oneshot_sender.send(Ok(()));
-                    }
-                }
+                let _ = handler.send(Ok(()));
             }
         }
     }
@@ -359,15 +306,7 @@ impl RelayDatabase {
     fn send_delete_error_responses(commands: Vec<StoreCommand>, error_msg: String) {
         for command in commands {
             if let StoreCommand::DeleteEvents(_, _, Some(handler)) = command {
-                match handler {
-                    ResponseHandler::MessageSender(mut sender) => {
-                        let msg = RelayMessage::notice(error_msg.clone());
-                        sender.send_bypass(msg);
-                    }
-                    ResponseHandler::Oneshot(oneshot_sender) => {
-                        let _ = oneshot_sender.send(Err(Error::internal(error_msg.clone())));
-                    }
-                }
+                let _ = handler.send(Err(Error::internal(error_msg.clone())));
             }
         }
     }
@@ -379,9 +318,10 @@ impl RelayDatabase {
     /// * `keys` - Keys for signing unsigned events
     pub fn new(
         db_path_param: impl AsRef<std::path::Path>,
-        _keys: Arc<Keys>,
+        keys: Arc<Keys>,
     ) -> Result<(Self, DatabaseSender), Error> {
-        Self::with_config_and_tracker(db_path_param, None, None, None, None, None)
+        let crypto_helper = CryptoHelper::new(keys);
+        Self::with_config_and_tracker(db_path_param, crypto_helper, None, None, None, None, None)
     }
 
     /// Create a new relay database with a provided TaskTracker
@@ -392,10 +332,19 @@ impl RelayDatabase {
     /// * `task_tracker` - TaskTracker for managing background tasks
     pub fn with_task_tracker(
         db_path_param: impl AsRef<std::path::Path>,
-        _keys: Arc<Keys>,
+        keys: Arc<Keys>,
         task_tracker: TaskTracker,
     ) -> Result<(Self, DatabaseSender), Error> {
-        Self::with_config_and_tracker(db_path_param, None, None, Some(task_tracker), None, None)
+        let crypto_helper = CryptoHelper::new(keys);
+        Self::with_config_and_tracker(
+            db_path_param,
+            crypto_helper,
+            None,
+            None,
+            Some(task_tracker),
+            None,
+            None,
+        )
     }
 
     /// Create a new relay database with a provided TaskTracker and CancellationToken
@@ -407,12 +356,14 @@ impl RelayDatabase {
     /// * `cancellation_token` - CancellationToken for graceful shutdown
     pub fn with_task_tracker_and_token(
         db_path_param: impl AsRef<std::path::Path>,
-        _keys: Arc<Keys>,
+        keys: Arc<Keys>,
         task_tracker: TaskTracker,
         cancellation_token: CancellationToken,
     ) -> Result<(Self, DatabaseSender), Error> {
+        let crypto_helper = CryptoHelper::new(keys);
         Self::with_config_and_tracker(
             db_path_param,
+            crypto_helper,
             None,
             None,
             Some(task_tracker),
@@ -430,12 +381,14 @@ impl RelayDatabase {
     /// * `max_subscriptions` - Maximum subscriptions per connection (for broadcast sizing)
     pub fn with_config(
         db_path_param: impl AsRef<std::path::Path>,
-        _keys: Arc<Keys>,
+        keys: Arc<Keys>,
         max_connections: Option<usize>,
         max_subscriptions: Option<usize>,
     ) -> Result<(Self, DatabaseSender), Error> {
+        let crypto_helper = CryptoHelper::new(keys);
         Self::with_config_and_tracker(
             db_path_param,
+            crypto_helper,
             max_connections,
             max_subscriptions,
             None,
@@ -447,13 +400,15 @@ impl RelayDatabase {
     /// Create a new relay database with event sender
     pub fn with_event_sender(
         db_path_param: impl AsRef<std::path::Path>,
-        _keys: Arc<Keys>,
+        keys: Arc<Keys>,
         event_sender: flume::Sender<Arc<Event>>,
         task_tracker: Option<TaskTracker>,
         cancellation_token: Option<CancellationToken>,
     ) -> Result<(Self, DatabaseSender), Error> {
+        let crypto_helper = CryptoHelper::new(keys);
         Self::with_config_and_tracker(
             db_path_param,
+            crypto_helper,
             None,
             None,
             task_tracker,
@@ -465,6 +420,7 @@ impl RelayDatabase {
     /// Internal constructor that supports all options
     fn with_config_and_tracker(
         db_path_param: impl AsRef<std::path::Path>,
+        _crypto_helper: CryptoHelper,
         max_connections: Option<usize>,
         max_subscriptions: Option<usize>,
         task_tracker: Option<TaskTracker>,
@@ -525,15 +481,13 @@ impl RelayDatabase {
             }
         };
 
-        // Create one queue for store operations (signed events and deletes)
         let (store_sender, store_receiver) = flume::bounded::<StoreCommand>(queue_capacity);
 
         // Create task tracker for worker lifecycle management
         let task_tracker = task_tracker.unwrap_or_default();
 
-        info!("Starting database worker (1 total: unified store processor for signed events and deletes)");
+        info!("Starting database workers (2 total: unsigned processor + unified store processor)");
 
-        // Spawn store processor task
         Self::spawn_store_processor(
             store_receiver,
             Arc::clone(&lmdb),

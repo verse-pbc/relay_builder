@@ -73,7 +73,7 @@ impl Middleware for Nip40ExpirationMiddleware {
                     };
 
                     if let Some(coordinator) = coordinator {
-                        if let Err(e) = coordinator.save_and_broadcast(delete_command, None).await {
+                        if let Err(e) = coordinator.save_and_broadcast(delete_command).await {
                             error!(
                                 target: "nip40",
                                 "Failed to send delete command for expired event {}: {}", event_ref.id, e

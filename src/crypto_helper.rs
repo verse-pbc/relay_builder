@@ -1,7 +1,7 @@
 //! Cryptographic operations for events
 
 use crate::error::{Error, Result};
-use crate::subscription_coordinator::StoreCommand;
+use crate::subscription_coordinator::{ResponseHandler, StoreCommand};
 use nostr_sdk::prelude::*;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -193,7 +193,7 @@ impl CryptoHelper {
                 Ok(StoreCommand::SaveSignedEvent(
                     Box::new(signed_event),
                     scope,
-                    response_handler,
+                    response_handler.map(ResponseHandler::Oneshot),
                 ))
             }
             _ => {

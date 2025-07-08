@@ -19,24 +19,29 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 use websocket_builder::MessageSender;
 
-/// Response handler for database commands - supports both fire-and-forget and synchronous operations
 #[derive(Debug)]
 pub enum ResponseHandler {
-    /// WebSocket message sender for fire-and-forget client responses (high performance)
-    MessageSender(websocket_builder::MessageSender<RelayMessage<'static>>),
-    /// Oneshot channel for immediate synchronous acknowledgment (tests and critical operations)
     Oneshot(oneshot::Sender<Result<(), crate::error::Error>>),
+    MessageSender(MessageSender<RelayMessage<'static>>),
 }
 
 /// Commands that can be executed against the database
 #[derive(Debug)]
 pub enum StoreCommand {
     /// Save an unsigned event to the database
-    SaveUnsignedEvent(UnsignedEvent, Scope, Option<ResponseHandler>),
+    SaveUnsignedEvent(
+        UnsignedEvent,
+        Scope,
+        Option<oneshot::Sender<Result<(), crate::error::Error>>>,
+    ),
     /// Save a signed event to the database
     SaveSignedEvent(Box<Event>, Scope, Option<ResponseHandler>),
     /// Delete events matching the filter from the database
-    DeleteEvents(Filter, Scope, Option<ResponseHandler>),
+    DeleteEvents(
+        Filter,
+        Scope,
+        Option<oneshot::Sender<Result<(), crate::error::Error>>>,
+    ),
 }
 
 impl StoreCommand {
@@ -67,6 +72,21 @@ impl StoreCommand {
         match self.subdomain_scope() {
             Scope::Named { name, .. } => Some(name),
             Scope::Default => None,
+        }
+    }
+
+    pub fn set_message_sender(
+        &mut self,
+        message_sender: MessageSender<RelayMessage<'static>>,
+    ) -> Result<(), Error> {
+        match self {
+            StoreCommand::SaveSignedEvent(_, _, ref mut handler) => {
+                *handler = Some(ResponseHandler::MessageSender(message_sender.clone()));
+                Ok(())
+            }
+            _ => Err(Error::internal(
+                "set_message_sender called with non-SaveSignedEvent command",
+            )),
         }
     }
 }
@@ -292,13 +312,9 @@ impl SubscriptionCoordinator {
     }
 
     /// Save and broadcast a store command
-    pub async fn save_and_broadcast(
-        &self,
-        command: StoreCommand,
-        message_sender: Option<MessageSender<RelayMessage<'static>>>,
-    ) -> Result<(), Error> {
+    pub async fn save_and_broadcast(&self, command: StoreCommand) -> Result<(), Error> {
         match command {
-            StoreCommand::SaveUnsignedEvent(event, scope, _) => {
+            StoreCommand::SaveUnsignedEvent(event, scope, response_handler) => {
                 // For replaceable events, queue them for buffering
                 if event.kind.is_replaceable() || event.kind.is_addressable() {
                     self.replaceable_event_queue
@@ -315,18 +331,14 @@ impl SubscriptionCoordinator {
                 let signed_command = StoreCommand::SaveSignedEvent(
                     Box::new(signed_event),
                     scope,
-                    message_sender.map(ResponseHandler::MessageSender),
+                    response_handler.map(ResponseHandler::Oneshot),
                 );
 
                 // Send to database
                 self.db_sender.send(signed_command).await
             }
-            // Pass through already signed events and delete commands
-            _ => {
-                self.db_sender
-                    .send_with_sender(command, message_sender.map(ResponseHandler::MessageSender))
-                    .await
-            }
+            StoreCommand::SaveSignedEvent(_, _, _) => self.db_sender.send(command).await,
+            StoreCommand::DeleteEvents(_, _, _) => self.db_sender.send(command).await,
         }
     }
 

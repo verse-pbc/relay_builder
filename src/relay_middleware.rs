@@ -156,9 +156,10 @@ where
 
         // If we found a SaveSignedEvent command, remove it and process it with message_sender
         if let Some(idx) = event_command_idx {
-            let event_command = commands.swap_remove(idx);
+            let mut event_command = commands.swap_remove(idx);
+            event_command.set_message_sender(message_sender.unwrap())?;
             subscription_coordinator
-                .save_and_broadcast(event_command, message_sender)
+                .save_and_broadcast(event_command)
                 .await
                 .map_err(|e| Error::database(e.to_string()))?;
         }
@@ -166,7 +167,7 @@ where
         // Process all remaining commands without message_sender
         for command in commands {
             subscription_coordinator
-                .save_and_broadcast(command, None)
+                .save_and_broadcast(command)
                 .await
                 .map_err(|e| Error::database(e.to_string()))?;
         }
