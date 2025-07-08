@@ -29,9 +29,8 @@ async fn main() -> Result<()> {
 
     // Create database (required for NIP-09)
     let task_tracker = TaskTracker::new();
-    let keys_arc = Arc::new(keys.clone());
     let (database, _db_sender) =
-        RelayDatabase::with_task_tracker("./protocol_features.db", keys_arc, task_tracker.clone())?;
+        RelayDatabase::with_task_tracker("./protocol_features.db", task_tracker.clone())?;
     let database = Arc::new(database);
 
     let config = RelayConfig::new(relay_url, "./protocol_features.db", keys);

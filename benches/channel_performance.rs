@@ -34,9 +34,8 @@ fn bench_write_throughput(c: &mut Criterion) {
                 b.to_async(&rt).iter(|| async {
                     let tmp_dir = TempDir::new().unwrap();
                     let db_path = tmp_dir.path().join("bench.db");
-                    let keys = Arc::new(Keys::generate());
                     let (database, db_sender) =
-                        RelayDatabase::new(&db_path, keys).expect("Failed to create database");
+                        RelayDatabase::new(&db_path).expect("Failed to create database");
                     let _database = Arc::new(database);
 
                     // Send events
@@ -77,9 +76,8 @@ fn bench_backpressure(c: &mut Criterion) {
         b.to_async(&rt).iter(|| async {
             let tmp_dir = TempDir::new().unwrap();
             let db_path = tmp_dir.path().join("bench.db");
-            let keys = Arc::new(Keys::generate());
             let (database, db_sender) =
-                RelayDatabase::new(&db_path, keys).expect("Failed to create database");
+                RelayDatabase::new(&db_path).expect("Failed to create database");
             let _database = Arc::new(database);
 
             // Send many events rapidly to trigger backpressure

@@ -106,8 +106,7 @@ mod tests {
         let db_path = tmp_dir.path();
         let keys = Keys::generate();
         let _task_tracker = TaskTracker::new();
-        let keys_arc = Arc::new(keys.clone());
-        let (database, db_sender) = RelayDatabase::new(db_path, keys_arc).unwrap();
+        let (database, db_sender) = RelayDatabase::new(db_path).unwrap();
         (Arc::new(database), keys, tmp_dir, db_sender)
     }
 

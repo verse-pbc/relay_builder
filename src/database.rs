@@ -1,6 +1,5 @@
 //! Database abstraction for Nostr relays
 
-use crate::crypto_helper::CryptoHelper;
 use crate::error::Error;
 use crate::subscription_coordinator::{ResponseHandler, StoreCommand};
 use flume;
@@ -315,55 +314,37 @@ impl RelayDatabase {
     ///
     /// # Arguments
     /// * `db_path_param` - Path where the database should be stored
-    /// * `keys` - Keys for signing unsigned events
     pub fn new(
         db_path_param: impl AsRef<std::path::Path>,
-        keys: Arc<Keys>,
     ) -> Result<(Self, DatabaseSender), Error> {
-        let crypto_helper = CryptoHelper::new(keys);
-        Self::with_config_and_tracker(db_path_param, crypto_helper, None, None, None, None, None)
+        Self::with_config_and_tracker(db_path_param, None, None, None, None, None)
     }
 
     /// Create a new relay database with a provided TaskTracker
     ///
     /// # Arguments
     /// * `db_path_param` - Path where the database should be stored
-    /// * `keys` - Keys for signing unsigned events
     /// * `task_tracker` - TaskTracker for managing background tasks
     pub fn with_task_tracker(
         db_path_param: impl AsRef<std::path::Path>,
-        keys: Arc<Keys>,
         task_tracker: TaskTracker,
     ) -> Result<(Self, DatabaseSender), Error> {
-        let crypto_helper = CryptoHelper::new(keys);
-        Self::with_config_and_tracker(
-            db_path_param,
-            crypto_helper,
-            None,
-            None,
-            Some(task_tracker),
-            None,
-            None,
-        )
+        Self::with_config_and_tracker(db_path_param, None, None, Some(task_tracker), None, None)
     }
 
     /// Create a new relay database with a provided TaskTracker and CancellationToken
     ///
     /// # Arguments
     /// * `db_path_param` - Path where the database should be stored
-    /// * `keys` - Keys for signing unsigned events
     /// * `task_tracker` - TaskTracker for managing background tasks
     /// * `cancellation_token` - CancellationToken for graceful shutdown
     pub fn with_task_tracker_and_token(
         db_path_param: impl AsRef<std::path::Path>,
-        keys: Arc<Keys>,
         task_tracker: TaskTracker,
         cancellation_token: CancellationToken,
     ) -> Result<(Self, DatabaseSender), Error> {
-        let crypto_helper = CryptoHelper::new(keys);
         Self::with_config_and_tracker(
             db_path_param,
-            crypto_helper,
             None,
             None,
             Some(task_tracker),
@@ -376,19 +357,15 @@ impl RelayDatabase {
     ///
     /// # Arguments
     /// * `db_path_param` - Path where the database should be stored
-    /// * `keys` - Keys for signing unsigned events
     /// * `max_connections` - Maximum number of concurrent connections (for broadcast sizing)
     /// * `max_subscriptions` - Maximum subscriptions per connection (for broadcast sizing)
     pub fn with_config(
         db_path_param: impl AsRef<std::path::Path>,
-        keys: Arc<Keys>,
         max_connections: Option<usize>,
         max_subscriptions: Option<usize>,
     ) -> Result<(Self, DatabaseSender), Error> {
-        let crypto_helper = CryptoHelper::new(keys);
         Self::with_config_and_tracker(
             db_path_param,
-            crypto_helper,
             max_connections,
             max_subscriptions,
             None,
@@ -400,15 +377,12 @@ impl RelayDatabase {
     /// Create a new relay database with event sender
     pub fn with_event_sender(
         db_path_param: impl AsRef<std::path::Path>,
-        keys: Arc<Keys>,
         event_sender: flume::Sender<Arc<Event>>,
         task_tracker: Option<TaskTracker>,
         cancellation_token: Option<CancellationToken>,
     ) -> Result<(Self, DatabaseSender), Error> {
-        let crypto_helper = CryptoHelper::new(keys);
         Self::with_config_and_tracker(
             db_path_param,
-            crypto_helper,
             None,
             None,
             task_tracker,
@@ -420,7 +394,6 @@ impl RelayDatabase {
     /// Internal constructor that supports all options
     fn with_config_and_tracker(
         db_path_param: impl AsRef<std::path::Path>,
-        _crypto_helper: CryptoHelper,
         max_connections: Option<usize>,
         max_subscriptions: Option<usize>,
         task_tracker: Option<TaskTracker>,
@@ -687,11 +660,9 @@ mod tests {
 
         // Create and populate database
         {
-            let keys = Keys::generate();
             let task_tracker = TaskTracker::new();
-            let keys_arc = Arc::new(keys);
             let (_database, db_sender) =
-                RelayDatabase::with_task_tracker(&db_path, keys_arc.clone(), task_tracker.clone())
+                RelayDatabase::with_task_tracker(&db_path, task_tracker.clone())
                     .expect("Failed to create database");
 
             // Send events rapidly
@@ -716,10 +687,8 @@ mod tests {
 
         // Re-open database and verify all events were saved
         {
-            let keys = Keys::generate();
-            let keys_arc = Arc::new(keys);
             let (database, _db_sender) =
-                RelayDatabase::new(&db_path, keys_arc.clone()).expect("Failed to create database");
+                RelayDatabase::new(&db_path).expect("Failed to create database");
             let database = Arc::new(database);
 
             let count = database
@@ -749,10 +718,8 @@ mod tests {
 
         // Create and populate database
         {
-            let keys = Keys::generate();
-            let keys_arc = Arc::new(keys);
             let (database, db_sender) =
-                RelayDatabase::with_task_tracker(&db_path, keys_arc.clone(), task_tracker.clone())
+                RelayDatabase::with_task_tracker(&db_path, task_tracker.clone())
                     .expect("Failed to create database");
             let database = Arc::new(database);
 
@@ -779,10 +746,8 @@ mod tests {
 
         // Re-open and verify events were saved
         {
-            let keys = Keys::generate();
-            let keys_arc = Arc::new(keys);
             let (database, _db_sender) =
-                RelayDatabase::new(&db_path, keys_arc.clone()).expect("Failed to create database");
+                RelayDatabase::new(&db_path).expect("Failed to create database");
             let database = Arc::new(database);
 
             let count = database
@@ -811,11 +776,9 @@ mod tests {
 
         // Create and populate database with many events
         {
-            let keys = Keys::generate();
             let task_tracker = TaskTracker::new();
-            let keys_arc = Arc::new(keys);
             let (_database, db_sender) =
-                RelayDatabase::with_task_tracker(&db_path, keys_arc.clone(), task_tracker.clone())
+                RelayDatabase::with_task_tracker(&db_path, task_tracker.clone())
                     .expect("Failed to create database");
 
             // Send many events to ensure some are queued
@@ -843,10 +806,8 @@ mod tests {
 
         // Verify all events were saved
         {
-            let keys = Keys::generate();
-            let keys_arc = Arc::new(keys);
             let (database, _db_sender) =
-                RelayDatabase::new(&db_path, keys_arc.clone()).expect("Failed to create database");
+                RelayDatabase::new(&db_path).expect("Failed to create database");
             let database = Arc::new(database);
 
             let count = database
@@ -871,11 +832,9 @@ mod tests {
         let db_path = tmp_dir.path().join("test_batch_save.db");
 
         // Create database
-        let keys = Keys::generate();
         let task_tracker = TaskTracker::new();
-        let keys_arc = Arc::new(keys);
         let (database, db_sender) =
-            RelayDatabase::with_task_tracker(&db_path, keys_arc.clone(), task_tracker.clone())
+            RelayDatabase::with_task_tracker(&db_path, task_tracker.clone())
                 .expect("Failed to create database");
         let database = Arc::new(database);
 
@@ -956,12 +915,10 @@ mod tests {
         // Test that sync saves work in optimistic mode
         let tmp_dir = TempDir::new().unwrap();
         let db_path = tmp_dir.path().join("test_sync_save.db");
-        let keys = Keys::generate();
         let task_tracker = TaskTracker::new();
-        let keys_arc = Arc::new(keys);
         // Create in optimistic mode (default)
         let (database, db_sender) =
-            RelayDatabase::new(&db_path, keys_arc.clone()).expect("Failed to create database");
+            RelayDatabase::new(&db_path).expect("Failed to create database");
         let database = Arc::new(database);
 
         let event = generate_test_event(0).await;
