@@ -1,6 +1,7 @@
 //! Cryptographic operations for events
 
 use crate::error::{Error, Result};
+use crate::subscription_coordinator::StoreCommand;
 use nostr_sdk::prelude::*;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -179,6 +180,27 @@ impl CryptoHelper {
     /// Get the number of events verified
     pub fn verified_count(&self) -> usize {
         self.verified_count.load(Ordering::Relaxed)
+    }
+
+    /// Sign a store command (converts SaveUnsignedEvent to SaveSignedEvent)
+    pub async fn sign_store_command(&self, command: StoreCommand) -> Result<StoreCommand> {
+        match command {
+            StoreCommand::SaveUnsignedEvent(event, scope, response_handler) => {
+                // Sign the event
+                let signed_event = self.sign_event(event).await?;
+
+                // Return the signed command with all context preserved
+                Ok(StoreCommand::SaveSignedEvent(
+                    Box::new(signed_event),
+                    scope,
+                    response_handler,
+                ))
+            }
+            _ => {
+                error!("sign_store_command called with non-SaveUnsignedEvent command");
+                Err(Error::internal("Expected SaveUnsignedEvent command"))
+            }
+        }
     }
 }
 

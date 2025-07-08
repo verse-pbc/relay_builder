@@ -116,6 +116,7 @@ mod tests {
         let (database, keys, _tmp_dir, db_sender) = setup_test().await;
         let processor = TestEventProcessor::new(true);
         let registry = Arc::new(nostr_relay_builder::SubscriptionRegistry::new(None));
+        let crypto_helper = nostr_relay_builder::CryptoHelper::new(Arc::new(keys.clone()));
         let middleware = RelayMiddleware::new(
             processor,
             keys.public_key(),
@@ -124,6 +125,7 @@ mod tests {
             500,
             RelayUrl::parse("ws://test").unwrap(),
             db_sender,
+            crypto_helper,
             None,
         );
         assert!(middleware.processor().allow_all);

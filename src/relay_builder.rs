@@ -488,10 +488,10 @@ where
 
         // Only create crypto worker if we're creating a new database
         let database = self.config.database.take();
-        let (database, db_sender, crypto_sender) = match database {
-            Some(DatabaseConfig::Instance(db, db_sender, crypto_sender)) => {
+        let (database, db_sender, crypto_helper) = match database {
+            Some(DatabaseConfig::Instance(db, db_sender, crypto_helper)) => {
                 // Use existing database instance - create crypto worker for signature verification
-                (db, db_sender, crypto_sender)
+                (db, db_sender, crypto_helper)
             }
             Some(database_config @ DatabaseConfig::Path(_)) => {
                 // Create new database with keys
@@ -573,6 +573,7 @@ where
             self.config.max_limit,
             RelayUrl::parse(&relay_url).expect("Valid relay URL"),
             db_sender.clone(),
+            crypto_helper.clone(),
             max_subscriptions,
         );
 
@@ -631,7 +632,7 @@ where
         // Add event verification middleware unless in bare mode
         if !self.bare_mode {
             builder = builder.with_middleware(crate::middlewares::EventVerifierMiddleware::new(
-                crypto_sender,
+                crypto_helper.clone(),
             ));
         }
 

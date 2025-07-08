@@ -89,9 +89,14 @@ pub async fn create_test_state_with_subscription_service_and_sender(
     // Create cancellation token
     let cancellation_token = tokio_util::sync::CancellationToken::new();
 
+    // Create crypto helper for tests
+    let test_keys = Keys::generate();
+    let crypto_helper = crate::crypto_helper::CryptoHelper::new(Arc::new(test_keys));
+
     let subscription_coordinator = SubscriptionCoordinator::new(
         database,
         db_sender.clone(),
+        crypto_helper,
         registry,
         "test_connection".to_string(),
         sender,

@@ -124,7 +124,11 @@ impl ReplaceableEventsBuffer {
         self.buffer.is_empty()
     }
 
-    pub async fn flush(&mut self, db_sender: &DatabaseSender) {
+    pub async fn flush(
+        &mut self,
+        db_sender: &DatabaseSender,
+        crypto_helper: &crate::crypto_helper::CryptoHelper,
+    ) {
         if self.buffer.is_empty() {
             return;
         }
@@ -132,11 +136,23 @@ impl ReplaceableEventsBuffer {
         debug!("Flushing {} replaceable events", self.buffer.len());
 
         for ((_, _, scope), event) in self.buffer.drain() {
-            if let Err(e) = db_sender
-                .send(StoreCommand::SaveUnsignedEvent(event, scope, None))
-                .await
-            {
-                error!("Failed to flush replaceable event: {:?}", e);
+            // Sign the event
+            match crypto_helper.sign_event(event).await {
+                Ok(signed_event) => {
+                    if let Err(e) = db_sender
+                        .send(StoreCommand::SaveSignedEvent(
+                            Box::new(signed_event),
+                            scope,
+                            None,
+                        ))
+                        .await
+                    {
+                        error!("Failed to flush replaceable event: {:?}", e);
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to sign replaceable event: {:?}", e);
+                }
             }
         }
     }
@@ -144,6 +160,7 @@ impl ReplaceableEventsBuffer {
     pub fn start_with_sender(
         mut self,
         db_sender: DatabaseSender,
+        crypto_helper: crate::crypto_helper::CryptoHelper,
         cancellation_token: CancellationToken,
         task_name: String,
     ) {
@@ -156,7 +173,7 @@ impl ReplaceableEventsBuffer {
                 tokio::select! {
                     _ = cancellation_token.cancelled() => {
                         debug!("{} cancelled, flushing remaining events", task_name);
-                        self.flush(&db_sender).await;
+                        self.flush(&db_sender, &crypto_helper).await;
                         break;
                     }
 
@@ -167,7 +184,7 @@ impl ReplaceableEventsBuffer {
                     }
 
                     _ = tokio::time::sleep(Duration::from_secs(1)) => {
-                        self.flush(&db_sender).await;
+                        self.flush(&db_sender, &crypto_helper).await;
                     }
                 }
             }
@@ -180,6 +197,7 @@ impl ReplaceableEventsBuffer {
 pub struct SubscriptionCoordinator {
     database: Arc<RelayDatabase>,
     db_sender: DatabaseSender,
+    crypto_helper: crate::crypto_helper::CryptoHelper,
     registry: Arc<SubscriptionRegistry>,
     connection_id: String,
     outgoing_sender: MessageSender<RelayMessage<'static>>,
@@ -207,6 +225,7 @@ impl SubscriptionCoordinator {
     pub fn new(
         database: Arc<RelayDatabase>,
         db_sender: DatabaseSender,
+        crypto_helper: crate::crypto_helper::CryptoHelper,
         registry: Arc<SubscriptionRegistry>,
         connection_id: String,
         outgoing_sender: MessageSender<RelayMessage<'static>>,
@@ -230,6 +249,7 @@ impl SubscriptionCoordinator {
 
         buffer.start_with_sender(
             db_sender.clone(),
+            crypto_helper.clone(),
             cancellation_token,
             format!("replaceable_events_buffer_{connection_id}"),
         );
@@ -237,6 +257,7 @@ impl SubscriptionCoordinator {
         Self {
             database,
             db_sender,
+            crypto_helper,
             registry,
             connection_id,
             outgoing_sender,
@@ -276,23 +297,37 @@ impl SubscriptionCoordinator {
         command: StoreCommand,
         message_sender: Option<MessageSender<RelayMessage<'static>>>,
     ) -> Result<(), Error> {
-        // For replaceable events, queue them for buffering
-        if command.is_replaceable() {
-            if let StoreCommand::SaveUnsignedEvent(event, scope, _) = command {
-                self.replaceable_event_queue
-                    .send_async((event, scope))
+        match command {
+            StoreCommand::SaveUnsignedEvent(event, scope, _) => {
+                // For replaceable events, queue them for buffering
+                if event.kind.is_replaceable() || event.kind.is_addressable() {
+                    self.replaceable_event_queue
+                        .send_async((event, scope))
+                        .await
+                        .map_err(|e| {
+                            Error::internal(format!("Failed to queue replaceable event: {e}"))
+                        })?;
+                    return Ok(());
+                }
+
+                // Sign the event and create SaveSignedEvent command
+                let signed_event = self.crypto_helper.sign_event(event).await?;
+                let signed_command = StoreCommand::SaveSignedEvent(
+                    Box::new(signed_event),
+                    scope,
+                    message_sender.map(ResponseHandler::MessageSender),
+                );
+
+                // Send to database
+                self.db_sender.send(signed_command).await
+            }
+            // Pass through already signed events and delete commands
+            _ => {
+                self.db_sender
+                    .send_with_sender(command, message_sender.map(ResponseHandler::MessageSender))
                     .await
-                    .map_err(|e| {
-                        Error::internal(format!("Failed to queue replaceable event: {e}"))
-                    })?;
-                return Ok(());
             }
         }
-
-        // For other events, send directly
-        self.db_sender
-            .send_with_sender(command, message_sender.map(ResponseHandler::MessageSender))
-            .await
     }
 
     /// Handle a REQ message from a client
@@ -492,6 +527,11 @@ mod tests {
             .unwrap()
     }
 
+    fn create_test_crypto_helper() -> crate::crypto_helper::CryptoHelper {
+        let test_keys = Keys::generate();
+        crate::crypto_helper::CryptoHelper::new(Arc::new(test_keys))
+    }
+
     #[tokio::test]
     async fn test_replaceable_event_buffering() {
         let buffer = ReplaceableEventsBuffer::new();
@@ -521,6 +561,7 @@ mod tests {
         let coordinator = SubscriptionCoordinator::new(
             database.clone(),
             db_sender.clone(),
+            create_test_crypto_helper(),
             registry,
             "test_conn".to_string(),
             MessageSender::new(tx, 0),
@@ -625,6 +666,7 @@ mod tests {
         let coordinator = SubscriptionCoordinator::new(
             database.clone(),
             db_sender.clone(),
+            create_test_crypto_helper(),
             registry,
             "test_conn".to_string(),
             MessageSender::new(tx, 0),
@@ -711,6 +753,7 @@ mod tests {
         let coordinator = SubscriptionCoordinator::new(
             database.clone(),
             db_sender.clone(),
+            create_test_crypto_helper(),
             registry,
             "test_conn".to_string(),
             MessageSender::new(tx, 0),
@@ -814,6 +857,7 @@ mod tests {
         let coordinator = SubscriptionCoordinator::new(
             database.clone(),
             db_sender.clone(),
+            create_test_crypto_helper(),
             registry,
             "test_conn".to_string(),
             MessageSender::new(tx, 0),
@@ -920,6 +964,7 @@ mod tests {
         let coordinator = SubscriptionCoordinator::new(
             database.clone(),
             db_sender.clone(),
+            create_test_crypto_helper(),
             registry,
             "test_conn".to_string(),
             MessageSender::new(tx, 0),
@@ -1036,6 +1081,7 @@ mod tests {
         let coordinator = SubscriptionCoordinator::new(
             database.clone(),
             db_sender.clone(),
+            create_test_crypto_helper(),
             registry,
             "test_conn".to_string(),
             MessageSender::new(tx, 0),
@@ -1118,6 +1164,7 @@ mod tests {
         let coordinator = SubscriptionCoordinator::new(
             database.clone(),
             db_sender.clone(),
+            create_test_crypto_helper(),
             registry,
             "test_conn".to_string(),
             MessageSender::new(tx, 0),

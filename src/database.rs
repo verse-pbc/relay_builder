@@ -1,6 +1,5 @@
 //! Database abstraction for Nostr relays
 
-use crate::crypto_helper::CryptoHelper;
 use crate::error::Error;
 use crate::subscription_coordinator::{ResponseHandler, StoreCommand};
 use flume;
@@ -21,14 +20,12 @@ use tracing::{debug, error, info, warn};
 /// Can be overridden by passing max_connections and max_subscriptions to calculate dynamically.
 const DEFAULT_WRITE_QUEUE_CAPACITY: usize = 100_000;
 
-/// A cloneable sender for database commands with direct routing.
+/// A cloneable sender for database commands.
 ///
-/// This wrapper provides a clean API for sending commands to the database
-/// and routes commands directly to the appropriate processor.
+/// This wrapper provides a clean API for sending commands to the database.
+/// Only accepts SaveSignedEvent and DeleteEvents commands.
 #[derive(Clone)]
 pub struct DatabaseSender {
-    /// Channel for unsigned events that need signing
-    unsigned_sender: flume::Sender<StoreCommand>,
     /// Unified channel for signed saves and deletes (both are LMDB write operations)
     store_sender: flume::Sender<StoreCommand>,
 }
@@ -46,15 +43,9 @@ impl Drop for DatabaseSender {
 }
 
 impl DatabaseSender {
-    /// Create a new DatabaseSender with the two internal channels
-    fn new(
-        unsigned_sender: flume::Sender<StoreCommand>,
-        store_sender: flume::Sender<StoreCommand>,
-    ) -> Self {
-        Self {
-            unsigned_sender,
-            store_sender,
-        }
+    /// Create a new DatabaseSender with the store channel
+    fn new(store_sender: flume::Sender<StoreCommand>) -> Self {
+        Self { store_sender }
     }
 
     /// Send a store command to the database
@@ -68,66 +59,58 @@ impl DatabaseSender {
         mut command: StoreCommand,
         message_sender: Option<ResponseHandler>,
     ) -> Result<(), Error> {
+        // Reject SaveUnsignedEvent - signing should happen before reaching the database
+        if matches!(command, StoreCommand::SaveUnsignedEvent(_, _, _)) {
+            return Err(Error::internal(
+                "SaveUnsignedEvent should not be sent directly to database. Events must be signed first.",
+            ));
+        }
+
         // Set the response handler in the command
         match &mut command {
-            StoreCommand::SaveUnsignedEvent(_, _, ref mut handler) => {
-                *handler = message_sender;
-            }
             StoreCommand::SaveSignedEvent(_, _, ref mut handler) => {
                 *handler = message_sender;
             }
             StoreCommand::DeleteEvents(_, _, ref mut handler) => {
                 *handler = message_sender;
             }
+            StoreCommand::SaveUnsignedEvent(_, _, _) => unreachable!(),
         }
 
-        // Route to appropriate channel
-        match &command {
-            StoreCommand::SaveUnsignedEvent(_, _, _) => self
-                .unsigned_sender
-                .send_async(command)
-                .await
-                .map_err(|_| Error::internal("Unsigned event processor shut down")),
-            StoreCommand::SaveSignedEvent(_, _, _) | StoreCommand::DeleteEvents(_, _, _) => self
-                .store_sender
-                .send_async(command)
-                .await
-                .map_err(|_| Error::internal("Store processor shut down")),
-        }
+        // Send to store processor
+        self.store_sender
+            .send_async(command)
+            .await
+            .map_err(|_| Error::internal("Store processor shut down"))
     }
 
     /// Send a store command synchronously with immediate acknowledgment
     pub async fn send_sync(&self, mut command: StoreCommand) -> Result<(), Error> {
+        // Reject SaveUnsignedEvent - signing should happen before reaching the database
+        if matches!(command, StoreCommand::SaveUnsignedEvent(_, _, _)) {
+            return Err(Error::internal(
+                "SaveUnsignedEvent should not be sent directly to database. Events must be signed first.",
+            ));
+        }
+
         let (tx, rx) = oneshot::channel();
 
         // Set the response handler in the command
         match &mut command {
-            StoreCommand::SaveUnsignedEvent(_, _, ref mut handler) => {
-                *handler = Some(ResponseHandler::Oneshot(tx));
-            }
             StoreCommand::SaveSignedEvent(_, _, ref mut handler) => {
                 *handler = Some(ResponseHandler::Oneshot(tx));
             }
             StoreCommand::DeleteEvents(_, _, ref mut handler) => {
                 *handler = Some(ResponseHandler::Oneshot(tx));
             }
+            StoreCommand::SaveUnsignedEvent(_, _, _) => unreachable!(),
         }
 
-        // Route to appropriate channel
-        match &command {
-            StoreCommand::SaveUnsignedEvent(_, _, _) => {
-                self.unsigned_sender
-                    .send_async(command)
-                    .await
-                    .map_err(|_| Error::internal("Unsigned event processor shut down"))?;
-            }
-            StoreCommand::SaveSignedEvent(_, _, _) | StoreCommand::DeleteEvents(_, _, _) => {
-                self.store_sender
-                    .send_async(command)
-                    .await
-                    .map_err(|_| Error::internal("Store processor shut down"))?;
-            }
-        }
+        // Send to store processor
+        self.store_sender
+            .send_async(command)
+            .await
+            .map_err(|_| Error::internal("Store processor shut down"))?;
 
         rx.await
             .map_err(|_| Error::internal("Database response channel closed"))?
@@ -396,10 +379,9 @@ impl RelayDatabase {
     /// * `keys` - Keys for signing unsigned events
     pub fn new(
         db_path_param: impl AsRef<std::path::Path>,
-        keys: Arc<Keys>,
+        _keys: Arc<Keys>,
     ) -> Result<(Self, DatabaseSender), Error> {
-        let crypto_helper = CryptoHelper::new(keys);
-        Self::with_config_and_tracker(db_path_param, crypto_helper, None, None, None, None, None)
+        Self::with_config_and_tracker(db_path_param, None, None, None, None, None)
     }
 
     /// Create a new relay database with a provided TaskTracker
@@ -410,19 +392,10 @@ impl RelayDatabase {
     /// * `task_tracker` - TaskTracker for managing background tasks
     pub fn with_task_tracker(
         db_path_param: impl AsRef<std::path::Path>,
-        keys: Arc<Keys>,
+        _keys: Arc<Keys>,
         task_tracker: TaskTracker,
     ) -> Result<(Self, DatabaseSender), Error> {
-        let crypto_helper = CryptoHelper::new(keys);
-        Self::with_config_and_tracker(
-            db_path_param,
-            crypto_helper,
-            None,
-            None,
-            Some(task_tracker),
-            None,
-            None,
-        )
+        Self::with_config_and_tracker(db_path_param, None, None, Some(task_tracker), None, None)
     }
 
     /// Create a new relay database with a provided TaskTracker and CancellationToken
@@ -434,14 +407,12 @@ impl RelayDatabase {
     /// * `cancellation_token` - CancellationToken for graceful shutdown
     pub fn with_task_tracker_and_token(
         db_path_param: impl AsRef<std::path::Path>,
-        keys: Arc<Keys>,
+        _keys: Arc<Keys>,
         task_tracker: TaskTracker,
         cancellation_token: CancellationToken,
     ) -> Result<(Self, DatabaseSender), Error> {
-        let crypto_helper = CryptoHelper::new(keys);
         Self::with_config_and_tracker(
             db_path_param,
-            crypto_helper,
             None,
             None,
             Some(task_tracker),
@@ -459,14 +430,12 @@ impl RelayDatabase {
     /// * `max_subscriptions` - Maximum subscriptions per connection (for broadcast sizing)
     pub fn with_config(
         db_path_param: impl AsRef<std::path::Path>,
-        keys: Arc<Keys>,
+        _keys: Arc<Keys>,
         max_connections: Option<usize>,
         max_subscriptions: Option<usize>,
     ) -> Result<(Self, DatabaseSender), Error> {
-        let crypto_helper = CryptoHelper::new(keys);
         Self::with_config_and_tracker(
             db_path_param,
-            crypto_helper,
             max_connections,
             max_subscriptions,
             None,
@@ -478,15 +447,13 @@ impl RelayDatabase {
     /// Create a new relay database with event sender
     pub fn with_event_sender(
         db_path_param: impl AsRef<std::path::Path>,
-        keys: Arc<Keys>,
+        _keys: Arc<Keys>,
         event_sender: flume::Sender<Arc<Event>>,
         task_tracker: Option<TaskTracker>,
         cancellation_token: Option<CancellationToken>,
     ) -> Result<(Self, DatabaseSender), Error> {
-        let crypto_helper = CryptoHelper::new(keys);
         Self::with_config_and_tracker(
             db_path_param,
-            crypto_helper,
             None,
             None,
             task_tracker,
@@ -498,7 +465,6 @@ impl RelayDatabase {
     /// Internal constructor that supports all options
     fn with_config_and_tracker(
         db_path_param: impl AsRef<std::path::Path>,
-        crypto_helper: CryptoHelper,
         max_connections: Option<usize>,
         max_subscriptions: Option<usize>,
         task_tracker: Option<TaskTracker>,
@@ -559,24 +525,15 @@ impl RelayDatabase {
             }
         };
 
-        // Create two specialized queues: one for unsigned events, one for store operations
-        let (save_unsigned_sender, save_unsigned_receiver) =
-            flume::bounded::<StoreCommand>(queue_capacity);
+        // Create one queue for store operations (signed events and deletes)
         let (store_sender, store_receiver) = flume::bounded::<StoreCommand>(queue_capacity);
 
         // Create task tracker for worker lifecycle management
         let task_tracker = task_tracker.unwrap_or_default();
 
-        info!("Starting database workers (2 total: unsigned processor + unified store processor)");
+        info!("Starting database worker (1 total: unified store processor for signed events and deletes)");
 
-        // Spawn processor tasks
-        Self::spawn_save_unsigned_processor(
-            save_unsigned_receiver,
-            store_sender.clone(),
-            crypto_helper,
-            &task_tracker,
-        );
-
+        // Spawn store processor task
         Self::spawn_store_processor(
             store_receiver,
             Arc::clone(&lmdb),
@@ -592,7 +549,7 @@ impl RelayDatabase {
         };
 
         // Create the DatabaseSender for external use
-        let db_sender = DatabaseSender::new(save_unsigned_sender, store_sender);
+        let db_sender = DatabaseSender::new(store_sender);
 
         Ok((relay_db, db_sender))
     }
@@ -634,66 +591,6 @@ impl RelayDatabase {
 
             info!("Store processor completed");
             cancellation_token.cancel();
-        });
-    }
-
-    /// Spawn the processor for unsigned events
-    fn spawn_save_unsigned_processor(
-        receiver: flume::Receiver<StoreCommand>,
-        store_sender: flume::Sender<StoreCommand>,
-        crypto_helper: CryptoHelper,
-        task_tracker: &TaskTracker,
-    ) {
-        task_tracker.spawn(async move {
-            info!("Save unsigned processor started");
-
-            while let Ok(command) = receiver.recv_async().await {
-                if let StoreCommand::SaveUnsignedEvent(event, scope, response_handler) = command {
-                    debug!("Processing unsigned event");
-
-                    match crypto_helper.sign_event(event).await {
-                        Ok(signed_event) => {
-                            let signed_command = StoreCommand::SaveSignedEvent(
-                                Box::new(signed_event),
-                                scope,
-                                response_handler,
-                            );
-
-                            if let Err(e) = store_sender.send_async(signed_command).await {
-                                error!("Failed to forward signed event to store: {:?}", e);
-                                // The response_handler was already moved into signed_command
-                                // So we can't send an error response here - the channel is closed anyway
-                            }
-                            // If successful, the store processor will handle the response
-                        }
-                        Err(e) => {
-                            error!("Failed to sign event: {:?}", e);
-
-                            // Send error response if response handler present
-                            // Note: We can't send a proper OK message without an event ID
-                            if let Some(response_handler) = response_handler {
-                                match response_handler {
-                                    ResponseHandler::MessageSender(mut sender) => {
-                                        let msg = RelayMessage::notice(format!(
-                                            "Failed to sign event: {e}"
-                                        ));
-                                        sender.send_bypass(msg);
-                                    }
-                                    ResponseHandler::Oneshot(oneshot_sender) => {
-                                        let _ = oneshot_sender.send(Err(Error::internal(format!(
-                                            "Failed to sign event: {e}"
-                                        ))));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    error!("Non-unsigned event received in unsigned processor");
-                }
-            }
-
-            info!("Save unsigned processor completed");
         });
     }
 

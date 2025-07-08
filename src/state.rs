@@ -127,6 +127,7 @@ impl<T> NostrConnectionState<T> {
         registry: Arc<SubscriptionRegistry>,
         connection_id: String,
         sender: MessageSender<RelayMessage<'static>>,
+        crypto_helper: crate::crypto_helper::CryptoHelper,
         max_limit: Option<usize>,
     ) -> Result<(), Error> {
         debug!("Setting up connection for {}", connection_id);
@@ -142,6 +143,7 @@ impl<T> NostrConnectionState<T> {
         let coordinator = SubscriptionCoordinator::new(
             database,
             db_sender,
+            crypto_helper,
             registry,
             connection_id,
             sender,

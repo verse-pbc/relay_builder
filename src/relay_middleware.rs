@@ -41,6 +41,7 @@ where
     max_limit: usize,
     relay_url: RelayUrl,
     db_sender: crate::database::DatabaseSender,
+    crypto_helper: crate::crypto_helper::CryptoHelper,
     max_subscriptions: Option<usize>,
     _phantom: std::marker::PhantomData<T>,
 }
@@ -60,6 +61,7 @@ where
     /// * `max_limit` - Maximum limit for subscriptions
     /// * `relay_url` - The relay URL
     /// * `db_sender` - Database sender for async operations
+    /// * `crypto_helper` - Crypto helper for signing events
     /// * `max_subscriptions` - Maximum subscriptions per connection
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -70,6 +72,7 @@ where
         max_limit: usize,
         relay_url: RelayUrl,
         db_sender: crate::database::DatabaseSender,
+        crypto_helper: crate::crypto_helper::CryptoHelper,
         max_subscriptions: Option<usize>,
     ) -> Self {
         Self {
@@ -80,6 +83,7 @@ where
             max_limit,
             relay_url,
             db_sender,
+            crypto_helper,
             max_subscriptions,
             _phantom: std::marker::PhantomData,
         }
@@ -300,6 +304,7 @@ where
                         self.registry.clone(),
                         ctx.connection_id.clone(),
                         sender.clone(),
+                        self.crypto_helper.clone(),
                         Some(self.max_limit),
                     )
                     .map_err(|e| anyhow::anyhow!("Failed to setup connection: {}", e))?;
