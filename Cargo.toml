@@ -42,6 +42,8 @@ dashmap = "6.1"
 indicatif = "0.17"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
 parking_lot = "0.12"
+rayon = "1.10"
+num_cpus = "1.16"
 
 # Optional dependencies for the built-in server
 axum = { version = "0.8", features = ["ws", "http1"], optional = true }

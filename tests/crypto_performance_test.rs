@@ -95,7 +95,7 @@ async fn test_crypto_verification_performance() {
     let mut verify_futures = Vec::new();
     for event in events {
         let sender = crypto_helper.clone();
-        verify_futures.push(async move { sender.verify_event(&event) });
+        verify_futures.push(async move { sender.verify_event(event).await });
     }
 
     // Wait for all verifications to complete
@@ -169,7 +169,7 @@ async fn test_with_different_worker_counts() {
 
         for event in events {
             let sender = crypto_helper.clone();
-            verify_futures.push(async move { sender.verify_event(&event) });
+            verify_futures.push(async move { sender.verify_event(event).await });
         }
 
         let results = futures_util::future::join_all(verify_futures).await;
@@ -219,7 +219,7 @@ async fn test_crypto_helper_concurrency() {
     for event in events {
         let sender = crypto_helper.clone();
         let handle = tokio::spawn(async move {
-            sender.verify_event(&event).unwrap();
+            sender.verify_event(event).await.unwrap();
         });
         handles.push(handle);
     }
@@ -275,7 +275,7 @@ async fn test_crypto_helper_saturation() {
 
         for event in events {
             let sender = crypto_helper.clone();
-            futures.push(async move { sender.verify_event(&event) });
+            futures.push(async move { sender.verify_event(event).await });
         }
 
         let results = futures_util::future::join_all(futures).await;

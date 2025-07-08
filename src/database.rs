@@ -651,7 +651,7 @@ impl RelayDatabase {
                 if let StoreCommand::SaveUnsignedEvent(event, scope, response_handler) = command {
                     debug!("Processing unsigned event");
 
-                    match crypto_helper.sign_event(event) {
+                    match crypto_helper.sign_event(event).await {
                         Ok(signed_event) => {
                             let signed_command = StoreCommand::SaveSignedEvent(
                                 Box::new(signed_event),

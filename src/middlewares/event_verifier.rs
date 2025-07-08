@@ -38,8 +38,8 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for EventVer
             let event_id = event_cow.id;
             let event_to_verify: Event = event_cow.as_ref().clone();
 
-            // Verify the event
-            let verification_failed = match self.crypto_helper.verify_event(&event_to_verify) {
+            // Verify the event asynchronously
+            let verification_failed = match self.crypto_helper.verify_event(event_to_verify).await {
                 Ok(()) => false,
                 Err(_) => true,
             };
