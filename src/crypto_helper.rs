@@ -1,7 +1,7 @@
 //! Cryptographic operations for events
 
 use crate::error::{Error, Result};
-use crate::subscription_coordinator::{ResponseHandler, StoreCommand};
+use crate::subscription_coordinator::StoreCommand;
 use nostr_sdk::prelude::*;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -16,8 +16,12 @@ pub struct CryptoHelper {
     keys: Arc<Keys>,
     /// Verification request sender
     verify_sender: flume::Sender<VerifyRequest>,
+    /// Signing request sender
+    sign_sender: flume::Sender<StoreCommand>,
     /// Stats counter for verified events
     verified_count: Arc<AtomicUsize>,
+    /// Stats counter for signed events
+    signed_count: Arc<AtomicUsize>,
 }
 
 /// Request to verify an event
@@ -39,16 +43,29 @@ impl CryptoHelper {
         let (verify_sender, verify_receiver) = flume::bounded::<VerifyRequest>(10000);
         let verified_count = Arc::new(AtomicUsize::new(0));
 
+        // Create signing channel with reasonable capacity
+        let (sign_sender, sign_receiver) = flume::bounded::<StoreCommand>(10000);
+        let signed_count = Arc::new(AtomicUsize::new(0));
+
         // Spawn the verification processor
         let verified_count_clone = Arc::clone(&verified_count);
         std::thread::spawn(move || {
             Self::run_verify_processor(verify_receiver, verified_count_clone);
         });
 
+        // Spawn the signing processor
+        let signed_count_clone = Arc::clone(&signed_count);
+        let keys_clone = Arc::clone(&keys);
+        std::thread::spawn(move || {
+            Self::run_sign_processor(sign_receiver, keys_clone, signed_count_clone);
+        });
+
         Self {
             keys,
             verify_sender,
+            sign_sender,
             verified_count,
+            signed_count,
         }
     }
 
@@ -150,6 +167,118 @@ impl CryptoHelper {
         info!("Crypto verification processor stopped");
     }
 
+    /// Run the signing processor that batches and parallelizes signing
+    fn run_sign_processor(
+        receiver: flume::Receiver<StoreCommand>,
+        keys: Arc<Keys>,
+        signed_count: Arc<AtomicUsize>,
+    ) {
+        info!("Crypto signing processor started");
+
+        // Initialize rayon thread pool for CPU-bound work
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_cpus::get())
+            .thread_name(|idx| format!("crypto-sign-{idx}"))
+            .build()
+            .expect("Failed to create rayon thread pool");
+
+        // Use tokio runtime for async signing operations
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create tokio runtime");
+
+        loop {
+            // Wait for at least one signing request
+            let first_command = match receiver.recv() {
+                Ok(cmd) => cmd,
+                Err(_) => {
+                    info!("Crypto signing processor shutting down - channel closed");
+                    break;
+                }
+            };
+
+            // Collect a batch using the eager consumption pattern
+            let batch: Vec<StoreCommand> = std::iter::once(first_command)
+                .chain(receiver.drain())
+                .collect();
+
+            let batch_size = batch.len();
+            debug!("Processing signing batch of {} events", batch_size);
+
+            // Process the batch in parallel using rayon
+            pool.install(|| {
+                batch.into_par_iter().for_each(|command| {
+                    if let StoreCommand::SaveUnsignedEvent(event, scope, response_handler) = command
+                    {
+                        // Sign the event using block_in_place to run async code
+                        let signed_result = runtime.block_on(async {
+                            keys.sign_event(event)
+                                .await
+                                .map_err(|e| Error::internal(format!("Failed to sign event: {e}")))
+                        });
+
+                        // Send the result back via the oneshot
+                        if let Some(sender) = response_handler {
+                            let response = match signed_result {
+                                Ok(signed_event) => Ok(StoreCommand::SaveSignedEvent(
+                                    Box::new(signed_event),
+                                    scope,
+                                    None,
+                                )),
+                                Err(e) => Err(e),
+                            };
+                            // Ignore send errors if receiver dropped
+                            let _ = sender.send(response);
+                        }
+                    } else {
+                        error!("Non-SaveUnsignedEvent command received in signing processor");
+                    }
+                });
+            });
+
+            // Update stats
+            signed_count.fetch_add(batch_size, Ordering::Relaxed);
+
+            // Log batch size periodically (every 100 batches)
+            static BATCH_COUNT: AtomicUsize = AtomicUsize::new(0);
+            static BATCH_SIZE_SUM: AtomicUsize = AtomicUsize::new(0);
+            static BATCH_SIZE_MAX: AtomicUsize = AtomicUsize::new(0);
+
+            let batch_num = BATCH_COUNT.fetch_add(1, Ordering::Relaxed);
+            BATCH_SIZE_SUM.fetch_add(batch_size, Ordering::Relaxed);
+
+            // Update max batch size
+            let mut current_max = BATCH_SIZE_MAX.load(Ordering::Relaxed);
+            while current_max < batch_size {
+                match BATCH_SIZE_MAX.compare_exchange_weak(
+                    current_max,
+                    batch_size,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => break,
+                    Err(x) => current_max = x,
+                }
+            }
+
+            // Log every 100 batches
+            if batch_num > 0 && batch_num % 100 == 0 {
+                let sum = BATCH_SIZE_SUM.load(Ordering::Relaxed);
+                let max = BATCH_SIZE_MAX.load(Ordering::Relaxed);
+                let avg = sum / (batch_num + 1);
+                let total = signed_count.load(Ordering::Relaxed);
+
+                info!(
+                    "Crypto signing batch stats: {} batches processed, avg size: {}, max size: {}, total signed: {}",
+                    batch_num + 1, avg, max, total
+                );
+            }
+        }
+
+        info!("Crypto signing processor stopped");
+    }
+
     /// Sign an unsigned event with the configured keys
     pub async fn sign_event(&self, event: UnsignedEvent) -> Result<Event> {
         self.keys.sign_event(event).await.map_err(|e| {
@@ -183,24 +312,26 @@ impl CryptoHelper {
     }
 
     /// Sign a store command (converts SaveUnsignedEvent to SaveSignedEvent)
-    pub async fn sign_store_command(&self, command: StoreCommand) -> Result<StoreCommand> {
+    pub async fn sign_store_command(&self, command: StoreCommand) -> Result<()> {
         match command {
-            StoreCommand::SaveUnsignedEvent(event, scope, response_handler) => {
-                // Sign the event
-                let signed_event = self.sign_event(event).await?;
-
-                // Return the signed command with all context preserved
-                Ok(StoreCommand::SaveSignedEvent(
-                    Box::new(signed_event),
-                    scope,
-                    response_handler.map(ResponseHandler::Oneshot),
-                ))
+            StoreCommand::SaveUnsignedEvent(..) => {
+                // Send to the signing processor for batched processing
+                self.sign_sender
+                    .send_async(command)
+                    .await
+                    .map_err(|_| Error::internal("Signing processor unavailable"))?;
+                Ok(())
             }
             _ => {
                 error!("sign_store_command called with non-SaveUnsignedEvent command");
                 Err(Error::internal("Expected SaveUnsignedEvent command"))
             }
         }
+    }
+
+    /// Get the number of events signed
+    pub fn signed_count(&self) -> usize {
+        self.signed_count.load(Ordering::Relaxed)
     }
 }
 

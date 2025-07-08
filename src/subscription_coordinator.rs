@@ -32,7 +32,7 @@ pub enum StoreCommand {
     SaveUnsignedEvent(
         UnsignedEvent,
         Scope,
-        Option<oneshot::Sender<Result<(), crate::error::Error>>>,
+        Option<oneshot::Sender<Result<Self, crate::error::Error>>>,
     ),
     /// Save a signed event to the database
     SaveSignedEvent(Box<Event>, Scope, Option<ResponseHandler>),
@@ -155,23 +155,44 @@ impl ReplaceableEventsBuffer {
 
         debug!("Flushing {} replaceable events", self.buffer.len());
 
-        for ((_, _, scope), event) in self.buffer.drain() {
-            // Sign the event
-            match crypto_helper.sign_event(event).await {
-                Ok(signed_event) => {
-                    if let Err(e) = db_sender
-                        .send(StoreCommand::SaveSignedEvent(
-                            Box::new(signed_event),
-                            scope,
-                            None,
-                        ))
-                        .await
-                    {
-                        error!("Failed to flush replaceable event: {:?}", e);
+        // Collect all events to sign in a batch
+        let events_to_sign: Vec<(UnsignedEvent, Scope)> = self
+            .buffer
+            .drain()
+            .map(|((_, _, scope), event)| (event, scope))
+            .collect();
+
+        // Process all events through batched signing
+        for (event, scope) in events_to_sign {
+            // Create a oneshot to wait for the signed result
+            let (tx, rx) = tokio::sync::oneshot::channel();
+
+            // Send for batched signing
+            if let Err(e) = crypto_helper
+                .sign_store_command(StoreCommand::SaveUnsignedEvent(
+                    event,
+                    scope.clone(),
+                    Some(tx),
+                ))
+                .await
+            {
+                error!("Failed to queue replaceable event for signing: {:?}", e);
+                continue;
+            }
+
+            // Wait for the signed result
+            match rx.await {
+                Ok(Ok(signed_command)) => {
+                    // Send the signed event to the database
+                    if let Err(e) = db_sender.send(signed_command).await {
+                        error!("Failed to save replaceable event: {:?}", e);
                     }
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     error!("Failed to sign replaceable event: {:?}", e);
+                }
+                Err(_) => {
+                    error!("Signing processor dropped response channel");
                 }
             }
         }
@@ -326,16 +347,15 @@ impl SubscriptionCoordinator {
                     return Ok(());
                 }
 
-                // Sign the event and create SaveSignedEvent command
-                let signed_event = self.crypto_helper.sign_event(event).await?;
-                let signed_command = StoreCommand::SaveSignedEvent(
-                    Box::new(signed_event),
-                    scope,
-                    response_handler.map(ResponseHandler::Oneshot),
-                );
-
-                // Send to database
-                self.db_sender.send(signed_command).await
+                // Send to crypto helper for batched signing
+                // The crypto helper will sign and send the response through the oneshot
+                self.crypto_helper
+                    .sign_store_command(StoreCommand::SaveUnsignedEvent(
+                        event,
+                        scope,
+                        response_handler,
+                    ))
+                    .await
             }
             StoreCommand::SaveSignedEvent(_, _, _) => self.db_sender.send(command).await,
             StoreCommand::DeleteEvents(_, _, _) => self.db_sender.send(command).await,
