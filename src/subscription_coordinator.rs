@@ -32,7 +32,7 @@ pub enum StoreCommand {
     SaveUnsignedEvent(
         UnsignedEvent,
         Scope,
-        Option<oneshot::Sender<Result<Self, crate::error::Error>>>,
+        Option<oneshot::Sender<Result<Option<Self>, crate::error::Error>>>,
     ),
     /// Save a signed event to the database
     SaveSignedEvent(Box<Event>, Scope, Option<ResponseHandler>),
@@ -182,11 +182,14 @@ impl ReplaceableEventsBuffer {
 
             // Wait for the signed result
             match rx.await {
-                Ok(Ok(signed_command)) => {
+                Ok(Ok(Some(signed_command))) => {
                     // Send the signed event to the database
                     if let Err(e) = db_sender.send(signed_command).await {
                         error!("Failed to save replaceable event: {:?}", e);
                     }
+                }
+                Ok(Ok(None)) => {
+                    debug!("Replaceable event signed but not saved");
                 }
                 Ok(Err(e)) => {
                     error!("Failed to sign replaceable event: {:?}", e);
@@ -344,18 +347,49 @@ impl SubscriptionCoordinator {
                         .map_err(|e| {
                             Error::internal(format!("Failed to queue replaceable event: {e}"))
                         })?;
+
+                    if let Some(response_handler) = response_handler {
+                        let _ = response_handler.send(Ok(None));
+                    }
+
                     return Ok(());
                 }
 
+                let (tx, rx) = tokio::sync::oneshot::channel();
                 // Send to crypto helper for batched signing
                 // The crypto helper will sign and send the response through the oneshot
                 self.crypto_helper
-                    .sign_store_command(StoreCommand::SaveUnsignedEvent(
-                        event,
-                        scope,
-                        response_handler,
-                    ))
+                    .sign_store_command(StoreCommand::SaveUnsignedEvent(event, scope, Some(tx)))
                     .await
+                    .map_err(|e| Error::internal(format!("Failed to sign event: {e}")))?;
+
+                // Wait for the signed result
+                match rx.await {
+                    Ok(Ok(Some(signed_command))) => {
+                        // Send the signed event to the database
+                        self.db_sender
+                            .send(signed_command)
+                            .await
+                            .map_err(|e| Error::internal(format!("Failed to save event: {e}")))?;
+                    }
+                    Ok(Ok(None)) => {
+                        return Err(Error::internal("Event signed but not returned"));
+                    }
+                    Ok(Err(e)) => {
+                        return Err(Error::internal(format!("Failed to sign event: {e}")));
+                    }
+                    Err(_) => {
+                        return Err(Error::internal(
+                            "Signing processor dropped response channel",
+                        ));
+                    }
+                }
+
+                if let Some(response_handler) = response_handler {
+                    let _ = response_handler.send(Ok(None));
+                }
+
+                Ok(())
             }
             StoreCommand::SaveSignedEvent(_, _, _) => self.db_sender.send(command).await,
             StoreCommand::DeleteEvents(_, _, _) => self.db_sender.send(command).await,

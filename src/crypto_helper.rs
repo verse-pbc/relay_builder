@@ -221,11 +221,11 @@ impl CryptoHelper {
                         // Send the result back via the oneshot
                         if let Some(sender) = response_handler {
                             let response = match signed_result {
-                                Ok(signed_event) => Ok(StoreCommand::SaveSignedEvent(
+                                Ok(signed_event) => Ok(Some(StoreCommand::SaveSignedEvent(
                                     Box::new(signed_event),
                                     scope,
                                     None,
-                                )),
+                                ))),
                                 Err(e) => Err(e),
                             };
                             // Ignore send errors if receiver dropped
