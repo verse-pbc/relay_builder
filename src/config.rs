@@ -178,7 +178,6 @@ impl RelayConfig {
         _max_subscriptions: usize,
         _task_tracker: Option<tokio_util::task::TaskTracker>,
         _cancellation_token: Option<tokio_util::sync::CancellationToken>,
-        _event_sender: Option<flume::Sender<Arc<nostr_sdk::Event>>>,
     ) -> Result<Arc<RelayDatabase>, Error> {
         match database_config {
             DatabaseConfig::Path(path) => {
@@ -277,26 +276,6 @@ impl RelayConfig {
         let limit_based_size = self.max_limit + overhead;
 
         self.max_subscriptions * limit_based_size
-    }
-
-    /// Calculate the global event distribution channel size
-    /// Formula: max_connections * max_subscriptions * 10
-    /// This is used for the single channel that distributes events to all connections
-    pub fn calculate_event_channel_size(&self) -> usize {
-        // Use actual max_connections if available, otherwise use a reasonable default
-        let max_connections = self.websocket_config.max_connections.unwrap_or(1000);
-
-        // Calculate: max_connections * max_subscriptions * 10
-        // This allows 10 events to be buffered per subscription across all connections
-        let channel_size = max_connections * self.max_subscriptions * 10;
-
-        // Log the calculated size for debugging
-        eprintln!(
-            "Global event distribution channel size: {channel_size} ({max_connections}x{}x10)",
-            self.max_subscriptions
-        );
-
-        channel_size
     }
 }
 

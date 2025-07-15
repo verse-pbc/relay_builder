@@ -468,23 +468,14 @@ where
 
         // Calculate channel sizes
         let per_connection_channel_size = self.config.calculate_channel_size();
-        let event_distribution_channel_size = self.config.calculate_event_channel_size();
         let relay_url = self.config.relay_url.clone();
         let _scope_config = self.config.scope_config.clone();
 
-        // Create subscription registry and event channel first
+        // Create subscription registry
         let subscription_registry =
             Arc::new(crate::subscription_registry::SubscriptionRegistry::new(
                 self.subscription_metrics_handler.clone(),
             ));
-
-        // Create mpsc channel for event distribution (global channel)
-        let (event_sender, event_receiver) = flume::bounded(event_distribution_channel_size);
-
-        // Start the distribution task
-        subscription_registry
-            .clone()
-            .start_distribution_task(event_receiver);
 
         // Only create crypto worker if we're creating a new database
         let database = self.config.database.take();
@@ -505,7 +496,6 @@ where
                     self.config.max_subscriptions,
                     Some(task_tracker.clone()),
                     self.cancellation_token.clone(),
-                    Some(event_sender),
                 )?;
                 (database, crypto_helper)
             }

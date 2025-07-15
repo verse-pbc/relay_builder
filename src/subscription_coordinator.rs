@@ -67,14 +67,6 @@ impl StoreCommand {
         }
     }
 
-    /// Convert the Scope to an Option<&str> for backward compatibility
-    pub fn subdomain(&self) -> Option<&str> {
-        match self.subdomain_scope() {
-            Scope::Named { name, .. } => Some(name),
-            Scope::Default => None,
-        }
-    }
-
     pub fn set_message_sender(
         &mut self,
         message_sender: MessageSender<RelayMessage<'static>>,
@@ -426,7 +418,9 @@ impl SubscriptionCoordinator {
 
                 // If the save was successful, distribute the event to subscribers
                 if save_result.is_ok() {
-                    self.registry.distribute_event(Arc::new(*event)).await;
+                    self.registry
+                        .distribute_event(Arc::new(*event), &scope)
+                        .await;
                 }
 
                 save_result

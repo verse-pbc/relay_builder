@@ -17,8 +17,8 @@ use websocket_builder::MessageSender;
 /// Trait for distributing events to subscribers
 #[async_trait::async_trait]
 pub trait EventDistributor: Send + Sync {
-    /// Distribute an event to all matching subscriptions
-    async fn distribute_event(&self, event: Arc<Event>);
+    /// Distribute an event to all matching subscriptions within the given scope
+    async fn distribute_event(&self, event: Arc<Event>, scope: &Scope);
 }
 
 /// Registry for managing all active subscriptions across connections
@@ -177,26 +177,16 @@ impl SubscriptionRegistry {
             .get(connection_id)
             .map(|conn| (conn.auth_pubkey, Arc::clone(&conn.subdomain)))
     }
-
-    /// Start the event distribution task
-    pub fn start_distribution_task(self: Arc<Self>, event_receiver: flume::Receiver<Arc<Event>>) {
-        tokio::spawn(async move {
-            debug!("Subscription registry distribution task started");
-
-            while let Ok(event) = event_receiver.recv_async().await {
-                // Distribute events inline without spawn_blocking
-                self.distribute_event_inline(event);
-            }
-
-            debug!("Subscription registry distribution task stopped");
-        });
-    }
 }
 
 impl SubscriptionRegistry {
     /// Inline event distribution without spawn_blocking
-    fn distribute_event_inline(&self, event: Arc<Event>) {
-        trace!("Distributing event {} to subscribers", event.id);
+    fn distribute_event_inline(&self, event: Arc<Event>, scope: &Scope) {
+        trace!(
+            "Distributing event {} to subscribers in scope {:?}",
+            event.id,
+            scope
+        );
 
         let mut total_matches = 0;
         let mut dead_connections = Vec::new();
@@ -205,6 +195,11 @@ impl SubscriptionRegistry {
         for entry in self.connections.iter() {
             let conn_id = entry.key();
             let conn_data = entry.value();
+
+            // Skip connections that don't match the event's scope
+            if conn_data.subdomain.as_ref() != scope {
+                continue;
+            }
 
             // Use blocking read - fast since writes are rare
             let subscriptions = conn_data.subscriptions.read();
@@ -251,9 +246,9 @@ impl SubscriptionRegistry {
 
 #[async_trait::async_trait]
 impl EventDistributor for SubscriptionRegistry {
-    async fn distribute_event(&self, event: Arc<Event>) {
+    async fn distribute_event(&self, event: Arc<Event>, scope: &Scope) {
         // Distribute inline without spawn_blocking
-        self.distribute_event_inline(event);
+        self.distribute_event_inline(event, scope);
     }
 }
 
@@ -311,5 +306,203 @@ mod tests {
 
         // Remove subscription
         registry.remove_subscription("conn1", &sub_id).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scope_aware_distribution() {
+        use nostr_sdk::{EventBuilder, Keys};
+        use std::time::Instant;
+
+        let registry = Arc::new(SubscriptionRegistry::new(None));
+
+        // Create two connections with different scopes
+        let (tx1, rx1) = flume::bounded::<(RelayMessage<'static>, usize)>(100);
+        let sender1 = MessageSender::new(tx1, 0);
+        let _handle1 = registry.register_connection(
+            "conn_default".to_string(),
+            sender1,
+            None,
+            Arc::new(Scope::Default),
+        );
+
+        let (tx2, rx2) = flume::bounded::<(RelayMessage<'static>, usize)>(100);
+        let sender2 = MessageSender::new(tx2, 0);
+        let _handle2 = registry.register_connection(
+            "conn_tenant1".to_string(),
+            sender2,
+            None,
+            Arc::new(Scope::named("tenant1").unwrap()),
+        );
+
+        // Add subscriptions to both connections (matching all events)
+        let sub_id1 = SubscriptionId::new("sub_default");
+        let sub_id2 = SubscriptionId::new("sub_tenant1");
+        let filters = vec![Filter::new()];
+
+        registry
+            .add_subscription("conn_default", sub_id1.clone(), filters.clone())
+            .unwrap();
+        registry
+            .add_subscription("conn_tenant1", sub_id2.clone(), filters)
+            .unwrap();
+
+        // Create a test event
+        let keys = Keys::generate();
+        let event = EventBuilder::text_note("test message")
+            .build_with_ctx(&Instant::now(), keys.public_key())
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        // Distribute event for Default scope
+        registry
+            .distribute_event(Arc::new(event.clone()), &Scope::Default)
+            .await;
+
+        // Check that only the Default connection received the event
+        let msg1 = rx1.try_recv();
+        let msg2 = rx2.try_recv();
+
+        assert!(
+            msg1.is_ok(),
+            "Default scope connection should receive the event"
+        );
+        assert!(
+            msg2.is_err(),
+            "Named scope connection should NOT receive the event"
+        );
+
+        // Verify the correct event was received
+        if let Ok((
+            RelayMessage::Event {
+                event: received_event,
+                ..
+            },
+            _,
+        )) = msg1
+        {
+            assert_eq!(received_event.id, event.id);
+        } else {
+            panic!("Expected Event message");
+        }
+
+        // Now test the other way - distribute to named scope
+        let event2 = EventBuilder::text_note("test message 2")
+            .build_with_ctx(&Instant::now(), keys.public_key())
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        registry
+            .distribute_event(Arc::new(event2.clone()), &Scope::named("tenant1").unwrap())
+            .await;
+
+        // Check that only the tenant1 connection received the event
+        let msg1 = rx1.try_recv();
+        let msg2 = rx2.try_recv();
+
+        assert!(
+            msg1.is_err(),
+            "Default scope connection should NOT receive the tenant1 event"
+        );
+        assert!(
+            msg2.is_ok(),
+            "Named scope connection should receive the event"
+        );
+
+        // Verify the correct event was received
+        if let Ok((
+            RelayMessage::Event {
+                event: received_event,
+                ..
+            },
+            _,
+        )) = msg2
+        {
+            assert_eq!(received_event.id, event2.id);
+        } else {
+            panic!("Expected Event message");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_multiple_named_scopes_isolation() {
+        use nostr_sdk::{EventBuilder, Keys};
+        use std::time::Instant;
+
+        let registry = Arc::new(SubscriptionRegistry::new(None));
+
+        // Create three connections with different named scopes
+        let (tx1, rx1) = flume::bounded::<(RelayMessage<'static>, usize)>(100);
+        let sender1 = MessageSender::new(tx1, 0);
+        let _handle1 = registry.register_connection(
+            "conn_tenant1".to_string(),
+            sender1,
+            None,
+            Arc::new(Scope::named("tenant1").unwrap()),
+        );
+
+        let (tx2, rx2) = flume::bounded::<(RelayMessage<'static>, usize)>(100);
+        let sender2 = MessageSender::new(tx2, 0);
+        let _handle2 = registry.register_connection(
+            "conn_tenant2".to_string(),
+            sender2,
+            None,
+            Arc::new(Scope::named("tenant2").unwrap()),
+        );
+
+        let (tx3, rx3) = flume::bounded::<(RelayMessage<'static>, usize)>(100);
+        let sender3 = MessageSender::new(tx3, 0);
+        let _handle3 = registry.register_connection(
+            "conn_tenant3".to_string(),
+            sender3,
+            None,
+            Arc::new(Scope::named("tenant3").unwrap()),
+        );
+
+        // Add subscriptions to all connections
+        let filters = vec![Filter::new()];
+        registry
+            .add_subscription("conn_tenant1", SubscriptionId::new("sub1"), filters.clone())
+            .unwrap();
+        registry
+            .add_subscription("conn_tenant2", SubscriptionId::new("sub2"), filters.clone())
+            .unwrap();
+        registry
+            .add_subscription("conn_tenant3", SubscriptionId::new("sub3"), filters)
+            .unwrap();
+
+        // Create and distribute event to tenant2 only
+        let keys = Keys::generate();
+        let event = EventBuilder::text_note("message for tenant2")
+            .build_with_ctx(&Instant::now(), keys.public_key())
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        registry
+            .distribute_event(Arc::new(event.clone()), &Scope::named("tenant2").unwrap())
+            .await;
+
+        // Check that only tenant2 connection received the event
+        let msg1 = rx1.try_recv();
+        let msg2 = rx2.try_recv();
+        let msg3 = rx3.try_recv();
+
+        assert!(msg1.is_err(), "tenant1 should NOT receive tenant2's event");
+        assert!(msg2.is_ok(), "tenant2 should receive its own event");
+        assert!(msg3.is_err(), "tenant3 should NOT receive tenant2's event");
+
+        // Verify the correct event was received
+        if let Ok((
+            RelayMessage::Event {
+                event: received_event,
+                ..
+            },
+            _,
+        )) = msg2
+        {
+            assert_eq!(received_event.id, event.id);
+            assert_eq!(received_event.content, "message for tenant2");
+        } else {
+            panic!("Expected Event message for tenant2");
+        }
     }
 }
