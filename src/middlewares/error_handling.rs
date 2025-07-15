@@ -58,6 +58,15 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for ErrorHan
                 ClientMessageId::Subscription(subscription_id.to_string())
             }
             Some(ClientMessage::Auth(auth)) => ClientMessageId::Event(auth.id),
+            Some(ClientMessage::NegOpen {
+                subscription_id, ..
+            }) => ClientMessageId::Subscription(subscription_id.to_string()),
+            Some(ClientMessage::NegMsg {
+                subscription_id, ..
+            }) => ClientMessageId::Subscription(subscription_id.to_string()),
+            Some(ClientMessage::NegClose { subscription_id }) => {
+                ClientMessageId::Subscription(subscription_id.to_string())
+            }
             _ => {
                 error!("Skipping unhandled client message: {:?}", ctx.message);
                 return Ok(());

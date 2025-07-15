@@ -11,6 +11,7 @@ use crate::state::NostrConnectionState;
 use crate::subscription_coordinator::StoreCommand;
 use crate::subscription_registry::SubscriptionRegistry;
 use async_trait::async_trait;
+use negentropy::{Id, Negentropy, NegentropyStorageVector};
 use nostr_sdk::prelude::*;
 use std::sync::Arc;
 use tracing::{debug, error};
@@ -259,6 +260,154 @@ where
         // Subscription service sends messages directly
         Ok(())
     }
+
+    /// Handle NEG-OPEN message for negentropy synchronization
+    async fn handle_neg_open(
+        &self,
+        state: Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        subscription_id: String,
+        filter: Filter,
+        initial_message: String,
+        sender: Option<websocket_builder::MessageSender<RelayMessage<'static>>>,
+    ) -> Result<(), Error> {
+        let subdomain = {
+            let connection_state = state.read();
+            Arc::clone(&connection_state.subdomain)
+        };
+
+        debug!(
+            "Handling NEG-OPEN for subscription {} with filter: {:?}",
+            subscription_id, filter
+        );
+
+        // Query database for negentropy items
+        let items = self
+            .database
+            .negentropy_items(filter, &subdomain)
+            .await?
+            .into_iter()
+            .collect::<Vec<_>>();
+
+        debug!(
+            "Found {} items for negentropy reconciliation in subscription {}",
+            items.len(),
+            subscription_id
+        );
+
+        // Create negentropy storage vector
+        let mut storage = NegentropyStorageVector::new();
+
+        // Add items to storage
+        for (id, timestamp) in items {
+            let id_bytes = id.to_bytes();
+            storage
+                .insert(timestamp.as_u64(), Id::from_byte_array(id_bytes))
+                .map_err(|e| Error::internal(format!("Failed to add item to storage: {e}")))?;
+        }
+
+        // Seal the storage
+        storage
+            .seal()
+            .map_err(|e| Error::internal(format!("Failed to seal storage: {e}")))?;
+
+        // Create negentropy instance with 60,000 byte frame limit
+        let mut negentropy = Negentropy::owned(storage, 60_000)
+            .map_err(|e| Error::internal(format!("Failed to create negentropy instance: {e}")))?;
+
+        // Perform initial reconciliation
+        let hex_bytes = hex::decode(&initial_message)
+            .map_err(|e| Error::internal(format!("Failed to decode initial message: {e}")))?;
+        let response_bytes = negentropy
+            .reconcile(&hex_bytes)
+            .map_err(|e| Error::internal(format!("Failed to reconcile negentropy: {e}")))?;
+
+        // Send response
+        if let Some(mut sender) = sender {
+            let response_message = RelayMessage::NegMsg {
+                subscription_id: std::borrow::Cow::Owned(SubscriptionId::new(
+                    subscription_id.clone(),
+                )),
+                message: std::borrow::Cow::Owned(hex::encode(response_bytes)),
+            };
+            sender
+                .send(response_message)
+                .map_err(|e| Error::internal(format!("Failed to send negentropy response: {e}")))?;
+        }
+
+        // Store negentropy instance in connection state
+        {
+            let mut connection_state = state.write();
+            connection_state
+                .add_negentropy_subscription(SubscriptionId::new(subscription_id), negentropy);
+        }
+
+        Ok(())
+    }
+
+    /// Handle NEG-MSG message for negentropy synchronization
+    async fn handle_neg_msg(
+        &self,
+        state: Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        subscription_id: String,
+        message: String,
+        sender: Option<websocket_builder::MessageSender<RelayMessage<'static>>>,
+    ) -> Result<(), Error> {
+        let subscription_id_obj = SubscriptionId::new(subscription_id.clone());
+
+        debug!("Handling NEG-MSG for subscription {}", subscription_id);
+
+        // Get negentropy instance from connection state
+        let response_bytes = {
+            let mut connection_state = state.write();
+            match connection_state.get_negentropy_subscription_mut(&subscription_id_obj) {
+                Some(negentropy) => {
+                    // Decode incoming message and reconcile
+                    let hex_bytes = hex::decode(&message)
+                        .map_err(|e| Error::internal(format!("Failed to decode message: {e}")))?;
+                    negentropy.reconcile(&hex_bytes).map_err(|e| {
+                        Error::internal(format!("Failed to reconcile negentropy: {e}"))
+                    })?
+                }
+                None => {
+                    return Err(Error::notice(format!(
+                        "Negentropy subscription {subscription_id} not found"
+                    )));
+                }
+            }
+        };
+
+        // Send response
+        if let Some(mut sender) = sender {
+            let response_message = RelayMessage::NegMsg {
+                subscription_id: std::borrow::Cow::Owned(subscription_id_obj),
+                message: std::borrow::Cow::Owned(hex::encode(response_bytes)),
+            };
+            sender
+                .send(response_message)
+                .map_err(|e| Error::internal(format!("Failed to send negentropy response: {e}")))?;
+        }
+
+        Ok(())
+    }
+
+    /// Handle NEG-CLOSE message for negentropy synchronization
+    async fn handle_neg_close(
+        &self,
+        state: Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        subscription_id: String,
+    ) -> Result<(), Error> {
+        let subscription_id_obj = SubscriptionId::new(subscription_id.clone());
+
+        debug!("Handling NEG-CLOSE for subscription {}", subscription_id);
+
+        // Remove negentropy subscription from connection state
+        {
+            let mut connection_state = state.write();
+            connection_state.remove_negentropy_subscription(&subscription_id_obj);
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -402,6 +551,88 @@ where
                 ctx.next().await
             }
 
+            ClientMessage::NegOpen {
+                subscription_id,
+                filter,
+                initial_message,
+                ..
+            } => {
+                // Handle NEG-OPEN message
+                match self
+                    .handle_neg_open(
+                        ctx.state.clone(),
+                        subscription_id.to_string(),
+                        filter.into_owned(),
+                        initial_message.into_owned(),
+                        ctx.sender.clone(),
+                    )
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(e) => {
+                        error!("Negentropy open error: {}", e);
+                        // Send NEG-ERR message instead of dropping connection
+                        let error_message = RelayMessage::NegErr {
+                            subscription_id: std::borrow::Cow::Owned(SubscriptionId::new(
+                                subscription_id.to_string(),
+                            )),
+                            message: std::borrow::Cow::Owned(format!("Error: {e}")),
+                        };
+                        if let Some(mut sender) = ctx.sender.clone() {
+                            let _ = sender.send(error_message);
+                        }
+                    }
+                }
+                ctx.next().await
+            }
+
+            ClientMessage::NegMsg {
+                subscription_id,
+                message,
+            } => {
+                // Handle NEG-MSG message
+                match self
+                    .handle_neg_msg(
+                        ctx.state.clone(),
+                        subscription_id.to_string(),
+                        message.into_owned(),
+                        ctx.sender.clone(),
+                    )
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(e) => {
+                        error!("Negentropy message error: {}", e);
+                        // Send NEG-ERR message instead of dropping connection
+                        let error_message = RelayMessage::NegErr {
+                            subscription_id: std::borrow::Cow::Owned(SubscriptionId::new(
+                                subscription_id.to_string(),
+                            )),
+                            message: std::borrow::Cow::Owned(format!("Error: {e}")),
+                        };
+                        if let Some(mut sender) = ctx.sender.clone() {
+                            let _ = sender.send(error_message);
+                        }
+                    }
+                }
+                ctx.next().await
+            }
+
+            ClientMessage::NegClose { subscription_id } => {
+                // Handle NEG-CLOSE message
+                match self
+                    .handle_neg_close(ctx.state.clone(), subscription_id.to_string())
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(e) => {
+                        error!("Negentropy close error: {}", e);
+                        return Err(e.into());
+                    }
+                }
+                ctx.next().await
+            }
+
             // All other messages are not handled by default
             _ => match &message {
                 ClientMessage::Auth(_) => {
@@ -416,9 +647,6 @@ where
                         "Message type not supported: {}",
                         match &message {
                             ClientMessage::Count { .. } => "COUNT",
-                            ClientMessage::NegOpen { .. } => "NEG-OPEN",
-                            ClientMessage::NegMsg { .. } => "NEG-MSG",
-                            ClientMessage::NegClose { .. } => "NEG-CLOSE",
                             _ => "UNKNOWN",
                         }
                     );
@@ -481,6 +709,17 @@ where
         {
             let state = ctx.state.read();
             state.cleanup();
+        }
+
+        // Clean up negentropy subscriptions
+        {
+            let state = ctx.state.write();
+            let neg_count = state.negentropy_subscription_count();
+            if neg_count > 0 {
+                debug!("Cleaning up {} negentropy subscriptions", neg_count);
+                // Clear all negentropy subscriptions - they'll be dropped when the HashMap is cleared
+                // This is handled automatically by the connection state cleanup
+            }
         }
 
         debug!("RelayMiddleware: Connection cleanup complete");

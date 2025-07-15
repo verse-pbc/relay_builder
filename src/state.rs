@@ -6,8 +6,10 @@ use crate::subscription_coordinator::StoreCommand;
 use crate::subscription_coordinator::SubscriptionCoordinator;
 use crate::subscription_registry::SubscriptionRegistry;
 use anyhow::Result;
+use negentropy::{Negentropy, NegentropyStorageVector};
 use nostr_lmdb::Scope;
 use nostr_sdk::prelude::*;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error};
@@ -19,7 +21,7 @@ const DEFAULT_RELAY_URL: &str = "wss://default.relay";
 pub type DefaultNostrConnectionState = NostrConnectionState<()>;
 
 /// Connection state for a WebSocket client
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct NostrConnectionState<T = ()> {
     /// The relay URL this connection is for
     pub relay_url: RelayUrl,
@@ -33,6 +35,8 @@ pub struct NostrConnectionState<T = ()> {
     pub(crate) max_subscriptions: Option<usize>,
     /// Track active subscriptions
     active_subscriptions: std::collections::HashSet<SubscriptionId>,
+    /// Active negentropy subscriptions
+    negentropy_subscriptions: HashMap<SubscriptionId, Negentropy<'static, NegentropyStorageVector>>,
     /// Connection cancellation token
     pub connection_token: CancellationToken,
     /// Registry for looking up subscriptions (used to set up subscription coordinator)
@@ -55,6 +59,7 @@ where
             subscription_coordinator: None,
             max_subscriptions: None,
             active_subscriptions: std::collections::HashSet::new(),
+            negentropy_subscriptions: HashMap::new(),
             connection_token: CancellationToken::new(),
             registry: None,
             subdomain: Arc::new(Scope::Default),
@@ -76,11 +81,33 @@ where
             subscription_coordinator: None,
             max_subscriptions: None,
             active_subscriptions: std::collections::HashSet::new(),
+            negentropy_subscriptions: HashMap::new(),
             connection_token: CancellationToken::new(),
             registry: None,
             subdomain: Arc::new(Scope::Default),
             custom_state: T::default(),
         })
+    }
+}
+
+impl<T> Clone for NostrConnectionState<T>
+where
+    T: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            relay_url: self.relay_url.clone(),
+            challenge: self.challenge.clone(),
+            authed_pubkey: self.authed_pubkey,
+            subscription_coordinator: self.subscription_coordinator.clone(),
+            max_subscriptions: self.max_subscriptions,
+            active_subscriptions: self.active_subscriptions.clone(),
+            negentropy_subscriptions: HashMap::new(), // Can't clone Negentropy, so start with empty
+            connection_token: self.connection_token.clone(),
+            registry: self.registry.clone(),
+            subdomain: self.subdomain.clone(),
+            custom_state: self.custom_state.clone(),
+        }
     }
 }
 
@@ -97,6 +124,7 @@ impl<T> NostrConnectionState<T> {
             subscription_coordinator: None,
             max_subscriptions: None,
             active_subscriptions: std::collections::HashSet::new(),
+            negentropy_subscriptions: HashMap::new(),
             connection_token: CancellationToken::new(),
             registry: None,
             subdomain: Arc::new(Scope::Default),
@@ -212,6 +240,9 @@ impl<T> NostrConnectionState<T> {
         if let Some(subscription_coordinator) = &self.subscription_coordinator {
             subscription_coordinator.cleanup();
         }
+
+        // Note: negentropy_subscriptions will be automatically cleaned up when the connection is dropped
+        // since they are stored in the connection state
     }
 
     /// Check if we can accept more subscriptions
@@ -273,5 +304,35 @@ impl<T> NostrConnectionState<T> {
     /// Set the maximum number of subscriptions (mainly for testing)
     pub fn set_max_subscriptions(&mut self, max: Option<usize>) {
         self.max_subscriptions = max;
+    }
+
+    /// Add a negentropy subscription
+    pub fn add_negentropy_subscription(
+        &mut self,
+        subscription_id: SubscriptionId,
+        negentropy: Negentropy<'static, NegentropyStorageVector>,
+    ) {
+        self.negentropy_subscriptions
+            .insert(subscription_id, negentropy);
+    }
+
+    /// Get a mutable reference to a negentropy subscription
+    pub fn get_negentropy_subscription_mut(
+        &mut self,
+        subscription_id: &SubscriptionId,
+    ) -> Option<&mut Negentropy<'static, NegentropyStorageVector>> {
+        self.negentropy_subscriptions.get_mut(subscription_id)
+    }
+
+    /// Remove a negentropy subscription
+    pub fn remove_negentropy_subscription(&mut self, subscription_id: &SubscriptionId) -> bool {
+        self.negentropy_subscriptions
+            .remove(subscription_id)
+            .is_some()
+    }
+
+    /// Get count of active negentropy subscriptions
+    pub fn negentropy_subscription_count(&self) -> usize {
+        self.negentropy_subscriptions.len()
     }
 }

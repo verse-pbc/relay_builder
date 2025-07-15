@@ -167,6 +167,46 @@ impl RelayDatabase {
         Ok(total_count)
     }
 
+    /// Get negentropy items (EventId, Timestamp) for efficient set reconciliation
+    pub async fn negentropy_items(
+        &self,
+        filter: Filter,
+        scope: &Scope,
+    ) -> Result<Vec<(EventId, Timestamp)>, Error> {
+        let lmdb = Arc::clone(&self.lmdb);
+        let scoped_view = lmdb.scoped(scope).map_err(|e| {
+            error!("Error getting scoped view: {:?}", e);
+            Error::database(format!("Failed to get scoped view: {e}"))
+        })?;
+
+        match scoped_view.negentropy_items(filter).await {
+            Ok(items) => {
+                debug!("Retrieved {} negentropy items from database", items.len());
+                Ok(items)
+            }
+            Err(e) => {
+                // Check if this is a NotFound error (empty database)
+                let error_str = e.to_string();
+                if error_str.contains("Backend(NotFound)")
+                    || error_str.contains("NotFound")
+                    || error_str.contains("Not found")
+                {
+                    debug!(
+                        "No negentropy items found (database may be empty): {}",
+                        error_str
+                    );
+                    // Return empty result for empty database
+                    Ok(Vec::new())
+                } else {
+                    error!("Error getting negentropy items: {:?}", e);
+                    Err(Error::database(format!(
+                        "Failed to get negentropy items: {e}"
+                    )))
+                }
+            }
+        }
+    }
+
     /// List all scopes available in the database
     pub async fn list_scopes(&self) -> Result<Vec<Scope>, Error> {
         let env = Arc::clone(&self.lmdb);

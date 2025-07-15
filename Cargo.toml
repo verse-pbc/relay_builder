@@ -16,11 +16,11 @@ default = []
 axum = ["dep:axum", "axum-server", "tower-http", "tower"]
 
 [dependencies]
-websocket_builder = { path = "../websocket_builder" }
-nostr-sdk = { path = "../../nostr/crates/nostr-sdk", features = ["all-nips"] }
-nostr = { path = "../../nostr/crates/nostr", features = ["std"] }
-nostr-database = { path = "../../nostr/database/nostr-database" }
-nostr-lmdb = { path = "../../nostr/database/nostr-lmdb" }
+websocket_builder = { git = "https://github.com/verse-pbc/websocket_builder.git" }
+nostr-sdk = { git = "https://github.com/verse-pbc/nostr.git", features = ["all-nips"] }
+nostr = { git = "https://github.com/verse-pbc/nostr.git", features = ["std"] }
+nostr-database = { git = "https://github.com/verse-pbc/nostr.git" }
+nostr-lmdb = { git = "https://github.com/verse-pbc/nostr.git" }
 tokio = { version = "1.45", features = ["full", "tracing"] }
 tokio-util = { version = "0.7.12", features = ["rt"] }
 tracing = "0.1"
@@ -44,6 +44,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
 parking_lot = "0.12"
 rayon = "1.10"
 num_cpus = "1.16"
+negentropy = { version = "0.5", features = ["std"] }
+hex = "0.4.3"
 
 # Optional dependencies for the built-in server
 axum = { version = "0.8", features = ["ws", "http1"], optional = true }
@@ -97,6 +99,14 @@ required-features = ["axum"]
 name = "09_production"
 required-features = ["axum"]
 
+[[example]]
+name = "configurable_relay"
+required-features = ["axum"]
+
 [[bin]]
 name = "export_import"
 path = "src/bin/export_import.rs"
+
+[[bin]]
+name = "negentropy_sync"
+path = "src/bin/negentropy_sync.rs"

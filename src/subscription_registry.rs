@@ -210,7 +210,9 @@ impl SubscriptionRegistry {
             let subscriptions = conn_data.subscriptions.read();
 
             for (sub_id, filters) in subscriptions.iter() {
-                if filters.iter().any(|filter| filter.match_event(&event)) {
+                if filters.iter().any(|filter| {
+                    filter.match_event(&event, nostr_sdk::filter::MatchEventOptions::default())
+                }) {
                     total_matches += 1;
 
                     let message = RelayMessage::event(
