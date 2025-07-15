@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
         description: "A minimal Nostr relay that accepts all events".to_string(),
         pubkey: config.keys.public_key().to_hex(),
         contact: "admin@minimal.relay".to_string(),
-        supported_nips: vec![1],
+        supported_nips: vec![1, 9, 50],
         software: "nostr_relay_builder".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         icon: None,

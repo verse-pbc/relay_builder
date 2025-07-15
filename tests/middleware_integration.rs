@@ -96,23 +96,18 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    async fn setup_test() -> (
-        Arc<RelayDatabase>,
-        Keys,
-        TempDir,
-        nostr_relay_builder::database::DatabaseSender,
-    ) {
+    async fn setup_test() -> (Arc<RelayDatabase>, Keys, TempDir) {
         let tmp_dir = TempDir::new().unwrap();
         let db_path = tmp_dir.path();
         let keys = Keys::generate();
         let _task_tracker = TaskTracker::new();
-        let (database, db_sender) = RelayDatabase::new(db_path).unwrap();
-        (Arc::new(database), keys, tmp_dir, db_sender)
+        let database = RelayDatabase::new(db_path).unwrap();
+        (Arc::new(database), keys, tmp_dir)
     }
 
     #[tokio::test]
     async fn test_relay_middleware_creation() {
-        let (database, keys, _tmp_dir, db_sender) = setup_test().await;
+        let (database, keys, _tmp_dir) = setup_test().await;
         let processor = TestEventProcessor::new(true);
         let registry = Arc::new(nostr_relay_builder::SubscriptionRegistry::new(None));
         let crypto_helper = nostr_relay_builder::CryptoHelper::new(Arc::new(keys.clone()));
@@ -123,7 +118,6 @@ mod tests {
             registry,
             500,
             RelayUrl::parse("ws://test").unwrap(),
-            db_sender,
             crypto_helper,
             None,
         );

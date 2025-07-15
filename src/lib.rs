@@ -30,7 +30,7 @@ pub mod utils;
 
 pub use config::{RelayConfig, ScopeConfig, WebSocketConfig};
 pub use crypto_helper::CryptoHelper;
-pub use database::{DatabaseSender, NostrDatabase, RelayDatabase};
+pub use database::RelayDatabase;
 pub use error::{Error, Result};
 pub use event_processor::{DefaultRelayProcessor, EventContext, EventProcessor};
 #[cfg(feature = "axum")]
@@ -48,7 +48,7 @@ pub use subscription_registry::{EventDistributor, SubscriptionRegistry};
 // Re-export commonly used middlewares
 pub use middlewares::{
     AuthConfig, ClientMessageId, ErrorHandlingMiddleware, EventVerifierMiddleware,
-    LoggerMiddleware, Nip09Middleware, Nip40ExpirationMiddleware, Nip42Middleware, Nip70Middleware,
+    LoggerMiddleware, Nip40ExpirationMiddleware, Nip42Middleware, Nip70Middleware,
 };
 
 // Re-export websocket_builder types to avoid version conflicts

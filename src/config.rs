@@ -75,8 +75,8 @@ pub struct WebSocketConfig {
 pub enum DatabaseConfig {
     /// Create a new database at the specified path
     Path(String),
-    /// Use an existing database instance with its sender
-    Instance(Arc<RelayDatabase>, crate::database::DatabaseSender),
+    /// Use an existing database instance
+    Instance(Arc<RelayDatabase>),
 }
 
 impl From<String> for DatabaseConfig {
@@ -91,9 +91,9 @@ impl From<&str> for DatabaseConfig {
     }
 }
 
-impl From<(Arc<RelayDatabase>, crate::database::DatabaseSender)> for DatabaseConfig {
-    fn from((db, sender): (Arc<RelayDatabase>, crate::database::DatabaseSender)) -> Self {
-        DatabaseConfig::Instance(db, sender)
+impl From<Arc<RelayDatabase>> for DatabaseConfig {
+    fn from(db: Arc<RelayDatabase>) -> Self {
+        DatabaseConfig::Instance(db)
     }
 }
 
@@ -144,43 +144,26 @@ impl RelayConfig {
     pub fn create_database(
         &self,
         keys: Arc<Keys>,
-    ) -> Result<
-        (
-            Arc<RelayDatabase>,
-            crate::database::DatabaseSender,
-            CryptoHelper,
-        ),
-        Error,
-    > {
+    ) -> Result<(Arc<RelayDatabase>, CryptoHelper), Error> {
         let crypto_helper = CryptoHelper::new(keys.clone());
-        let (database, db_sender) = self.create_database_with_tracker(None, None)?;
-        Ok((database, db_sender, crypto_helper))
+        let database = self.create_database_with_tracker(None, None)?;
+        Ok((database, crypto_helper))
     }
 
     /// Create database instance from configuration with optional TaskTracker
     pub fn create_database_with_tracker(
         &self,
-        task_tracker: Option<tokio_util::task::TaskTracker>,
-        cancellation_token: Option<tokio_util::sync::CancellationToken>,
-    ) -> Result<(Arc<RelayDatabase>, crate::database::DatabaseSender), Error> {
+        _task_tracker: Option<tokio_util::task::TaskTracker>,
+        _cancellation_token: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<Arc<RelayDatabase>, Error> {
         match &self.database {
             Some(DatabaseConfig::Path(path)) => {
-                let (database, db_sender) = match (task_tracker, cancellation_token) {
-                    (Some(tracker), Some(token)) => {
-                        RelayDatabase::with_task_tracker_and_token(path, tracker, token)?
-                    }
-                    (Some(tracker), None) => RelayDatabase::with_task_tracker(path, tracker)?,
-                    _ => RelayDatabase::with_config(
-                        path,
-                        self.websocket_config.max_connections,
-                        Some(self.max_subscriptions),
-                    )?,
-                };
-                Ok((Arc::new(database), db_sender))
+                let database = RelayDatabase::new(path)?;
+                Ok(Arc::new(database))
             }
-            Some(DatabaseConfig::Instance(db, sender)) => {
-                // Return the existing database instance and its sender
-                Ok((db.clone(), sender.clone()))
+            Some(DatabaseConfig::Instance(db)) => {
+                // Return the existing database instance
+                Ok(db.clone())
             }
             None => Err(Error::internal(
                 "Database configuration is required".to_string(),
@@ -191,41 +174,20 @@ impl RelayConfig {
     /// Create database instance from a database config with optional TaskTracker
     pub fn create_database_from_config(
         database_config: DatabaseConfig,
-        websocket_config: &WebSocketConfig,
-        max_subscriptions: usize,
-        task_tracker: Option<tokio_util::task::TaskTracker>,
-        cancellation_token: Option<tokio_util::sync::CancellationToken>,
-        event_sender: Option<flume::Sender<Arc<nostr_sdk::Event>>>,
-    ) -> Result<(Arc<RelayDatabase>, crate::database::DatabaseSender), Error> {
+        _websocket_config: &WebSocketConfig,
+        _max_subscriptions: usize,
+        _task_tracker: Option<tokio_util::task::TaskTracker>,
+        _cancellation_token: Option<tokio_util::sync::CancellationToken>,
+        _event_sender: Option<flume::Sender<Arc<nostr_sdk::Event>>>,
+    ) -> Result<Arc<RelayDatabase>, Error> {
         match database_config {
             DatabaseConfig::Path(path) => {
-                let (database, db_sender) = match (event_sender, task_tracker, cancellation_token) {
-                    (Some(sender), Some(tracker), Some(token)) => {
-                        RelayDatabase::with_event_sender(&path, sender, Some(tracker), Some(token))?
-                    }
-                    (Some(sender), Some(tracker), None) => {
-                        RelayDatabase::with_event_sender(&path, sender, Some(tracker), None)?
-                    }
-                    (Some(sender), None, None) => {
-                        RelayDatabase::with_event_sender(&path, sender, None, None)?
-                    }
-                    (None, Some(tracker), Some(token)) => {
-                        RelayDatabase::with_task_tracker_and_token(&path, tracker, token)?
-                    }
-                    (None, Some(tracker), None) => {
-                        RelayDatabase::with_task_tracker(&path, tracker)?
-                    }
-                    _ => RelayDatabase::with_config(
-                        &path,
-                        websocket_config.max_connections,
-                        Some(max_subscriptions),
-                    )?,
-                };
-                Ok((Arc::new(database), db_sender))
+                let database = RelayDatabase::new(&path)?;
+                Ok(Arc::new(database))
             }
-            DatabaseConfig::Instance(db, sender) => {
-                // Return the existing database instance and its sender
-                Ok((db, sender))
+            DatabaseConfig::Instance(db) => {
+                // Return the existing database instance
+                Ok(db)
             }
         }
     }

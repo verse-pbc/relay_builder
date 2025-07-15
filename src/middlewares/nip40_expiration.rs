@@ -112,7 +112,7 @@ impl Middleware for Nip40ExpirationMiddleware {
 mod tests {
     use super::*;
     use crate::test_utils::{
-        create_test_state_with_subscription_service_and_sender, setup_test_with_sender,
+        create_test_state_with_subscription_service, setup_test_with_database,
     };
     use nostr_lmdb::Scope;
     use std::borrow::Cow;
@@ -123,7 +123,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_expired_event_is_deleted() {
-        let (_tmp_dir, database, db_sender, admin_keys) = setup_test_with_sender().await;
+        let (_tmp_dir, database, admin_keys) = setup_test_with_database().await;
         let middleware = Nip40ExpirationMiddleware::new();
 
         let unsigned_expired_event = EventBuilder::new(Kind::Custom(1234), "expired content")
@@ -133,17 +133,13 @@ mod tests {
             .build(admin_keys.public_key());
         let expired_event = admin_keys.sign_event(unsigned_expired_event).await.unwrap();
 
-        db_sender
-            .save_signed_event_sync(expired_event.clone(), Scope::Default)
+        database
+            .save_event(&expired_event, &Scope::Default)
             .await
             .unwrap();
 
-        let (state, _rx) = create_test_state_with_subscription_service_and_sender(
-            None,
-            database.clone(),
-            db_sender.clone(),
-        )
-        .await;
+        let (state, _rx) =
+            create_test_state_with_subscription_service(None, database.clone()).await;
         let middlewares: Vec<
             Arc<
                 dyn Middleware<
@@ -178,7 +174,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_non_expired_event_is_not_deleted() {
-        let (_tmp_dir, database, db_sender, admin_keys) = setup_test_with_sender().await;
+        let (_tmp_dir, database, admin_keys) = setup_test_with_database().await;
         let middleware = Nip40ExpirationMiddleware::new();
 
         let unsigned_non_expired_event =
@@ -192,17 +188,13 @@ mod tests {
             .await
             .unwrap();
 
-        db_sender
-            .save_signed_event_sync(non_expired_event.clone(), Scope::Default)
+        database
+            .save_event(&non_expired_event, &Scope::Default)
             .await
             .unwrap();
 
-        let (state, _rx) = create_test_state_with_subscription_service_and_sender(
-            None,
-            database.clone(),
-            db_sender.clone(),
-        )
-        .await;
+        let (state, _rx) =
+            create_test_state_with_subscription_service(None, database.clone()).await;
         let middlewares: Vec<
             Arc<
                 dyn Middleware<
@@ -240,7 +232,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_event_without_expiration_tag_is_not_deleted() {
-        let (_tmp_dir, database, db_sender, admin_keys) = setup_test_with_sender().await;
+        let (_tmp_dir, database, admin_keys) = setup_test_with_database().await;
         let middleware = Nip40ExpirationMiddleware::new();
 
         let unsigned_no_expiration_event =
@@ -251,17 +243,13 @@ mod tests {
             .await
             .unwrap();
 
-        db_sender
-            .save_signed_event_sync(no_expiration_event.clone(), Scope::Default)
+        database
+            .save_event(&no_expiration_event, &Scope::Default)
             .await
             .unwrap();
 
-        let (state, _rx) = create_test_state_with_subscription_service_and_sender(
-            None,
-            database.clone(),
-            db_sender.clone(),
-        )
-        .await;
+        let (state, _rx) =
+            create_test_state_with_subscription_service(None, database.clone()).await;
         let middlewares: Vec<
             Arc<
                 dyn Middleware<

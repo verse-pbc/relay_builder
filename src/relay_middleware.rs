@@ -40,7 +40,6 @@ where
     registry: Arc<SubscriptionRegistry>,
     max_limit: usize,
     relay_url: RelayUrl,
-    db_sender: crate::database::DatabaseSender,
     crypto_helper: crate::crypto_helper::CryptoHelper,
     max_subscriptions: Option<usize>,
     _phantom: std::marker::PhantomData<T>,
@@ -60,7 +59,6 @@ where
     /// * `registry` - Subscription registry for event distribution
     /// * `max_limit` - Maximum limit for subscriptions
     /// * `relay_url` - The relay URL
-    /// * `db_sender` - Database sender for async operations
     /// * `crypto_helper` - Crypto helper for signing events
     /// * `max_subscriptions` - Maximum subscriptions per connection
     #[allow(clippy::too_many_arguments)]
@@ -71,7 +69,6 @@ where
         registry: Arc<SubscriptionRegistry>,
         max_limit: usize,
         relay_url: RelayUrl,
-        db_sender: crate::database::DatabaseSender,
         crypto_helper: crate::crypto_helper::CryptoHelper,
         max_subscriptions: Option<usize>,
     ) -> Self {
@@ -82,7 +79,6 @@ where
             registry,
             max_limit,
             relay_url,
-            db_sender,
             crypto_helper,
             max_subscriptions,
             _phantom: std::marker::PhantomData,
@@ -289,7 +285,6 @@ where
         {
             let mut state = ctx.state.write();
             state.relay_url = self.relay_url.clone();
-            state.db_sender = Some(self.db_sender.clone());
             state.registry = Some(self.registry.clone());
             state.max_subscriptions = self.max_subscriptions;
             // TODO: subdomain resolution needs to be handled differently without factory pattern

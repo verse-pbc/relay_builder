@@ -488,18 +488,18 @@ where
 
         // Only create crypto worker if we're creating a new database
         let database = self.config.database.take();
-        let (database, db_sender, crypto_helper) = match database {
-            Some(DatabaseConfig::Instance(db, db_sender)) => {
+        let (database, crypto_helper) = match database {
+            Some(DatabaseConfig::Instance(db)) => {
                 // Use existing database instance - create crypto worker for signature verification
                 let keys = Arc::new(self.config.keys.clone());
                 let crypto_helper = CryptoHelper::new(keys);
-                (db, db_sender, crypto_helper)
+                (db, crypto_helper)
             }
             Some(database_config @ DatabaseConfig::Path(_)) => {
                 // Create new database with keys
                 let keys = Arc::new(self.config.keys.clone());
                 let crypto_helper = CryptoHelper::new(keys);
-                let (database, db_sender) = RelayConfig::create_database_from_config(
+                let database = RelayConfig::create_database_from_config(
                     database_config,
                     &self.config.websocket_config,
                     self.config.max_subscriptions,
@@ -507,7 +507,7 @@ where
                     self.cancellation_token.clone(),
                     Some(event_sender),
                 )?;
-                (database, db_sender, crypto_helper)
+                (database, crypto_helper)
             }
             None => {
                 return Err(Error::internal(
@@ -573,7 +573,6 @@ where
             subscription_registry.clone(),
             self.config.max_limit,
             RelayUrl::parse(&relay_url).expect("Valid relay URL"),
-            db_sender.clone(),
             crypto_helper.clone(),
             max_subscriptions,
         );

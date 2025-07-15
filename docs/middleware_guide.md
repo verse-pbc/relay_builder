@@ -98,7 +98,6 @@ Use `Middleware` when you need to:
 
 ### Common middleware use cases:
 1. **Protocol Extensions** (NIPs)
-   - `Nip09Middleware` - Handles deletion events
    - `Nip40ExpirationMiddleware` - Removes expired events
    - `Nip42Middleware` - Authentication
    - `Nip70Middleware` - Protected events
@@ -188,8 +187,6 @@ Client Message Flow:
 [EventVerifierMiddleware]   // Signature verification
     ↓
 [ValidationMiddleware]      // Custom validation
-    ↓
-[Nip09Middleware]          // Deletion handling
     ↓
 [Nip40ExpirationMiddleware] // Expiration handling
     ↓

@@ -1,4 +1,4 @@
-use crate::database::{DatabaseSender, RelayDatabase};
+use crate::database::RelayDatabase;
 use crate::state::NostrConnectionState;
 use crate::subscription_coordinator::SubscriptionCoordinator;
 use crate::subscription_registry::SubscriptionRegistry;
@@ -16,16 +16,16 @@ pub async fn setup_test() -> (TempDir, Arc<RelayDatabase>, Keys) {
     let tmp_dir = TempDir::new().unwrap();
     let db_path = tmp_dir.path().join("test.db");
     let keys = Keys::generate();
-    let (database, _db_sender) = RelayDatabase::new(db_path.to_str().unwrap()).unwrap();
+    let database = RelayDatabase::new(db_path.to_str().unwrap()).unwrap();
     (tmp_dir, Arc::new(database), keys)
 }
 
-pub async fn setup_test_with_sender() -> (TempDir, Arc<RelayDatabase>, DatabaseSender, Keys) {
+pub async fn setup_test_with_database() -> (TempDir, Arc<RelayDatabase>, Keys) {
     let tmp_dir = TempDir::new().unwrap();
     let db_path = tmp_dir.path().join("test.db");
     let keys = Keys::generate();
-    let (database, db_sender) = RelayDatabase::new(db_path.to_str().unwrap()).unwrap();
-    (tmp_dir, Arc::new(database), db_sender, keys)
+    let database = RelayDatabase::new(db_path.to_str().unwrap()).unwrap();
+    (tmp_dir, Arc::new(database), keys)
 }
 
 pub async fn create_test_keys() -> (Keys, Keys, Keys) {
@@ -64,20 +64,6 @@ pub async fn create_test_state_with_subscription_service(
     NostrConnectionState,
     flume::Receiver<(RelayMessage<'static>, usize)>,
 ) {
-    // Create a db_sender for testing
-    let (_tmp, _db, db_sender, _keys) = setup_test_with_sender().await;
-
-    create_test_state_with_subscription_service_and_sender(pubkey, database, db_sender).await
-}
-
-pub async fn create_test_state_with_subscription_service_and_sender(
-    pubkey: Option<nostr_sdk::PublicKey>,
-    database: Arc<RelayDatabase>,
-    db_sender: DatabaseSender,
-) -> (
-    NostrConnectionState,
-    flume::Receiver<(RelayMessage<'static>, usize)>,
-) {
     let (tx, rx) = flume::bounded(10);
     let sender = MessageSender::new(tx, 0);
 
@@ -93,7 +79,6 @@ pub async fn create_test_state_with_subscription_service_and_sender(
 
     let subscription_coordinator = SubscriptionCoordinator::new(
         database,
-        db_sender.clone(),
         crypto_helper,
         registry,
         "test_connection".to_string(),
@@ -109,7 +94,6 @@ pub async fn create_test_state_with_subscription_service_and_sender(
         NostrConnectionState::new(RelayUrl::parse("ws://test.relay").expect("Valid URL"))
             .expect("Failed to create test state");
     state.authed_pubkey = pubkey;
-    state.db_sender = Some(db_sender);
     state.max_subscriptions = Some(100); // Set a reasonable test limit
 
     // Use the test method to add the subscription coordinator

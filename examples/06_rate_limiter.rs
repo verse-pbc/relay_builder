@@ -112,7 +112,7 @@ async fn main() -> Result<()> {
         description: "Demonstrates custom rate limiting middleware".to_string(),
         pubkey: config.keys.public_key().to_string(),
         contact: "admin@example.com".to_string(),
-        supported_nips: vec![1, 11],
+        supported_nips: vec![1, 9, 50],
         software: "nostr_relay_builder".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         icon: None,

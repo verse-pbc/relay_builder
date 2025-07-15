@@ -3,10 +3,10 @@
 //! This module replaces the actor-based subscription_service with a simpler
 //! coordinator that integrates with the SubscriptionRegistry for live events.
 
-use crate::database::{DatabaseSender, RelayDatabase};
+use crate::database::RelayDatabase;
 use crate::error::Error;
 use crate::metrics::SubscriptionMetricsHandler;
-use crate::subscription_registry::SubscriptionRegistry;
+use crate::subscription_registry::{EventDistributor, SubscriptionRegistry};
 use flume;
 use nostr_lmdb::Scope;
 use nostr_sdk::prelude::*;
@@ -146,7 +146,7 @@ impl ReplaceableEventsBuffer {
 
     pub async fn flush(
         &mut self,
-        db_sender: &DatabaseSender,
+        database: &Arc<RelayDatabase>,
         crypto_helper: &crate::crypto_helper::CryptoHelper,
     ) {
         if self.buffer.is_empty() {
@@ -183,9 +183,11 @@ impl ReplaceableEventsBuffer {
             // Wait for the signed result
             match rx.await {
                 Ok(Ok(Some(signed_command))) => {
-                    // Send the signed event to the database
-                    if let Err(e) = db_sender.send(signed_command).await {
-                        error!("Failed to save replaceable event: {:?}", e);
+                    // Extract the signed event and save it directly
+                    if let StoreCommand::SaveSignedEvent(event, scope, _) = signed_command {
+                        if let Err(e) = database.save_event(&event, &scope).await {
+                            error!("Failed to save replaceable event: {:?}", e);
+                        }
                     }
                 }
                 Ok(Ok(None)) => {
@@ -203,7 +205,7 @@ impl ReplaceableEventsBuffer {
 
     pub fn start_with_sender(
         mut self,
-        db_sender: DatabaseSender,
+        database: Arc<RelayDatabase>,
         crypto_helper: crate::crypto_helper::CryptoHelper,
         cancellation_token: CancellationToken,
         task_name: String,
@@ -217,7 +219,7 @@ impl ReplaceableEventsBuffer {
                 tokio::select! {
                     _ = cancellation_token.cancelled() => {
                         debug!("{} cancelled, flushing remaining events", task_name);
-                        self.flush(&db_sender, &crypto_helper).await;
+                        self.flush(&database, &crypto_helper).await;
                         break;
                     }
 
@@ -228,7 +230,7 @@ impl ReplaceableEventsBuffer {
                     }
 
                     _ = tokio::time::sleep(Duration::from_secs(1)) => {
-                        self.flush(&db_sender, &crypto_helper).await;
+                        self.flush(&database, &crypto_helper).await;
                     }
                 }
             }
@@ -240,7 +242,6 @@ impl ReplaceableEventsBuffer {
 #[derive(Clone)]
 pub struct SubscriptionCoordinator {
     database: Arc<RelayDatabase>,
-    db_sender: DatabaseSender,
     crypto_helper: crate::crypto_helper::CryptoHelper,
     registry: Arc<SubscriptionRegistry>,
     connection_id: String,
@@ -268,7 +269,6 @@ impl SubscriptionCoordinator {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         database: Arc<RelayDatabase>,
-        db_sender: DatabaseSender,
         crypto_helper: crate::crypto_helper::CryptoHelper,
         registry: Arc<SubscriptionRegistry>,
         connection_id: String,
@@ -292,7 +292,7 @@ impl SubscriptionCoordinator {
         let replaceable_event_queue = buffer.get_sender();
 
         buffer.start_with_sender(
-            db_sender.clone(),
+            database.clone(),
             crypto_helper.clone(),
             cancellation_token,
             format!("replaceable_events_buffer_{connection_id}"),
@@ -300,7 +300,6 @@ impl SubscriptionCoordinator {
 
         Self {
             database,
-            db_sender,
             crypto_helper,
             registry,
             connection_id,
@@ -366,11 +365,15 @@ impl SubscriptionCoordinator {
                 // Wait for the signed result
                 match rx.await {
                     Ok(Ok(Some(signed_command))) => {
-                        // Send the signed event to the database
-                        self.db_sender
-                            .send(signed_command)
-                            .await
-                            .map_err(|e| Error::internal(format!("Failed to save event: {e}")))?;
+                        // Extract the signed event and save it directly
+                        if let StoreCommand::SaveSignedEvent(event, scope, _) = signed_command {
+                            self.database
+                                .save_event(&event, &scope)
+                                .await
+                                .map_err(|e| {
+                                    Error::internal(format!("Failed to save event: {e}"))
+                                })?;
+                        }
                     }
                     Ok(Ok(None)) => {
                         return Err(Error::internal("Event signed but not returned"));
@@ -391,8 +394,63 @@ impl SubscriptionCoordinator {
 
                 Ok(())
             }
-            StoreCommand::SaveSignedEvent(_, _, _) => self.db_sender.send(command).await,
-            StoreCommand::DeleteEvents(_, _, _) => self.db_sender.send(command).await,
+            StoreCommand::SaveSignedEvent(event, scope, response_handler) => {
+                // Save the event directly to the database
+                let save_result = self
+                    .database
+                    .save_event(&event, &scope)
+                    .await
+                    .map_err(|e| Error::internal(e.to_string()));
+
+                // Send OK response if we have a MessageSender handler
+                if let Some(ResponseHandler::MessageSender(mut sender)) = response_handler {
+                    let ok = save_result.is_ok();
+                    let msg = if ok {
+                        RelayMessage::ok(event.id, true, "")
+                    } else {
+                        RelayMessage::ok(
+                            event.id,
+                            false,
+                            save_result.as_ref().unwrap_err().to_string(),
+                        )
+                    };
+                    sender.send_bypass(msg);
+                } else if let Some(ResponseHandler::Oneshot(tx)) = response_handler {
+                    let _ = tx.send(
+                        save_result
+                            .as_ref()
+                            .map(|_| ())
+                            .map_err(|_| Error::internal("Failed to save event")),
+                    );
+                }
+
+                // If the save was successful, distribute the event to subscribers
+                if save_result.is_ok() {
+                    self.registry.distribute_event(Arc::new(*event)).await;
+                }
+
+                save_result
+            }
+            StoreCommand::DeleteEvents(filter, scope, response_handler) => {
+                // Delete events directly from the database
+                let delete_result = self
+                    .database
+                    .delete(filter, &scope)
+                    .await
+                    .map_err(|e| Error::internal(e.to_string()));
+
+                // Send response if we have a handler
+                if let Some(handler) = response_handler {
+                    let _ = handler.send(
+                        delete_result
+                            .as_ref()
+                            .map(|_| ())
+                            .map_err(|_| Error::internal("Failed to delete events")),
+                    );
+                }
+
+                delete_result
+            }
         }
     }
 
@@ -570,7 +628,7 @@ impl SubscriptionCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::setup_test_with_sender;
+    use crate::test_utils::setup_test_with_database;
     use std::time::{Duration, Instant};
     use tokio::time::sleep;
 
@@ -619,14 +677,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_window_sliding_limit_only() {
-        let (_tmp_dir, database, db_sender, keys) = setup_test_with_sender().await;
+        let (_tmp_dir, database, keys) = setup_test_with_database().await;
         let (tx, rx) = flume::bounded(100);
         let registry = Arc::new(SubscriptionRegistry::new(None));
         let cancellation_token = CancellationToken::new();
 
         let coordinator = SubscriptionCoordinator::new(
             database.clone(),
-            db_sender.clone(),
             create_test_crypto_helper(),
             registry,
             "test_conn".to_string(),
@@ -645,14 +702,7 @@ mod tests {
             let timestamp = Timestamp::from(base_timestamp.as_u64() + i * 10);
             let group = if i % 2 == 0 { "public" } else { "private" };
             let event = create_test_event(&keys, timestamp, group, &format!("Event {i}")).await;
-            db_sender
-                .send(StoreCommand::SaveSignedEvent(
-                    Box::new(event),
-                    Scope::Default,
-                    None,
-                ))
-                .await
-                .unwrap();
+            database.save_event(&event, &Scope::Default).await.unwrap();
         }
 
         // Wait a bit for database to process
@@ -724,14 +774,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_window_sliding_until_limit() {
-        let (_tmp_dir, database, db_sender, keys) = setup_test_with_sender().await;
+        let (_tmp_dir, database, keys) = setup_test_with_database().await;
         let (tx, rx) = flume::bounded(100);
         let registry = Arc::new(SubscriptionRegistry::new(None));
         let cancellation_token = CancellationToken::new();
 
         let coordinator = SubscriptionCoordinator::new(
             database.clone(),
-            db_sender.clone(),
             create_test_crypto_helper(),
             registry,
             "test_conn".to_string(),
@@ -750,14 +799,7 @@ mod tests {
             let timestamp = Timestamp::from(base_timestamp.as_u64() + i * 10);
             let group = if i % 2 == 0 { "public" } else { "private" };
             let event = create_test_event(&keys, timestamp, group, &format!("Event {i}")).await;
-            db_sender
-                .send(StoreCommand::SaveSignedEvent(
-                    Box::new(event),
-                    Scope::Default,
-                    None,
-                ))
-                .await
-                .unwrap();
+            database.save_event(&event, &Scope::Default).await.unwrap();
         }
 
         sleep(Duration::from_millis(100)).await;
@@ -811,14 +853,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_window_sliding_since_limit() {
-        let (_tmp_dir, database, db_sender, keys) = setup_test_with_sender().await;
+        let (_tmp_dir, database, keys) = setup_test_with_database().await;
         let (tx, rx) = flume::bounded(100);
         let registry = Arc::new(SubscriptionRegistry::new(None));
         let cancellation_token = CancellationToken::new();
 
         let coordinator = SubscriptionCoordinator::new(
             database.clone(),
-            db_sender.clone(),
             create_test_crypto_helper(),
             registry,
             "test_conn".to_string(),
@@ -837,14 +878,7 @@ mod tests {
             let timestamp = Timestamp::from(base_timestamp.as_u64() + i * 10);
             let group = if i % 2 == 0 { "public" } else { "private" };
             let event = create_test_event(&keys, timestamp, group, &format!("Event {i}")).await;
-            db_sender
-                .send(StoreCommand::SaveSignedEvent(
-                    Box::new(event),
-                    Scope::Default,
-                    None,
-                ))
-                .await
-                .unwrap();
+            database.save_event(&event, &Scope::Default).await.unwrap();
         }
 
         sleep(Duration::from_millis(100)).await;
@@ -915,14 +949,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_pagination_bug_scenario() {
-        let (_tmp_dir, database, db_sender, keys) = setup_test_with_sender().await;
+        let (_tmp_dir, database, keys) = setup_test_with_database().await;
         let (tx, rx) = flume::bounded(100);
         let registry = Arc::new(SubscriptionRegistry::new(None));
         let cancellation_token = CancellationToken::new();
 
         let coordinator = SubscriptionCoordinator::new(
             database.clone(),
-            db_sender.clone(),
             create_test_crypto_helper(),
             registry,
             "test_conn".to_string(),
@@ -939,28 +972,14 @@ mod tests {
         // Create 1 old accessible event
         let event =
             create_test_event(&keys, base_timestamp, "public", "Old accessible event").await;
-        db_sender
-            .send(StoreCommand::SaveSignedEvent(
-                Box::new(event),
-                Scope::Default,
-                None,
-            ))
-            .await
-            .unwrap();
+        database.save_event(&event, &Scope::Default).await.unwrap();
 
         // Create 5 newer non-accessible events
         for i in 0..5 {
             let timestamp = Timestamp::from(base_timestamp.as_u64() + 100 + i * 10);
             let event =
                 create_test_event(&keys, timestamp, "private", &format!("Private {i}")).await;
-            db_sender
-                .send(StoreCommand::SaveSignedEvent(
-                    Box::new(event),
-                    Scope::Default,
-                    None,
-                ))
-                .await
-                .unwrap();
+            database.save_event(&event, &Scope::Default).await.unwrap();
         }
 
         // Wait a bit for database to process
@@ -1022,14 +1041,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_exponential_buffer_since_until_limit() {
-        let (_tmp_dir, database, db_sender, keys) = setup_test_with_sender().await;
+        let (_tmp_dir, database, keys) = setup_test_with_database().await;
         let (tx, rx) = flume::bounded(100);
         let registry = Arc::new(SubscriptionRegistry::new(None));
         let cancellation_token = CancellationToken::new();
 
         let coordinator = SubscriptionCoordinator::new(
             database.clone(),
-            db_sender.clone(),
             create_test_crypto_helper(),
             registry,
             "test_conn".to_string(),
@@ -1048,14 +1066,7 @@ mod tests {
             let timestamp = Timestamp::from(base_timestamp.as_u64() + i * 5);
             let group = if i % 2 == 0 { "public" } else { "private" };
             let event = create_test_event(&keys, timestamp, group, &format!("Event {i}")).await;
-            db_sender
-                .send(StoreCommand::SaveSignedEvent(
-                    Box::new(event),
-                    Scope::Default,
-                    None,
-                ))
-                .await
-                .unwrap();
+            database.save_event(&event, &Scope::Default).await.unwrap();
         }
 
         // Wait a bit for database to process
@@ -1137,7 +1148,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_max_limit_enforcement() {
-        let (_tmp_dir, database, db_sender, keys) = setup_test_with_sender().await;
+        let (_tmp_dir, database, keys) = setup_test_with_database().await;
         let (tx, rx) = flume::bounded(100);
         let registry = Arc::new(SubscriptionRegistry::new(None));
         let cancellation_token = CancellationToken::new();
@@ -1146,7 +1157,6 @@ mod tests {
         let max_limit = 10;
         let coordinator = SubscriptionCoordinator::new(
             database.clone(),
-            db_sender.clone(),
             create_test_crypto_helper(),
             registry,
             "test_conn".to_string(),
@@ -1164,14 +1174,7 @@ mod tests {
                 .build_with_ctx(&Instant::now(), keys.public_key())
                 .sign_with_keys(&keys)
                 .unwrap();
-            db_sender
-                .send(StoreCommand::SaveSignedEvent(
-                    Box::new(event),
-                    Scope::Default,
-                    None,
-                ))
-                .await
-                .unwrap();
+            database.save_event(&event, &Scope::Default).await.unwrap();
         }
 
         sleep(Duration::from_millis(100)).await;
@@ -1222,14 +1225,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_filters_smallest_limit() {
-        let (_tmp_dir, database, db_sender, keys) = setup_test_with_sender().await;
+        let (_tmp_dir, database, keys) = setup_test_with_database().await;
         let (tx, rx) = flume::bounded(100);
         let registry = Arc::new(SubscriptionRegistry::new(None));
         let cancellation_token = CancellationToken::new();
 
         let coordinator = SubscriptionCoordinator::new(
             database.clone(),
-            db_sender.clone(),
             create_test_crypto_helper(),
             registry,
             "test_conn".to_string(),
@@ -1247,14 +1249,7 @@ mod tests {
                 .build_with_ctx(&Instant::now(), keys.public_key())
                 .sign_with_keys(&keys)
                 .unwrap();
-            db_sender
-                .send(StoreCommand::SaveSignedEvent(
-                    Box::new(event),
-                    Scope::Default,
-                    None,
-                ))
-                .await
-                .unwrap();
+            database.save_event(&event, &Scope::Default).await.unwrap();
         }
 
         sleep(Duration::from_millis(100)).await;

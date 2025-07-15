@@ -34,21 +34,17 @@ fn bench_write_throughput(c: &mut Criterion) {
                 b.to_async(&rt).iter(|| async {
                     let tmp_dir = TempDir::new().unwrap();
                     let db_path = tmp_dir.path().join("bench.db");
-                    let (database, db_sender) =
-                        RelayDatabase::new(&db_path).expect("Failed to create database");
-                    let _database = Arc::new(database);
+                    let database = RelayDatabase::new(&db_path).expect("Failed to create database");
+                    let database = Arc::new(database);
 
                     // Send events
                     for i in 0..count {
                         let event = generate_event(i).await;
-                        db_sender
-                            .save_signed_event(event, nostr_lmdb::Scope::Default)
+                        database
+                            .save_event(&event, &nostr_lmdb::Scope::Default)
                             .await
                             .expect("Failed to save event");
                     }
-
-                    // Drop sender and ensure all events are persisted
-                    drop(db_sender);
 
                     black_box(count);
                 });
@@ -76,18 +72,16 @@ fn bench_backpressure(c: &mut Criterion) {
         b.to_async(&rt).iter(|| async {
             let tmp_dir = TempDir::new().unwrap();
             let db_path = tmp_dir.path().join("bench.db");
-            let (database, db_sender) =
-                RelayDatabase::new(&db_path).expect("Failed to create database");
-            let _database = Arc::new(database);
+            let database = RelayDatabase::new(&db_path).expect("Failed to create database");
+            let database = Arc::new(database);
 
             // Send many events rapidly to trigger backpressure
             let mut handles = vec![];
             for i in 0..event_count {
-                let sender = db_sender.clone();
+                let db = database.clone();
                 let handle = tokio::spawn(async move {
                     let event = generate_event(i).await;
-                    sender
-                        .save_signed_event(event, nostr_lmdb::Scope::Default)
+                    db.save_event(&event, &nostr_lmdb::Scope::Default)
                         .await
                         .expect("Failed to save event");
                 });
@@ -98,9 +92,6 @@ fn bench_backpressure(c: &mut Criterion) {
             for handle in handles {
                 handle.await.unwrap();
             }
-
-            // Shutdown
-            drop(db_sender);
 
             black_box(event_count);
         });

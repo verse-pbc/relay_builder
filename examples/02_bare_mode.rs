@@ -88,7 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .to_string(),
         pubkey: keys.public_key().to_string(),
         contact: "admin@example.com".to_string(),
-        supported_nips: vec![1, 2, 9, 11, 12, 15, 16, 20, 22],
+        supported_nips: vec![1, 9, 50],
         software: "https://github.com/verse-pbc/nostr_relay_builder".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         icon: None,

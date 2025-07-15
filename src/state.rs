@@ -1,6 +1,6 @@
 //! Connection state management
 
-use crate::database::{DatabaseSender, RelayDatabase};
+use crate::database::RelayDatabase;
 use crate::error::Error;
 use crate::subscription_coordinator::StoreCommand;
 use crate::subscription_coordinator::SubscriptionCoordinator;
@@ -29,8 +29,6 @@ pub struct NostrConnectionState<T = ()> {
     pub authed_pubkey: Option<PublicKey>,
     /// Subscription coordinator for this connection (private - use methods below)
     subscription_coordinator: Option<SubscriptionCoordinator>,
-    /// Database sender for saving events (set by the connection factory)
-    pub(crate) db_sender: Option<DatabaseSender>,
     /// Maximum number of subscriptions allowed (set by the connection factory)
     pub(crate) max_subscriptions: Option<usize>,
     /// Track active subscriptions
@@ -55,7 +53,6 @@ where
             challenge: None,
             authed_pubkey: None,
             subscription_coordinator: None,
-            db_sender: None,
             max_subscriptions: None,
             active_subscriptions: std::collections::HashSet::new(),
             connection_token: CancellationToken::new(),
@@ -77,7 +74,6 @@ where
             challenge: None,
             authed_pubkey: None,
             subscription_coordinator: None,
-            db_sender: None,
             max_subscriptions: None,
             active_subscriptions: std::collections::HashSet::new(),
             connection_token: CancellationToken::new(),
@@ -99,7 +95,6 @@ impl<T> NostrConnectionState<T> {
             challenge: None,
             authed_pubkey: None,
             subscription_coordinator: None,
-            db_sender: None,
             max_subscriptions: None,
             active_subscriptions: std::collections::HashSet::new(),
             connection_token: CancellationToken::new(),
@@ -132,17 +127,10 @@ impl<T> NostrConnectionState<T> {
     ) -> Result<(), Error> {
         debug!("Setting up connection for {}", connection_id);
 
-        let db_sender = self
-            .db_sender
-            .as_ref()
-            .ok_or_else(|| Error::internal("DatabaseSender not set by connection factory"))?
-            .clone();
-
         let metrics_handler = crate::global_metrics::get_subscription_metrics_handler();
 
         let coordinator = SubscriptionCoordinator::new(
             database,
-            db_sender,
             crypto_helper,
             registry,
             connection_id,

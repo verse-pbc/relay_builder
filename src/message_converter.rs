@@ -2,7 +2,6 @@
 
 use anyhow::Result;
 use nostr_sdk::prelude::*;
-use std::borrow::Cow;
 use websocket_builder::MessageConverter;
 
 /// Message converter for Nostr protocol messages
@@ -15,31 +14,25 @@ impl<'a> MessageConverter<ClientMessage<'a>, RelayMessage<'a>> for NostrMessageC
             return Ok(None);
         }
 
-        // Convert bytes to string first
-        let message = match std::str::from_utf8(bytes) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::debug!("Invalid UTF-8 in client message: {}", e);
-                return Ok(None);
-            }
-        };
-
-        match ClientMessage::from_json(message) {
+        match ClientMessage::from_json(bytes) {
             Ok(sdk_msg) => Ok(Some(sdk_msg)),
             Err(e) => {
-                if message.trim().is_empty() {
-                    Ok(None)
-                } else {
-                    tracing::warn!("Failed to parse client message: {}, error: {}", message, e);
-                    Err(anyhow::anyhow!("Failed to parse client message: {}", e))
-                }
+                let message = match std::str::from_utf8(bytes) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!("Invalid UTF-8 in client message: {}", e);
+                        return Ok(None);
+                    }
+                };
+
+                tracing::warn!("Failed to parse client message: {}, error: {}", message, e);
+                Err(anyhow::anyhow!("Failed to parse client message: {}", e))
             }
         }
     }
 
-    fn outbound_to_bytes(&self, message: RelayMessage<'a>) -> Result<Cow<'_, [u8]>> {
-        let json = message.as_json();
-        Ok(Cow::Owned(json.into_bytes()))
+    fn outbound_to_string(&self, message: RelayMessage<'a>) -> Result<String> {
+        Ok(message.as_json())
     }
 }
 
@@ -47,45 +40,6 @@ impl<'a> MessageConverter<ClientMessage<'a>, RelayMessage<'a>> for NostrMessageC
 mod tests {
     use super::*;
     use nostr_sdk::{EventBuilder, Keys, Kind, RelayUrl, SubscriptionId};
-
-    #[test]
-    fn test_outbound_to_bytes() {
-        let converter = NostrMessageConverter;
-
-        // Test with EVENT message
-        let keys = Keys::generate();
-        let event = EventBuilder::text_note("Hello")
-            .sign_with_keys(&keys)
-            .unwrap();
-        let message = RelayMessage::event(SubscriptionId::new("test"), event);
-
-        let result = converter.outbound_to_bytes(message).unwrap();
-        let json = String::from_utf8(result.into_owned()).unwrap();
-        assert!(json.contains("EVENT"));
-        assert!(json.contains("test"));
-
-        // Test with NOTICE message
-        let notice = RelayMessage::notice("Test notice");
-        let result = converter.outbound_to_bytes(notice).unwrap();
-        let json = String::from_utf8(result.into_owned()).unwrap();
-        assert!(json.contains("NOTICE"));
-        assert!(json.contains("Test notice"));
-
-        // Test with EOSE message
-        let eose = RelayMessage::eose(SubscriptionId::new("sub1"));
-        let result = converter.outbound_to_bytes(eose).unwrap();
-        let json = String::from_utf8(result.into_owned()).unwrap();
-        assert!(json.contains("EOSE"));
-        assert!(json.contains("sub1"));
-
-        // Test with OK message
-        let ok = RelayMessage::ok(EventId::all_zeros(), true, "saved");
-        let result = converter.outbound_to_bytes(ok).unwrap();
-        let json = String::from_utf8(result.into_owned()).unwrap();
-        assert!(json.contains("OK"));
-        assert!(json.contains("true"));
-        assert!(json.contains("saved"));
-    }
 
     #[test]
     fn test_inbound_from_bytes_valid_messages() {
@@ -142,10 +96,12 @@ mod tests {
         assert!(result.is_none());
 
         // Test whitespace only
-        let result = converter
-            .inbound_from_bytes("   \n\t  ".as_bytes())
-            .unwrap();
-        assert!(result.is_none());
+        let result = converter.inbound_from_bytes("   \n\t  ".as_bytes());
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to parse client message"));
     }
 
     #[test]
@@ -193,5 +149,39 @@ mod tests {
         } else {
             panic!("Expected AUTH message");
         }
+    }
+
+    #[test]
+    fn test_outbound_to_string() {
+        let converter = NostrMessageConverter;
+
+        // Test with NOTICE message
+        let notice = RelayMessage::notice("Test notice");
+        let result = converter.outbound_to_string(notice).unwrap();
+        assert!(result.contains("NOTICE"));
+        assert!(result.contains("Test notice"));
+
+        // Test with EVENT message
+        let keys = Keys::generate();
+        let event = EventBuilder::text_note("Hello")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let message = RelayMessage::event(SubscriptionId::new("test"), event);
+        let result = converter.outbound_to_string(message).unwrap();
+        assert!(result.contains("EVENT"));
+        assert!(result.contains("test"));
+
+        // Test with EOSE message
+        let eose = RelayMessage::eose(SubscriptionId::new("sub1"));
+        let result = converter.outbound_to_string(eose).unwrap();
+        assert!(result.contains("EOSE"));
+        assert!(result.contains("sub1"));
+
+        // Test with OK message
+        let ok = RelayMessage::ok(EventId::all_zeros(), true, "saved");
+        let result = converter.outbound_to_string(ok).unwrap();
+        assert!(result.contains("OK"));
+        assert!(result.contains("true"));
+        assert!(result.contains("saved"));
     }
 }
