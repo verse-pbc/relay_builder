@@ -94,11 +94,9 @@ NIP-42 authentication support.
 
 ## Step 5: Protocol Features
 
-NIP support for deletion, expiration, and protected events.
+NIP support for expiration and protected events.
 
 **Library Features:**
-- `config.create_database()` - Database and sender for NIP-09 (returns tuple)
-- `.with_middleware(Nip09Middleware)` - Event deletion (NIP-09)
 - `.with_middleware(Nip40ExpirationMiddleware)` - Event expiration (NIP-40)
 - `.with_middleware(Nip70Middleware)` - Protected events (NIP-70)
 

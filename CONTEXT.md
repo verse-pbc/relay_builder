@@ -24,7 +24,6 @@ nostr_relay_builder/
 │   │   ├── event_verifier.rs # Cryptographic verification
 │   │   ├── logger.rs         # Request/response logging
 │   │   ├── metrics.rs        # Performance metrics
-│   │   ├── nip09_deletion.rs # NIP-09 event deletion
 │   │   ├── nip40_expiration.rs # NIP-40 expiration
 │   │   ├── nip42_auth.rs    # NIP-42 authentication
 │   │   └── nip70_protected.rs # NIP-70 protected events

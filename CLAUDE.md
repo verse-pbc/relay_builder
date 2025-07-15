@@ -63,7 +63,6 @@ Built-in middleware in `src/middlewares/`:
 - `event_verifier.rs` - Cryptographic signature verification
 - `logger.rs` - Request/response logging
 - `metrics.rs` - Performance metrics collection
-- `nip09_deletion.rs` - NIP-09 event deletion support
 - `nip40_expiration.rs` - NIP-40 event expiration
 - `nip42_auth.rs` - NIP-42 authentication
 - `nip70_protected.rs` - NIP-70 protected events

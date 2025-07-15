@@ -1,405 +1,25 @@
 //! Database abstraction for Nostr relays
 
 use crate::error::Error;
-use crate::subscription_coordinator::{ResponseHandler, StoreCommand};
-use flume;
 use nostr_database::nostr::{Event, Filter};
 use nostr_database::Events;
 use nostr_lmdb::{NostrLMDB, Scope};
 use nostr_sdk::prelude::*;
-use std::iter;
 use std::sync::Arc;
-use tokio::sync::oneshot;
-use tokio_util::sync::CancellationToken;
-use tokio_util::task::TaskTracker;
-use tracing::{debug, error, info, warn};
-
-/// Default maximum number of events that can be queued for writing.
-/// This provides backpressure to prevent unbounded memory growth.
-/// When the queue is full, writers will wait until space is available.
-/// Can be overridden by passing max_connections and max_subscriptions to calculate dynamically.
-const DEFAULT_WRITE_QUEUE_CAPACITY: usize = 100_000;
-
-/// This wrapper provides a clean API for sending commands to the database
-#[derive(Clone)]
-pub struct DatabaseSender {
-    store_sender: flume::Sender<StoreCommand>,
-}
-
-impl std::fmt::Debug for DatabaseSender {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DatabaseSender").finish()
-    }
-}
-
-impl Drop for DatabaseSender {
-    fn drop(&mut self) {
-        debug!("DatabaseSender dropped");
-    }
-}
-
-impl DatabaseSender {
-    /// Create a new DatabaseSender with the two internal channels
-    fn new(store_sender: flume::Sender<StoreCommand>) -> Self {
-        Self { store_sender }
-    }
-
-    /// Send a store command with an optional message sender for responses (fire-and-forget)
-    pub async fn send(&self, command: StoreCommand) -> Result<(), Error> {
-        match &command {
-            StoreCommand::SaveUnsignedEvent(_, _, _) => Err(Error::internal(
-                "SaveUnsignedEvent should not be sent to database",
-            )),
-            StoreCommand::SaveSignedEvent(_, _, _) | StoreCommand::DeleteEvents(_, _, _) => self
-                .store_sender
-                .send_async(command)
-                .await
-                .map_err(|_| Error::internal("Store processor shut down")),
-        }
-    }
-
-    /// Save a signed event to the database with immediate acknowledgment (for tests)
-    pub async fn save_signed_event_sync(&self, event: Event, scope: Scope) -> Result<(), Error> {
-        let (tx, rx) = oneshot::channel();
-
-        let command = StoreCommand::SaveSignedEvent(
-            Box::new(event),
-            scope,
-            Some(ResponseHandler::Oneshot(tx)),
-        );
-        self.store_sender
-            .send_async(command)
-            .await
-            .map_err(|_| Error::internal("Store processor shut down"))?;
-
-        rx.await
-            .map_err(|_| Error::internal("Database response channel closed"))?
-    }
-
-    /// Save a signed event to the database (fire-and-forget)
-    pub async fn save_signed_event(&self, event: Event, scope: Scope) -> Result<(), Error> {
-        self.send(StoreCommand::SaveSignedEvent(Box::new(event), scope, None))
-            .await
-    }
-
-    /// Save an unsigned event to the database
-    pub async fn save_unsigned_event(
-        &self,
-        event: UnsignedEvent,
-        scope: Scope,
-    ) -> Result<(), Error> {
-        self.send(StoreCommand::SaveUnsignedEvent(event, scope, None))
-            .await
-    }
-
-    /// Delete events matching the filter from the database
-    pub async fn delete_events(&self, filter: Filter, scope: Scope) -> Result<(), Error> {
-        self.send(StoreCommand::DeleteEvents(filter, scope, None))
-            .await
-    }
-}
-
-// Note: LMDB only allows one write transaction at a time, so we use a single worker
+use tracing::{debug, error, info};
 
 /// A Nostr relay database that wraps NostrLMDB with async operations
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RelayDatabase {
     lmdb: Arc<NostrLMDB>,
-    /// Optional event sender for distribution
-    #[allow(dead_code)] // Used in send_success_responses_and_distribute
-    event_sender: Option<flume::Sender<Arc<Event>>>,
-
-    /// Queue capacity used for this instance
-    queue_capacity: usize,
 }
 
 impl RelayDatabase {
-    /// Process a unified batch of store items (saves and deletes) in a single transaction
-    fn process_store_batch(
-        env: &Arc<NostrLMDB>,
-        items: impl Iterator<Item = StoreCommand>,
-        event_sender: Option<&flume::Sender<Arc<Event>>>,
-    ) {
-        // Separate saves and deletes
-        let mut save_commands = Vec::new();
-        let mut delete_commands = Vec::new();
-
-        for command in items {
-            match command {
-                StoreCommand::SaveSignedEvent(_, _, _) => save_commands.push(command),
-                StoreCommand::DeleteEvents(_, _, _) => delete_commands.push(command),
-                StoreCommand::SaveUnsignedEvent(_, _, _) => {
-                    error!("Unsigned event should not reach store processor");
-                }
-            }
-        }
-
-        // Pre-collect event references for broadcasting (avoiding clone)
-        let mut events_to_broadcast = Vec::new();
-
-        // Process everything in a single transaction
-        let commit_result = {
-            let mut txn = match env.write_transaction() {
-                Ok(txn) => txn,
-                Err(e) => {
-                    error!("Failed to create write transaction: {:?}", e);
-                    Self::send_error_responses(save_commands, format!("error: {e}"));
-                    Self::send_delete_error_responses(delete_commands, format!("error: {e}"));
-                    return;
-                }
-            };
-
-            let mut all_succeeded = true;
-
-            // Process saves first
-            for command in save_commands.iter() {
-                if let StoreCommand::SaveSignedEvent(event, scope, _) = command {
-                    match env.save_event_with_txn(&mut txn, scope, event) {
-                        Ok(status) => {
-                            if status.is_success() {
-                                // Collect event for broadcasting
-                                events_to_broadcast.push((**event).clone());
-                            } else {
-                                // Rejected is not an error, we just log it
-                                warn!("Failed to save event: status={:?}", status);
-                            }
-                        }
-                        Err(e) => {
-                            all_succeeded = false;
-                            error!("Failed to save event: {:?}", e);
-                            break; // Stop on first failure
-                        }
-                    }
-                }
-            }
-
-            // Process deletes if saves succeeded
-            if all_succeeded {
-                for command in delete_commands.iter() {
-                    if let StoreCommand::DeleteEvents(filter, scope, _) = command {
-                        match env.delete_with_txn(&mut txn, scope, filter.clone()) {
-                            Ok(_) => {
-                                debug!(
-                                    "Successfully deleted events matching filter for scope {:?}",
-                                    scope
-                                );
-                            }
-                            Err(e) => {
-                                all_succeeded = false;
-                                error!("Failed to delete events: {:?}", e);
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if !all_succeeded {
-                drop(txn); // Abort transaction
-                Err("batch operation failed")
-            } else {
-                txn.commit().map_err(|e| {
-                    error!("Failed to commit transaction: {:?}", e);
-                    "transaction commit failed"
-                })
-            }
-        }; // Transaction dropped here, lock released
-
-        // Handle responses outside transaction
-        match commit_result {
-            Ok(()) => {
-                debug!(
-                    "Transaction committed successfully for {} saves and {} deletes",
-                    save_commands.len(),
-                    delete_commands.len()
-                );
-
-                // Send success responses for saves and distribute events
-                Self::send_success_responses_and_distribute_sync(
-                    save_commands,
-                    events_to_broadcast,
-                    event_sender,
-                );
-
-                // Send success responses for deletes
-                Self::send_delete_success_responses(delete_commands);
-            }
-            Err(error_msg) => {
-                // All failed - send error responses
-                Self::send_error_responses(save_commands, format!("error: {error_msg}"));
-                Self::send_delete_error_responses(delete_commands, format!("error: {error_msg}"));
-            }
-        }
-    }
-
-    /// Send error responses for save items
-    fn send_error_responses(commands: Vec<StoreCommand>, error_msg: String) {
-        for command in commands {
-            if let StoreCommand::SaveSignedEvent(event, _, Some(handler)) = command {
-                match handler {
-                    ResponseHandler::MessageSender(mut sender) => {
-                        let msg = RelayMessage::ok(event.id, false, error_msg.clone());
-                        sender.send_bypass(msg);
-                    }
-                    ResponseHandler::Oneshot(oneshot_sender) => {
-                        let _ = oneshot_sender.send(Err(Error::internal(error_msg.clone())));
-                    }
-                }
-            }
-        }
-    }
-
-    /// Send success responses and distribute events synchronously
-    fn send_success_responses_and_distribute_sync(
-        commands: Vec<StoreCommand>,
-        events_to_distribute: Vec<Event>,
-        event_sender: Option<&flume::Sender<Arc<Event>>>,
-    ) {
-        // Send OK responses
-        for command in commands {
-            if let StoreCommand::SaveSignedEvent(event, _, Some(handler)) = command {
-                match handler {
-                    ResponseHandler::MessageSender(mut sender) => {
-                        let msg = RelayMessage::ok(event.id, true, "");
-                        sender.send_bypass(msg);
-                    }
-                    ResponseHandler::Oneshot(oneshot_sender) => {
-                        let _ = oneshot_sender.send(Ok(()));
-                    }
-                }
-            }
-        }
-
-        // Distribute successful events
-        if let Some(event_sender) = event_sender {
-            for event in events_to_distribute {
-                // Convert Event to Arc<Event>
-                let arc_event = Arc::new(event);
-                // Use try_send for non-blocking send
-                if let Err(e) = event_sender.try_send(arc_event) {
-                    match e {
-                        flume::TrySendError::Full(_) => {
-                            error!("Event distribution channel is full - applying backpressure");
-                            // Could implement blocking here if needed
-                        }
-                        flume::TrySendError::Disconnected(_) => {
-                            error!("Event distribution channel closed");
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Send success responses for delete items
-    fn send_delete_success_responses(commands: Vec<StoreCommand>) {
-        for command in commands {
-            if let StoreCommand::DeleteEvents(_, _, Some(handler)) = command {
-                let _ = handler.send(Ok(()));
-            }
-        }
-    }
-
-    /// Send error responses for delete items
-    fn send_delete_error_responses(commands: Vec<StoreCommand>, error_msg: String) {
-        for command in commands {
-            if let StoreCommand::DeleteEvents(_, _, Some(handler)) = command {
-                let _ = handler.send(Err(Error::internal(error_msg.clone())));
-            }
-        }
-    }
-
     /// Create a new relay database
     ///
     /// # Arguments
     /// * `db_path_param` - Path where the database should be stored
-    pub fn new(
-        db_path_param: impl AsRef<std::path::Path>,
-    ) -> Result<(Self, DatabaseSender), Error> {
-        Self::with_config_and_tracker(db_path_param, None, None, None, None, None)
-    }
-
-    /// Create a new relay database with a provided TaskTracker
-    ///
-    /// # Arguments
-    /// * `db_path_param` - Path where the database should be stored
-    /// * `task_tracker` - TaskTracker for managing background tasks
-    pub fn with_task_tracker(
-        db_path_param: impl AsRef<std::path::Path>,
-        task_tracker: TaskTracker,
-    ) -> Result<(Self, DatabaseSender), Error> {
-        Self::with_config_and_tracker(db_path_param, None, None, Some(task_tracker), None, None)
-    }
-
-    /// Create a new relay database with a provided TaskTracker and CancellationToken
-    ///
-    /// # Arguments
-    /// * `db_path_param` - Path where the database should be stored
-    /// * `task_tracker` - TaskTracker for managing background tasks
-    /// * `cancellation_token` - CancellationToken for graceful shutdown
-    pub fn with_task_tracker_and_token(
-        db_path_param: impl AsRef<std::path::Path>,
-        task_tracker: TaskTracker,
-        cancellation_token: CancellationToken,
-    ) -> Result<(Self, DatabaseSender), Error> {
-        Self::with_config_and_tracker(
-            db_path_param,
-            None,
-            None,
-            Some(task_tracker),
-            Some(cancellation_token),
-            None,
-        )
-    }
-
-    /// Create a new relay database with broadcast channel configuration
-    ///
-    /// # Arguments
-    /// * `db_path_param` - Path where the database should be stored
-    /// * `max_connections` - Maximum number of concurrent connections (for broadcast sizing)
-    /// * `max_subscriptions` - Maximum subscriptions per connection (for broadcast sizing)
-    pub fn with_config(
-        db_path_param: impl AsRef<std::path::Path>,
-        max_connections: Option<usize>,
-        max_subscriptions: Option<usize>,
-    ) -> Result<(Self, DatabaseSender), Error> {
-        Self::with_config_and_tracker(
-            db_path_param,
-            max_connections,
-            max_subscriptions,
-            None,
-            None,
-            None,
-        )
-    }
-
-    /// Create a new relay database with event sender
-    pub fn with_event_sender(
-        db_path_param: impl AsRef<std::path::Path>,
-        event_sender: flume::Sender<Arc<Event>>,
-        task_tracker: Option<TaskTracker>,
-        cancellation_token: Option<CancellationToken>,
-    ) -> Result<(Self, DatabaseSender), Error> {
-        Self::with_config_and_tracker(
-            db_path_param,
-            None,
-            None,
-            task_tracker,
-            cancellation_token,
-            Some(event_sender),
-        )
-    }
-
-    /// Internal constructor that supports all options
-    fn with_config_and_tracker(
-        db_path_param: impl AsRef<std::path::Path>,
-        max_connections: Option<usize>,
-        max_subscriptions: Option<usize>,
-        task_tracker: Option<TaskTracker>,
-        cancellation_token: Option<CancellationToken>,
-        event_sender: Option<flume::Sender<Arc<Event>>>,
-    ) -> Result<(Self, DatabaseSender), Error> {
+    pub fn new(db_path_param: impl AsRef<std::path::Path>) -> Result<Self, Error> {
         let db_path = db_path_param.as_ref().to_path_buf();
 
         // Ensure database directory exists
@@ -425,112 +45,19 @@ impl RelayDatabase {
         if let Ok(mode) = std::env::var("NOSTR_LMDB_MODE") {
             info!("LMDB mode: {}", mode);
         }
-        let lmdb_instance = NostrLMDB::open_with_env_config(&db_path).map_err(|e| {
+        let lmdb_instance = NostrLMDB::open(&db_path).map_err(|e| {
             Error::database(format!(
                 "Failed to open NostrLMDB at path '{db_path:?}': {e}"
             ))
         })?;
         let lmdb = Arc::new(lmdb_instance);
 
-        // Create channels for async operations
-        // Calculate queue capacity based on configuration or use default
-        let queue_capacity = match (max_connections, max_subscriptions) {
-            (Some(connections), Some(subscriptions)) => {
-                // Formula: max_connections * max_subscriptions * 10
-                // This allows each subscription to send 10 events without backpressure
-                let calculated = connections * subscriptions * 10;
-                info!(
-                    "Calculated queue capacity: {} ({}x{}x10)",
-                    calculated, connections, subscriptions
-                );
-                calculated
-            }
-            _ => {
-                info!(
-                    "Using default queue capacity: {}",
-                    DEFAULT_WRITE_QUEUE_CAPACITY
-                );
-                DEFAULT_WRITE_QUEUE_CAPACITY
-            }
-        };
-
-        let (store_sender, store_receiver) = flume::bounded::<StoreCommand>(queue_capacity);
-
-        // Create task tracker for worker lifecycle management
-        let task_tracker = task_tracker.unwrap_or_default();
-
-        info!("Starting database workers (2 total: unsigned processor + unified store processor)");
-
-        Self::spawn_store_processor(
-            store_receiver,
-            Arc::clone(&lmdb),
-            event_sender.clone(),
-            &task_tracker,
-            cancellation_token,
-        );
-
-        let relay_db = Self {
-            lmdb,
-            event_sender,
-            queue_capacity,
-        };
-
-        // Create the DatabaseSender for external use
-        let db_sender = DatabaseSender::new(store_sender);
-
-        Ok((relay_db, db_sender))
+        Ok(Self { lmdb })
     }
 
-    /// Spawn unified store processor that handles both saves and deletes
-    fn spawn_store_processor(
-        receiver: flume::Receiver<StoreCommand>,
-        env: Arc<NostrLMDB>,
-        event_sender: Option<flume::Sender<Arc<Event>>>,
-        task_tracker: &TaskTracker,
-        cancellation_token: Option<CancellationToken>,
-    ) {
-        // Use a simple tokio::spawn loop instead of batching runtime
-        task_tracker.spawn_blocking(move || {
-            info!("Store processor started on tokio runtime");
-
-            let cancellation_token = cancellation_token.unwrap_or_default();
-
-            loop {
-                // // Check for cancellation
-                // if cancellation_token.is_cancelled() {
-                //     info!("Store processor shutting down due to cancellation");
-                //     break;
-                // }
-
-                // Wait for at least one item asynchronously
-                let first_item = match receiver.recv() {
-                    Ok(item) => item,
-                    Err(_) => {
-                        info!("Store processor channel closed - all senders dropped");
-                        break;
-                    }
-                };
-
-                let batch = iter::once(first_item).chain(receiver.drain());
-
-                Self::process_store_batch(&env, batch, event_sender.as_ref());
-            }
-
-            info!("Store processor completed");
-            cancellation_token.cancel();
-        });
-    }
-
-    /// Subscribe to receive all saved events
-    ///
-    /// Note: This uses a broadcast channel with bounded capacity. If subscribers
-    /// cannot keep up with the rate of events being saved, older events may be
-    /// dropped. The channel capacity is automatically sized based on:
-    /// - max_connections * max_subscriptions (if provided during creation)
-    ///
-    /// Save an event directly (synchronous)
+    /// Save an event directly
     pub async fn save_event(&self, event: &Event, scope: &Scope) -> Result<()> {
-        let env = self.get_env(scope).await?;
+        let env = Arc::clone(&self.lmdb);
         let scoped_view = env.scoped(scope).map_err(|e| {
             error!("Error getting scoped view: {:?}", e);
             Error::database(format!("Failed to get scoped view: {e}"))
@@ -551,8 +78,8 @@ impl RelayDatabase {
 
     /// Delete events matching a filter
     pub async fn delete(&self, filter: Filter, scope: &Scope) -> Result<()> {
-        let env = self.get_env(scope).await?;
-        let scoped_view = env.scoped(scope).map_err(|e| {
+        let lmdb = Arc::clone(&self.lmdb);
+        let scoped_view = lmdb.scoped(scope).map_err(|e| {
             error!("Error getting scoped view: {:?}", e);
             Error::database(format!("Failed to get scoped view: {e}"))
         })?;
@@ -568,8 +95,8 @@ impl RelayDatabase {
 
     /// Query events from the database
     pub async fn query(&self, filters: Vec<Filter>, scope: &Scope) -> Result<Events, Error> {
-        let env = self.get_env(scope).await?;
-        let scoped_view = env.scoped(scope).map_err(|e| {
+        let lmdb = Arc::clone(&self.lmdb);
+        let scoped_view = lmdb.scoped(scope).map_err(|e| {
             error!("Error getting scoped view: {:?}", e);
             Error::database(format!("Failed to get scoped view: {e}"))
         })?;
@@ -578,12 +105,26 @@ impl RelayDatabase {
 
         // Query each filter separately and combine results
         for filter in filters {
-            let events = scoped_view.query(filter).await.map_err(|e| {
-                error!("Error querying events: {:?}", e);
-                Error::database(format!("Failed to query events: {e}"))
-            })?;
-
-            all_events.extend(events);
+            match scoped_view.query(filter).await {
+                Ok(events) => all_events.extend(events),
+                Err(e) => {
+                    // Check if this is a NotFound error (empty database)
+                    let error_str = e.to_string();
+                    if error_str.contains("Backend(NotFound)")
+                        || error_str.contains("NotFound")
+                        || error_str.contains("Not found")
+                    {
+                        debug!(
+                            "No events found for filter (database may be empty): {}",
+                            error_str
+                        );
+                        // Continue with empty result for this filter
+                        continue;
+                    }
+                    error!("Error querying events: {:?}", e);
+                    return Err(Error::database(format!("Failed to query events: {e}")));
+                }
+            }
         }
 
         Ok(all_events)
@@ -591,8 +132,8 @@ impl RelayDatabase {
 
     /// Get count of events matching filters
     pub async fn count(&self, filters: Vec<Filter>, scope: &Scope) -> Result<usize, Error> {
-        let env = self.get_env(scope).await?;
-        let scoped_view = env.scoped(scope).map_err(|e| {
+        let lmdb = Arc::clone(&self.lmdb);
+        let scoped_view = lmdb.scoped(scope).map_err(|e| {
             error!("Error getting scoped view: {:?}", e);
             Error::database(format!("Failed to get scoped view: {e}"))
         })?;
@@ -601,20 +142,29 @@ impl RelayDatabase {
 
         // Count each filter separately and sum results
         for filter in filters {
-            let count = scoped_view.count(filter).await.map_err(|e| {
-                error!("Error counting events: {:?}", e);
-                Error::database(format!("Failed to count events: {e}"))
-            })?;
-            total_count += count;
+            match scoped_view.count(filter).await {
+                Ok(count) => total_count += count,
+                Err(e) => {
+                    // Check if this is a NotFound error (empty database)
+                    let error_str = e.to_string();
+                    if error_str.contains("Backend(NotFound)")
+                        || error_str.contains("NotFound")
+                        || error_str.contains("Not found")
+                    {
+                        debug!(
+                            "No events found for count filter (database may be empty): {}",
+                            error_str
+                        );
+                        // Continue with 0 count for this filter
+                        continue;
+                    }
+                    error!("Error counting events: {:?}", e);
+                    return Err(Error::database(format!("Failed to count events: {e}")));
+                }
+            }
         }
 
         Ok(total_count)
-    }
-
-    /// Get the database environment for a scope
-    async fn get_env(&self, _scope: &Scope) -> Result<Arc<NostrLMDB>, Error> {
-        // In this implementation, we use a single database for all scopes
-        Ok(Arc::clone(&self.lmdb))
     }
 
     /// List all scopes available in the database
@@ -628,253 +178,41 @@ impl RelayDatabase {
 
         Ok(scopes)
     }
-
-    /// Get the write queue capacity
-    pub fn write_queue_capacity(&self) -> usize {
-        self.queue_capacity
-    }
 }
-
-pub type NostrDatabase = Arc<RelayDatabase>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use tempfile::TempDir;
-    use tokio_util::task::TaskTracker;
 
     async fn generate_test_event(index: usize) -> Event {
         let keys = Keys::generate();
         EventBuilder::text_note(format!("Test event #{index}"))
-            .sign(&keys)
-            .await
+            .sign_with_keys(&keys)
             .expect("Failed to create event")
     }
 
     #[tokio::test]
-    async fn test_shutdown_processes_all_events() {
+    async fn test_save_and_query_events() {
         let tmp_dir = TempDir::new().unwrap();
-        let db_path = tmp_dir.path().join("test_shutdown_processes.db");
-        let event_count = 100;
+        let db_path = tmp_dir.path().join("test_save_query.db");
+        let event_count = 10;
 
         // Create and populate database
-        {
-            let task_tracker = TaskTracker::new();
-            let (_database, db_sender) =
-                RelayDatabase::with_task_tracker(&db_path, task_tracker.clone())
-                    .expect("Failed to create database");
-
-            // Send events rapidly
-            for i in 0..event_count {
-                let event = generate_test_event(i).await;
-                db_sender
-                    .save_signed_event(event, Scope::Default)
-                    .await
-                    .expect("Failed to save event");
-            }
-
-            // Properly shutdown the database
-            drop(db_sender);
-
-            // Close and wait for task tracker
-            task_tracker.close();
-            task_tracker.wait().await;
-        }
-
-        // Give LMDB time to fully release resources
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Re-open database and verify all events were saved
-        {
-            let (database, _db_sender) =
-                RelayDatabase::new(&db_path).expect("Failed to create database");
-            let database = Arc::new(database);
-
-            let count = database
-                .count(
-                    vec![Filter::new().kinds(vec![Kind::TextNote])],
-                    &Scope::Default,
-                )
-                .await
-                .expect("Failed to count events");
-
-            assert_eq!(
-                count, event_count,
-                "Expected {event_count} events but found {count}. Data loss detected!"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn test_drop_completes_pending_work() {
-        // This test verifies that dropping the database still processes pending events
-        let tmp_dir = TempDir::new().unwrap();
-        let db_path = tmp_dir.path().join("test_drop_completes.db");
-        let event_count = 50;
-
-        // Create a task tracker that we'll wait on
-        let task_tracker = TaskTracker::new();
-
-        // Create and populate database
-        {
-            let (database, db_sender) =
-                RelayDatabase::with_task_tracker(&db_path, task_tracker.clone())
-                    .expect("Failed to create database");
-            let database = Arc::new(database);
-
-            // Send events
-            for i in 0..event_count {
-                let event = generate_test_event(i).await;
-                db_sender
-                    .save_signed_event(event, Scope::Default)
-                    .await
-                    .expect("Failed to save event");
-            }
-
-            // Drop without explicit shutdown - the Drop impl should handle it gracefully
-            drop(db_sender);
-            drop(database);
-        }
-
-        // Close the tracker and wait for all tasks to complete
-        task_tracker.close();
-        task_tracker.wait().await;
-
-        // Give LMDB time to fully release resources
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Re-open and verify events were saved
-        {
-            let (database, _db_sender) =
-                RelayDatabase::new(&db_path).expect("Failed to create database");
-            let database = Arc::new(database);
-
-            let count = database
-                .count(
-                    vec![Filter::new().kinds(vec![Kind::TextNote])],
-                    &Scope::Default,
-                )
-                .await
-                .expect("Failed to count events");
-
-            // Should have saved most/all events even without explicit shutdown
-            assert!(
-                count >= event_count - 5, // Allow for a few to be lost in flight
-                "Expected at least {} events but found {}",
-                event_count - 5,
-                count
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn test_shutdown_with_many_events() {
-        let tmp_dir = TempDir::new().unwrap();
-        let db_path = tmp_dir.path().join("test_shutdown_many.db");
-        let event_count = 500;
-
-        // Create and populate database with many events
-        {
-            let task_tracker = TaskTracker::new();
-            let (_database, db_sender) =
-                RelayDatabase::with_task_tracker(&db_path, task_tracker.clone())
-                    .expect("Failed to create database");
-
-            // Send many events to ensure some are queued
-            for i in 0..event_count {
-                let event = generate_test_event(i).await;
-                db_sender
-                    .save_signed_event(event, Scope::Default)
-                    .await
-                    .expect("Failed to save event");
-            }
-
-            // Drop sender first
-            drop(db_sender);
-
-            // Shutdown should take some time to process queued events
-            // With batch operations, this may be faster, so we just ensure it completed
-
-            // Close and wait for task tracker
-            task_tracker.close();
-            task_tracker.wait().await;
-        }
-
-        // Small delay to ensure LMDB environment is fully closed
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // Verify all events were saved
-        {
-            let (database, _db_sender) =
-                RelayDatabase::new(&db_path).expect("Failed to create database");
-            let database = Arc::new(database);
-
-            let count = database
-                .count(
-                    vec![Filter::new().kinds(vec![Kind::TextNote])],
-                    &Scope::Default,
-                )
-                .await
-                .expect("Failed to count events");
-
-            assert_eq!(
-                count, event_count,
-                "Expected {event_count} events but found {count}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn test_batch_save_handles_rejected_events() {
-        // This test verifies that batch saves continue processing even when some events are rejected
-        let tmp_dir = TempDir::new().unwrap();
-        let db_path = tmp_dir.path().join("test_batch_save.db");
-
-        // Create database
-        let task_tracker = TaskTracker::new();
-        let (database, db_sender) =
-            RelayDatabase::with_task_tracker(&db_path, task_tracker.clone())
-                .expect("Failed to create database");
+        let database = RelayDatabase::new(&db_path).expect("Failed to create database");
         let database = Arc::new(database);
 
-        // Create a unique event that we'll save twice to trigger rejection
-        let duplicate_event = generate_test_event(999).await;
-
-        // First, save the duplicate event once
-        db_sender
-            .save_signed_event(duplicate_event.clone(), Scope::Default)
-            .await
-            .expect("Failed to save initial event");
-
-        // Wait a bit to ensure it's processed
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Now send a batch with:
-        // - Some new events (should succeed)
-        // - The duplicate event (should be rejected)
-        // - More new events (should still succeed despite the rejection)
-        let batch_size = 10;
-        for i in 0..batch_size {
-            if i == 5 {
-                // Insert the duplicate in the middle of the batch
-                db_sender
-                    .save_signed_event(duplicate_event.clone(), Scope::Default)
-                    .await
-                    .expect("Failed to queue duplicate event");
-            } else {
-                let event = generate_test_event(i).await;
-                db_sender
-                    .save_signed_event(event, Scope::Default)
-                    .await
-                    .expect("Failed to queue event");
-            }
+        // Save events
+        for i in 0..event_count {
+            let event = generate_test_event(i).await;
+            database
+                .save_event(&event, &Scope::Default)
+                .await
+                .expect("Failed to save event");
         }
 
-        // Wait for processing before checking results
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-
-        // Verify the results using the existing database instance
+        // Query and verify events were saved
         let count = database
             .count(
                 vec![Filter::new().kinds(vec![Kind::TextNote])],
@@ -883,69 +221,114 @@ mod tests {
             .await
             .expect("Failed to count events");
 
-        // We should have:
-        // - 1 event from the initial save (event 999)
-        // - 9 events from the batch (0-4, 6-9, but not the duplicate at position 5)
-        // Total: 10 events
         assert_eq!(
-            count, 10,
-            "Expected 10 unique events (1 initial + 9 new), but found {count}"
+            count, event_count,
+            "Expected {event_count} events but found {count}"
         );
-
-        // Verify the duplicate event exists (only one copy)
-        let duplicate_filter = vec![Filter::new().id(duplicate_event.id)];
-        let duplicate_count = database
-            .count(duplicate_filter, &Scope::Default)
-            .await
-            .expect("Failed to count duplicate event");
-
-        assert_eq!(
-            duplicate_count, 1,
-            "Expected exactly 1 copy of the duplicate event, but found {duplicate_count}"
-        );
-
-        // Cleanup
-        drop(db_sender);
-        task_tracker.close();
-        task_tracker.wait().await;
     }
 
     #[tokio::test]
-    async fn test_sync_save_in_optimistic_mode() {
-        // Test that sync saves work in optimistic mode
+    async fn test_delete_events() {
         let tmp_dir = TempDir::new().unwrap();
-        let db_path = tmp_dir.path().join("test_sync_save.db");
-        let task_tracker = TaskTracker::new();
-        // Create in optimistic mode (default)
-        let (database, db_sender) =
-            RelayDatabase::new(&db_path).expect("Failed to create database");
+        let db_path = tmp_dir.path().join("test_delete.db");
+
+        let database = RelayDatabase::new(&db_path).expect("Failed to create database");
         let database = Arc::new(database);
 
-        let event = generate_test_event(0).await;
-        let event_id = event.id;
+        // Save some events
+        let keys = Keys::generate();
+        for i in 0..5 {
+            let event = EventBuilder::text_note(format!("Event {i}"))
+                .sign_with_keys(&keys)
+                .expect("Failed to create event");
+            database
+                .save_event(&event, &Scope::Default)
+                .await
+                .expect("Failed to save event");
+        }
 
-        // Save should work and wait for persistence
-        let result = db_sender
-            .save_signed_event_sync(event, Scope::Default)
-            .await;
-
-        assert!(
-            result.is_ok(),
-            "Sync save should succeed in optimistic mode"
-        );
-
-        // Verify event was persisted
-        let count = database
-            .count(vec![Filter::new().id(event_id)], &Scope::Default)
+        // Verify events exist
+        let count_before = database
+            .count(
+                vec![Filter::new().author(keys.public_key())],
+                &Scope::Default,
+            )
             .await
-            .expect("Count should succeed");
-        assert_eq!(count, 1, "Event should be persisted after sync save");
+            .expect("Failed to count events");
+        assert_eq!(count_before, 5);
 
-        // Cleanup
-        drop(db_sender);
+        // Delete events
+        database
+            .delete(Filter::new().author(keys.public_key()), &Scope::Default)
+            .await
+            .expect("Failed to delete events");
 
-        // Close and wait for task tracker
-        task_tracker.close();
-        task_tracker.wait().await;
+        // Verify events are deleted
+        let count_after = database
+            .count(
+                vec![Filter::new().author(keys.public_key())],
+                &Scope::Default,
+            )
+            .await
+            .expect("Failed to count events");
+        assert_eq!(count_after, 0);
+    }
+
+    #[tokio::test]
+    async fn test_scoped_operations() {
+        let tmp_dir = TempDir::new().unwrap();
+        let db_path = tmp_dir.path().join("test_scoped.db");
+
+        let database = RelayDatabase::new(&db_path).expect("Failed to create database");
+        let database = Arc::new(database);
+
+        // Create events in different scopes
+        let scope_a = Scope::named("tenant_a").unwrap();
+        let scope_b = Scope::named("tenant_b").unwrap();
+
+        // Save events in scope A
+        for i in 0..3 {
+            let event = generate_test_event(i).await;
+            database
+                .save_event(&event, &scope_a)
+                .await
+                .expect("Failed to save event in scope A");
+        }
+
+        // Save events in scope B
+        for i in 3..6 {
+            let event = generate_test_event(i).await;
+            database
+                .save_event(&event, &scope_b)
+                .await
+                .expect("Failed to save event in scope B");
+        }
+
+        // Save events in default scope
+        for i in 6..9 {
+            let event = generate_test_event(i).await;
+            database
+                .save_event(&event, &Scope::Default)
+                .await
+                .expect("Failed to save event in default scope");
+        }
+
+        // Verify scope isolation
+        let count_a = database
+            .count(vec![Filter::new()], &scope_a)
+            .await
+            .expect("Failed to count in scope A");
+        let count_b = database
+            .count(vec![Filter::new()], &scope_b)
+            .await
+            .expect("Failed to count in scope B");
+        let count_default = database
+            .count(vec![Filter::new()], &Scope::Default)
+            .await
+            .expect("Failed to count in default scope");
+
+        assert_eq!(count_a, 3);
+        assert_eq!(count_b, 3);
+        assert_eq!(count_default, 3);
     }
 }

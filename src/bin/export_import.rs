@@ -6,6 +6,7 @@ use nostr_sdk::prelude::*;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tracing::{error, info, warn};
 
 #[derive(Parser, Debug)]
@@ -132,7 +133,7 @@ fn parse_scope_from_filename(filename: &str) -> Option<Scope> {
 }
 
 async fn export_scope(
-    db: &NostrLMDB,
+    db: &Arc<NostrLMDB>,
     scope: &Scope,
     output_path: &Path,
     include_count: bool,
@@ -167,7 +168,7 @@ async fn export_scope(
 }
 
 async fn export_database(
-    db: NostrLMDB,
+    db: Arc<NostrLMDB>,
     output_dir: PathBuf,
     force: bool,
     include_count: bool,
@@ -223,7 +224,7 @@ async fn export_database(
 }
 
 async fn import_scope(
-    db: &NostrLMDB,
+    db: &Arc<NostrLMDB>,
     scope: &Scope,
     file_path: &Path,
     skip_errors: bool,
@@ -301,7 +302,7 @@ async fn import_scope(
     Ok((imported, errors))
 }
 
-async fn save_events_batch(db: &NostrLMDB, scope: &Scope, events: &[Event]) -> Result<u64> {
+async fn save_events_batch(db: &Arc<NostrLMDB>, scope: &Scope, events: &[Event]) -> Result<u64> {
     // Get scoped view of the database
     let scoped_db = db
         .scoped(scope)
@@ -326,7 +327,7 @@ async fn save_events_batch(db: &NostrLMDB, scope: &Scope, events: &[Event]) -> R
 }
 
 async fn import_database(
-    db: NostrLMDB,
+    db: Arc<NostrLMDB>,
     input_dir: PathBuf,
     skip_confirmation: bool,
     skip_errors: bool,
@@ -449,8 +450,10 @@ async fn main() -> Result<()> {
             include_count,
         } => {
             info!("Opening database at {:?}", db);
-            let database = NostrLMDB::open(&db)
-                .with_context(|| format!("Failed to open database at {db:?}"))?;
+            let database = Arc::new(
+                NostrLMDB::open(&db)
+                    .with_context(|| format!("Failed to open database at {db:?}"))?,
+            );
 
             export_database(database, output, force, include_count).await
         }
@@ -461,8 +464,10 @@ async fn main() -> Result<()> {
             skip_errors,
         } => {
             info!("Opening database at {:?}", db);
-            let database = NostrLMDB::open(&db)
-                .with_context(|| format!("Failed to open database at {db:?}"))?;
+            let database = Arc::new(
+                NostrLMDB::open(&db)
+                    .with_context(|| format!("Failed to open database at {db:?}"))?,
+            );
 
             import_database(database, input, yes, skip_errors).await
         }
