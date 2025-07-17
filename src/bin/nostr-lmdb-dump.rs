@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use heed::types::*;
-use heed::{Env, EnvOpenOptions, RoTxn};
+use heed::{Database, Env, EnvOpenOptions, RoTxn};
 use indicatif::{ProgressBar, ProgressStyle};
 use serde_json::json;
 use std::collections::HashMap;
@@ -73,25 +73,16 @@ fn main() -> Result<()> {
 
     // Create progress bar for database discovery
     let discovery_pb = if !args.no_progress {
-        let pb = ProgressBar::new(common_names.len() as u64 + 1);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template(
-                    "{spinner:.green} Discovering databases... [{bar:40.cyan/blue}] {pos}/{len}",
-                )
-                .unwrap()
-                .progress_chars("#>-"),
-        );
-        Some(pb)
+        Some(create_progress_bar(
+            common_names.len() as u64 + 1,
+            "{spinner:.green} Discovering databases... [{bar:40.cyan/blue}] {pos}/{len}",
+        ))
     } else {
         None
     };
 
     for name in &common_names {
-        if env
-            .open_database::<Bytes, Bytes>(&rtxn, Some(name))?
-            .is_some()
-        {
+        if open_database(&env, &rtxn, Some(name))?.is_some() {
             db_names.push(name.to_string())
         }
         if let Some(pb) = &discovery_pb {
@@ -100,7 +91,7 @@ fn main() -> Result<()> {
     }
 
     // Try unnamed database
-    if env.open_database::<Bytes, Bytes>(&rtxn, None)?.is_some() {
+    if open_database(&env, &rtxn, None)?.is_some() {
         db_names.push("(unnamed)".to_string());
     }
     if let Some(pb) = &discovery_pb {
@@ -174,24 +165,16 @@ fn discover_scope_registry(
     let mut registry = HashMap::new();
 
     // Try to open the scope metadata database
-    if let Some(scope_db) =
-        env.open_database::<Bytes, Bytes>(rtxn, Some("__global_scope_metadata"))?
-    {
+    if let Some(scope_db) = open_database(env, rtxn, Some("__global_scope_metadata"))? {
         // Get the count for progress bar
         let stat = scope_db.stat(rtxn)?;
         let scope_count = stat.entries;
 
         let progress_pb = if show_progress && scope_count > 0 {
-            let pb = ProgressBar::new(scope_count as u64);
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template(
-                        "{spinner:.green} Discovering scopes... [{bar:40.cyan/blue}] {pos}/{len}",
-                    )
-                    .unwrap()
-                    .progress_chars("#>-"),
-            );
-            Some(pb)
+            Some(create_progress_bar(
+                scope_count as u64,
+                "{spinner:.green} Discovering scopes... [{bar:40.cyan/blue}] {pos}/{len}",
+            ))
         } else {
             None
         };
@@ -203,7 +186,7 @@ fn discover_scope_registry(
             // Keys are scope names, values are 4-byte hashes
             if let Ok(scope_name) = str::from_utf8(key) {
                 if value.len() == 4 {
-                    let hash = u32::from_be_bytes([value[0], value[1], value[2], value[3]]);
+                    let hash = parse_u32_be(value);
                     registry.insert(hash, scope_name.to_string());
                 }
             }
@@ -223,9 +206,9 @@ fn discover_scope_registry(
 
 fn dump_database_count(env: &Env, rtxn: &RoTxn, db_name: &str) -> Result<()> {
     let db_opt = if db_name == "(unnamed)" {
-        env.open_database::<Bytes, Bytes>(rtxn, None)?
+        open_database(env, rtxn, None)?
     } else {
-        env.open_database::<Bytes, Bytes>(rtxn, Some(db_name))?
+        open_database(env, rtxn, Some(db_name))?
     };
 
     let db = match db_opt {
@@ -251,9 +234,9 @@ fn dump_database_entries(
     first_entry: &mut bool,
 ) -> Result<()> {
     let db_opt = if db_name == "(unnamed)" {
-        env.open_database::<Bytes, Bytes>(rtxn, None)?
+        open_database(env, rtxn, None)?
     } else {
-        env.open_database::<Bytes, Bytes>(rtxn, Some(db_name))?
+        open_database(env, rtxn, Some(db_name))?
     };
 
     let db = match db_opt {
@@ -276,14 +259,10 @@ fn dump_database_entries(
             entry_count as u64
         };
 
-        let pb = ProgressBar::new(total);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template(&format!("{{spinner:.green}} Processing {db_name}... [{{bar:40.cyan/blue}}] {{pos}}/{{len}} entries"))
-                .unwrap()
-                .progress_chars("#>-"),
-        );
-        Some(pb)
+        Some(create_progress_bar(
+            total,
+            &format!("{{spinner:.green}} Processing {db_name}... [{{bar:40.cyan/blue}}] {{pos}}/{{len}} entries"),
+        ))
     } else {
         None
     };
@@ -422,13 +401,11 @@ fn parse_scoped_key<'a>(
 
     // First 4 bytes: scope hash
     let scope_hash_bytes = &key[0..4];
-    let scope_hash = u32::from_be_bytes([key[0], key[1], key[2], key[3]]);
+    let scope_hash = parse_u32_be(scope_hash_bytes);
 
     // Next 8 bytes: original key length
     let key_len_bytes = &key[4..12];
-    let key_len = u64::from_be_bytes([
-        key[4], key[5], key[6], key[7], key[8], key[9], key[10], key[11],
-    ]);
+    let key_len = parse_timestamp_be(key_len_bytes);
 
     // Remaining bytes: original key
     if key.len() != 12 + key_len as usize {
@@ -468,27 +445,16 @@ fn parse_events_key(key: &[u8]) -> Option<serde_json::Value> {
 fn parse_ci_key(key: &[u8]) -> Option<serde_json::Value> {
     if key.len() >= 8 {
         let timestamp_bytes = &key[0..8];
-        let timestamp = u64::from_be_bytes([
-            key[0], key[1], key[2], key[3], key[4], key[5], key[6], key[7],
-        ]);
-
-        let reversed_timestamp = u64::MAX - timestamp;
 
         if key.len() >= 40 {
             let event_id = &key[8..40];
             Some(json!({
-                "timestamp": {
-                    "raw_hex": hex::encode(timestamp_bytes),
-                    "parsed_value": reversed_timestamp
-                },
+                "timestamp": format_timestamp_field(timestamp_bytes, true),
                 "event_id": hex::encode(event_id)
             }))
         } else {
             Some(json!({
-                "timestamp": {
-                    "raw_hex": hex::encode(timestamp_bytes),
-                    "parsed_value": reversed_timestamp
-                },
+                "timestamp": format_timestamp_field(timestamp_bytes, true),
                 "incomplete": true
             }))
         }
@@ -499,47 +465,23 @@ fn parse_ci_key(key: &[u8]) -> Option<serde_json::Value> {
 
 fn parse_tci_key(key: &[u8]) -> Option<serde_json::Value> {
     if key.len() >= 194 {
-        let tag_name_byte = &key[0..1];
-        let tag_name = key[0] as char;
+        let tag_name = key[0];
         let tag_value_bytes = &key[1..183];
         let timestamp_bytes = &key[183..191];
-        let timestamp = u64::from_be_bytes([
-            key[183], key[184], key[185], key[186], key[187], key[188], key[189], key[190],
-        ]);
-
-        let reversed_timestamp = u64::MAX - timestamp;
 
         if key.len() >= 226 {
             let event_id = &key[194..226];
             Some(json!({
-                "tag_name": {
-                    "raw_hex": hex::encode(tag_name_byte),
-                    "parsed_value": tag_name.to_string()
-                },
-                "tag_value": {
-                    "raw_hex": hex::encode(tag_value_bytes),
-                    "parsed_value": String::from_utf8_lossy(tag_value_bytes).trim_end_matches('\0').to_string()
-                },
-                "timestamp": {
-                    "raw_hex": hex::encode(timestamp_bytes),
-                    "parsed_value": reversed_timestamp
-                },
+                "tag_name": format_tag_name(tag_name),
+                "tag_value": format_tag_value(tag_value_bytes),
+                "timestamp": format_timestamp_field(timestamp_bytes, true),
                 "event_id": hex::encode(event_id)
             }))
         } else {
             Some(json!({
-                "tag_name": {
-                    "raw_hex": hex::encode(tag_name_byte),
-                    "parsed_value": tag_name.to_string()
-                },
-                "tag_value": {
-                    "raw_hex": hex::encode(tag_value_bytes),
-                    "parsed_value": String::from_utf8_lossy(tag_value_bytes).trim_end_matches('\0').to_string()
-                },
-                "timestamp": {
-                    "raw_hex": hex::encode(timestamp_bytes),
-                    "parsed_value": reversed_timestamp
-                },
+                "tag_name": format_tag_name(tag_name),
+                "tag_value": format_tag_value(tag_value_bytes),
+                "timestamp": format_timestamp_field(timestamp_bytes, true),
                 "incomplete": true
             }))
         }
@@ -552,29 +494,18 @@ fn parse_aci_key(key: &[u8]) -> Option<serde_json::Value> {
     if key.len() >= 40 {
         let pubkey = &key[0..32];
         let timestamp_bytes = &key[32..40];
-        let timestamp = u64::from_be_bytes([
-            key[32], key[33], key[34], key[35], key[36], key[37], key[38], key[39],
-        ]);
-
-        let reversed_timestamp = u64::MAX - timestamp;
 
         if key.len() >= 72 {
             let event_id = &key[40..72];
             Some(json!({
                 "pubkey": hex::encode(pubkey),
-                "timestamp": {
-                    "raw_hex": hex::encode(timestamp_bytes),
-                    "parsed_value": reversed_timestamp
-                },
+                "timestamp": format_timestamp_field(timestamp_bytes, true),
                 "event_id": hex::encode(event_id)
             }))
         } else {
             Some(json!({
                 "pubkey": hex::encode(pubkey),
-                "timestamp": {
-                    "raw_hex": hex::encode(timestamp_bytes),
-                    "parsed_value": reversed_timestamp
-                },
+                "timestamp": format_timestamp_field(timestamp_bytes, true),
                 "incomplete": true
             }))
         }
@@ -587,39 +518,21 @@ fn parse_akci_key(key: &[u8]) -> Option<serde_json::Value> {
     if key.len() >= 42 {
         let pubkey = &key[0..32];
         let kind_bytes = &key[32..34];
-        let kind = u16::from_be_bytes([key[32], key[33]]);
         let timestamp_bytes = &key[34..42];
-        let timestamp = u64::from_be_bytes([
-            key[34], key[35], key[36], key[37], key[38], key[39], key[40], key[41],
-        ]);
-
-        let reversed_timestamp = u64::MAX - timestamp;
 
         if key.len() >= 74 {
             let event_id = &key[42..74];
             Some(json!({
                 "pubkey": hex::encode(pubkey),
-                "kind": {
-                    "raw_hex": hex::encode(kind_bytes),
-                    "parsed_value": kind
-                },
-                "timestamp": {
-                    "raw_hex": hex::encode(timestamp_bytes),
-                    "parsed_value": reversed_timestamp
-                },
+                "kind": format_kind_field(kind_bytes),
+                "timestamp": format_timestamp_field(timestamp_bytes, true),
                 "event_id": hex::encode(event_id)
             }))
         } else {
             Some(json!({
                 "pubkey": hex::encode(pubkey),
-                "kind": {
-                    "raw_hex": hex::encode(kind_bytes),
-                    "parsed_value": kind
-                },
-                "timestamp": {
-                    "raw_hex": hex::encode(timestamp_bytes),
-                    "parsed_value": reversed_timestamp
-                },
+                "kind": format_kind_field(kind_bytes),
+                "timestamp": format_timestamp_field(timestamp_bytes, true),
                 "incomplete": true
             }))
         }
@@ -631,49 +544,25 @@ fn parse_akci_key(key: &[u8]) -> Option<serde_json::Value> {
 fn parse_atci_key(key: &[u8]) -> Option<serde_json::Value> {
     if key.len() >= 226 {
         let pubkey = &key[0..32];
-        let tag_name_byte = &key[32..33];
-        let tag_name = key[32] as char;
+        let tag_name = key[32];
         let tag_value_bytes = &key[33..215];
         let timestamp_bytes = &key[215..223];
-        let timestamp = u64::from_be_bytes([
-            key[215], key[216], key[217], key[218], key[219], key[220], key[221], key[222],
-        ]);
-
-        let reversed_timestamp = u64::MAX - timestamp;
 
         if key.len() >= 258 {
             let event_id = &key[226..258];
             Some(json!({
                 "pubkey": hex::encode(pubkey),
-                "tag_name": {
-                    "raw_hex": hex::encode(tag_name_byte),
-                    "parsed_value": tag_name.to_string()
-                },
-                "tag_value": {
-                    "raw_hex": hex::encode(tag_value_bytes),
-                    "parsed_value": String::from_utf8_lossy(tag_value_bytes).trim_end_matches('\0').to_string()
-                },
-                "timestamp": {
-                    "raw_hex": hex::encode(timestamp_bytes),
-                    "parsed_value": reversed_timestamp
-                },
+                "tag_name": format_tag_name(tag_name),
+                "tag_value": format_tag_value(tag_value_bytes),
+                "timestamp": format_timestamp_field(timestamp_bytes, true),
                 "event_id": hex::encode(event_id)
             }))
         } else {
             Some(json!({
                 "pubkey": hex::encode(pubkey),
-                "tag_name": {
-                    "raw_hex": hex::encode(tag_name_byte),
-                    "parsed_value": tag_name.to_string()
-                },
-                "tag_value": {
-                    "raw_hex": hex::encode(tag_value_bytes),
-                    "parsed_value": String::from_utf8_lossy(tag_value_bytes).trim_end_matches('\0').to_string()
-                },
-                "timestamp": {
-                    "raw_hex": hex::encode(timestamp_bytes),
-                    "parsed_value": reversed_timestamp
-                },
+                "tag_name": format_tag_name(tag_name),
+                "tag_value": format_tag_value(tag_value_bytes),
+                "timestamp": format_timestamp_field(timestamp_bytes, true),
                 "incomplete": true
             }))
         }
@@ -685,56 +574,25 @@ fn parse_atci_key(key: &[u8]) -> Option<serde_json::Value> {
 fn parse_ktci_key(key: &[u8]) -> Option<serde_json::Value> {
     if key.len() >= 196 {
         let kind_bytes = &key[0..2];
-        let kind = u16::from_be_bytes([key[0], key[1]]);
-        let tag_name_byte = &key[2..3];
-        let tag_name = key[2] as char;
+        let tag_name = key[2];
         let tag_value_bytes = &key[3..185];
         let timestamp_bytes = &key[185..193];
-        let timestamp = u64::from_be_bytes([
-            key[185], key[186], key[187], key[188], key[189], key[190], key[191], key[192],
-        ]);
-
-        let reversed_timestamp = u64::MAX - timestamp;
 
         if key.len() >= 228 {
             let event_id = &key[196..228];
             Some(json!({
-                "kind": {
-                    "raw_hex": hex::encode(kind_bytes),
-                    "parsed_value": kind
-                },
-                "tag_name": {
-                    "raw_hex": hex::encode(tag_name_byte),
-                    "parsed_value": tag_name.to_string()
-                },
-                "tag_value": {
-                    "raw_hex": hex::encode(tag_value_bytes),
-                    "parsed_value": String::from_utf8_lossy(tag_value_bytes).trim_end_matches('\0').to_string()
-                },
-                "timestamp": {
-                    "raw_hex": hex::encode(timestamp_bytes),
-                    "parsed_value": reversed_timestamp
-                },
+                "kind": format_kind_field(kind_bytes),
+                "tag_name": format_tag_name(tag_name),
+                "tag_value": format_tag_value(tag_value_bytes),
+                "timestamp": format_timestamp_field(timestamp_bytes, true),
                 "event_id": hex::encode(event_id)
             }))
         } else {
             Some(json!({
-                "kind": {
-                    "raw_hex": hex::encode(kind_bytes),
-                    "parsed_value": kind
-                },
-                "tag_name": {
-                    "raw_hex": hex::encode(tag_name_byte),
-                    "parsed_value": tag_name.to_string()
-                },
-                "tag_value": {
-                    "raw_hex": hex::encode(tag_value_bytes),
-                    "parsed_value": String::from_utf8_lossy(tag_value_bytes).trim_end_matches('\0').to_string()
-                },
-                "timestamp": {
-                    "raw_hex": hex::encode(timestamp_bytes),
-                    "parsed_value": reversed_timestamp
-                },
+                "kind": format_kind_field(kind_bytes),
+                "tag_name": format_tag_name(tag_name),
+                "tag_value": format_tag_value(tag_value_bytes),
+                "timestamp": format_timestamp_field(timestamp_bytes, true),
                 "incomplete": true
             }))
         }
@@ -756,15 +614,11 @@ fn parse_deleted_ids_key(key: &[u8]) -> Option<serde_json::Value> {
 fn parse_deleted_coordinates_key(key: &[u8]) -> Option<serde_json::Value> {
     if key.len() >= 34 {
         let kind_bytes = &key[0..2];
-        let kind = u16::from_be_bytes([key[0], key[1]]);
         let pubkey = &key[2..34];
         let d_tag_bytes = if key.len() > 34 { &key[34..] } else { &[] };
 
         let mut result = json!({
-            "kind": {
-                "raw_hex": hex::encode(kind_bytes),
-                "parsed_value": kind
-            },
+            "kind": format_kind_field(kind_bytes),
             "pubkey": hex::encode(pubkey)
         });
 
@@ -789,4 +643,74 @@ fn parse_scope_metadata_key(key: &[u8]) -> Option<serde_json::Value> {
     } else {
         None
     }
+}
+
+// Helper functions to reduce duplication
+
+fn open_database(
+    env: &Env,
+    rtxn: &RoTxn,
+    name: Option<&str>,
+) -> Result<Option<Database<Bytes, Bytes>>> {
+    Ok(env.open_database::<Bytes, Bytes>(rtxn, name)?)
+}
+
+fn create_progress_bar(total: u64, template: &str) -> ProgressBar {
+    let pb = ProgressBar::new(total);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template(template)
+            .unwrap()
+            .progress_chars("#>-"),
+    );
+    pb
+}
+
+fn parse_timestamp_be(bytes: &[u8]) -> u64 {
+    u64::from_be_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ])
+}
+
+fn parse_u16_be(bytes: &[u8]) -> u16 {
+    u16::from_be_bytes([bytes[0], bytes[1]])
+}
+
+fn parse_u32_be(bytes: &[u8]) -> u32 {
+    u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
+fn format_timestamp_field(bytes: &[u8], reversed: bool) -> serde_json::Value {
+    let timestamp = parse_timestamp_be(bytes);
+    let parsed_value = if reversed {
+        u64::MAX - timestamp
+    } else {
+        timestamp
+    };
+
+    json!({
+        "raw_hex": hex::encode(bytes),
+        "parsed_value": parsed_value
+    })
+}
+
+fn format_tag_value(bytes: &[u8]) -> serde_json::Value {
+    json!({
+        "raw_hex": hex::encode(bytes),
+        "parsed_value": String::from_utf8_lossy(bytes).trim_end_matches('\0').to_string()
+    })
+}
+
+fn format_kind_field(bytes: &[u8]) -> serde_json::Value {
+    json!({
+        "raw_hex": hex::encode(bytes),
+        "parsed_value": parse_u16_be(bytes)
+    })
+}
+
+fn format_tag_name(byte: u8) -> serde_json::Value {
+    json!({
+        "raw_hex": hex::encode([byte]),
+        "parsed_value": (byte as char).to_string()
+    })
 }
