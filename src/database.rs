@@ -108,21 +108,34 @@ impl RelayDatabase {
             match scoped_view.query(filter).await {
                 Ok(events) => all_events.extend(events),
                 Err(e) => {
-                    // Check if this is a NotFound error (empty database)
-                    let error_str = e.to_string();
-                    if error_str.contains("Backend(NotFound)")
-                        || error_str.contains("NotFound")
-                        || error_str.contains("Not found")
-                    {
-                        debug!(
-                            "No events found for filter (database may be empty): {}",
-                            error_str
-                        );
-                        // Continue with empty result for this filter
-                        continue;
+                    // Check if this is a NotFound error (database integrity issue)
+                    match &e {
+                        DatabaseError::Backend(backend_err) => {
+                            let error_str = backend_err.to_string();
+                            if error_str.contains("Not found") {
+                                // This is NOT an empty result - it's a database integrity issue!
+                                // An index points to an event that doesn't exist in storage
+                                error!(
+                                    "Database integrity error: Index contains reference to non-existent event. \
+                                    This indicates corrupted indices in the database. \
+                                    Please run the nostr-lmdb-integrity tool to check and repair the database. \
+                                    Error: {}", error_str
+                                );
+                                // NotFound errors indicate corrupted indices that need repair
+                                // The nostr-lmdb-integrity tool can identify and remove these corrupt entries
+
+                                // For now, continue with other filters to avoid blocking queries
+                                continue;
+                            }
+                            // Other backend errors should be propagated
+                            error!("Database backend error: {}", error_str);
+                            return Err(Error::database(format!("Database backend error: {e}")));
+                        }
+                        DatabaseError::NotSupported => {
+                            error!("Database operation not supported: {:?}", e);
+                            return Err(Error::database("Database operation not supported"));
+                        }
                     }
-                    error!("Error querying events: {:?}", e);
-                    return Err(Error::database(format!("Failed to query events: {e}")));
                 }
             }
         }
@@ -145,17 +158,19 @@ impl RelayDatabase {
             match scoped_view.count(filter).await {
                 Ok(count) => total_count += count,
                 Err(e) => {
-                    // Check if this is a NotFound error (empty database)
+                    // Check if this is a NotFound error (database integrity issue)
                     let error_str = e.to_string();
                     if error_str.contains("Backend(NotFound)")
                         || error_str.contains("NotFound")
                         || error_str.contains("Not found")
                     {
-                        debug!(
-                            "No events found for count filter (database may be empty): {}",
-                            error_str
+                        error!(
+                            "Database integrity error during count: Index contains reference to non-existent event. \
+                            This indicates corrupted indices. Please run the nostr-lmdb-integrity tool. \
+                            Error: {}", error_str
                         );
-                        // Continue with 0 count for this filter
+                        // Continue with 0 count for this filter to avoid blocking
+                        // Note: This count may be inaccurate due to corruption
                         continue;
                     }
                     error!("Error counting events: {:?}", e);

@@ -147,7 +147,18 @@ async fn export_scope(
     let events = scoped_db
         .query(filter)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to query events: {}", e))?;
+        .map_err(|e| {
+            // Check if it's a NotFound error which indicates database corruption
+            if e.to_string().contains("NotFound") {
+                anyhow::anyhow!(
+                    "Failed to query events: {}. This appears to be a database integrity issue. \
+                    Please run the nostr-lmdb-integrity tool to check and repair corrupted indices.",
+                    e
+                )
+            } else {
+                anyhow::anyhow!("Failed to query events: {}", e)
+            }
+        })?;
     let count = events.len() as u64;
 
     let filename = scope_to_filename(scope, include_count, Some(count));

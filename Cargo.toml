@@ -110,3 +110,4 @@ path = "src/bin/export_import.rs"
 [[bin]]
 name = "negentropy_sync"
 path = "src/bin/negentropy_sync.rs"
+

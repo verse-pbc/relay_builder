@@ -502,10 +502,10 @@ impl SubscriptionCoordinator {
 
         // Process each filter separately
         for (filter_idx, filter) in filters.iter().enumerate() {
-            let requested_limit = filter.limit.unwrap_or(0);
-            if requested_limit == 0 {
-                continue;
-            }
+            // All filters have been adjusted to have a limit by this point
+            let requested_limit = filter
+                .limit
+                .expect("Filter should have limit after adjustment");
 
             let mut window_filter = filter.clone();
             let mut filter_sent = 0;
