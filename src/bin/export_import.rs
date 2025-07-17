@@ -234,11 +234,12 @@ async fn export_database(
     Ok(())
 }
 
-async fn import_scope(
+async fn import_scope_with_progress(
     db: &Arc<NostrLMDB>,
     scope: &Scope,
     file_path: &Path,
     skip_errors: bool,
+    progress_bar: &ProgressBar,
 ) -> Result<(u64, u64)> {
     let file =
         File::open(file_path).with_context(|| format!("Failed to open file: {file_path:?}"))?;
@@ -261,9 +262,13 @@ async fn import_scope(
                 // Process in batches of 100 events
                 if events_batch.len() >= 100 {
                     match save_events_batch(db, scope, &events_batch).await {
-                        Ok(count) => imported += count,
+                        Ok(count) => {
+                            imported += count;
+                            progress_bar.inc(events_batch.len() as u64);
+                        }
                         Err(e) => {
                             errors += events_batch.len() as u64;
+                            progress_bar.inc(events_batch.len() as u64);
                             if !skip_errors {
                                 return Err(anyhow::anyhow!(
                                     "Failed to import batch ending at line {}: {}",
@@ -278,6 +283,7 @@ async fn import_scope(
             }
             Err(e) => {
                 errors += 1;
+                progress_bar.inc(1);
                 if skip_errors {
                     warn!(
                         "Failed to parse event at line {} in {:?}: {}",
@@ -297,12 +303,16 @@ async fn import_scope(
         }
     }
 
-    // Process remaining events
+    // Process any remaining events
     if !events_batch.is_empty() {
         match save_events_batch(db, scope, &events_batch).await {
-            Ok(count) => imported += count,
+            Ok(count) => {
+                imported += count;
+                progress_bar.inc(events_batch.len() as u64);
+            }
             Err(e) => {
                 errors += events_batch.len() as u64;
+                progress_bar.inc(events_batch.len() as u64);
                 if !skip_errors {
                     return Err(anyhow::anyhow!("Failed to import final batch: {}", e));
                 }
@@ -337,6 +347,21 @@ async fn save_events_batch(db: &Arc<NostrLMDB>, scope: &Scope, events: &[Event])
     Ok(saved_count)
 }
 
+async fn count_events_in_file(file_path: &Path) -> Result<u64> {
+    let file = File::open(file_path)?;
+    let reader = BufReader::new(file);
+    let mut count = 0u64;
+
+    for line in reader.lines() {
+        let line = line?;
+        if !line.trim().is_empty() {
+            count += 1;
+        }
+    }
+
+    Ok(count)
+}
+
 async fn import_database(
     db: Arc<NostrLMDB>,
     input_dir: PathBuf,
@@ -365,17 +390,36 @@ async fn import_database(
 
     info!("Found {} JSONL files to import", entries.len());
 
+    // Count total events across all files
+    info!("Counting events in files...");
+    let mut file_info = Vec::new();
+    let mut total_event_count = 0u64;
+
+    for entry in &entries {
+        let path = entry.path();
+        if let Some(filename) = path.file_name().and_then(|s| s.to_str()) {
+            if let Some(scope) = parse_scope_from_filename(filename) {
+                match count_events_in_file(&path).await {
+                    Ok(count) => {
+                        total_event_count += count;
+                        file_info.push((path.clone(), filename.to_string(), scope, count));
+                    }
+                    Err(e) => {
+                        warn!("Failed to count events in {}: {}", filename, e);
+                    }
+                }
+            }
+        }
+    }
+
     // Show files to be imported and ask for confirmation
     if !skip_confirmation {
         println!("\nFiles to be imported:");
         println!("====================");
-        for entry in &entries {
-            if let Some(filename) = entry.file_name().to_str() {
-                if let Some(scope) = parse_scope_from_filename(filename) {
-                    println!("- {filename} -> {scope:?}");
-                }
-            }
+        for (_, filename, scope, count) in &file_info {
+            println!("- {filename} -> {scope:?} ({count} events)");
         }
+        println!("\nTotal events to import: {total_event_count}");
 
         print!("\nDo you want to proceed with import? [y/N] ");
         std::io::stdout().flush()?;
@@ -389,10 +433,11 @@ async fn import_database(
         }
     }
 
-    let progress_bar = ProgressBar::new(entries.len() as u64);
+    // Create a single progress bar for all events
+    let progress_bar = ProgressBar::new(total_event_count);
     progress_bar.set_style(
         ProgressStyle::default_bar()
-            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} files ({eta})")?
+            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} events ({eta}) {msg}")?
             .progress_chars("#>-"),
     );
 
@@ -400,33 +445,27 @@ async fn import_database(
     let mut total_errors = 0u64;
     let mut processed_files = 0u64;
 
-    for entry in entries {
-        let path = entry.path();
-        if let Some(filename) = path.file_name().and_then(|s| s.to_str()) {
-            if let Some(scope) = parse_scope_from_filename(filename) {
-                info!("Importing {} into scope {:?}", filename, scope);
-                match import_scope(&db, &scope, &path, skip_errors).await {
-                    Ok((imported, errors)) => {
-                        total_imported += imported;
-                        total_errors += errors;
-                        processed_files += 1;
-                        info!(
-                            "Imported {} events from {} ({} errors)",
-                            imported, filename, errors
-                        );
-                    }
-                    Err(e) => {
-                        error!("Failed to import {}: {}", filename, e);
-                        if !skip_errors {
-                            return Err(e);
-                        }
-                    }
+    for (path, filename, scope, _) in file_info {
+        progress_bar.set_message(format!("Processing {filename}"));
+        info!("Importing {} into scope {:?}", filename, scope);
+
+        match import_scope_with_progress(&db, &scope, &path, skip_errors, &progress_bar).await {
+            Ok((imported, errors)) => {
+                total_imported += imported;
+                total_errors += errors;
+                processed_files += 1;
+                info!(
+                    "Imported {} events from {} ({} errors)",
+                    imported, filename, errors
+                );
+            }
+            Err(e) => {
+                error!("Failed to import {}: {}", filename, e);
+                if !skip_errors {
+                    return Err(e);
                 }
-            } else {
-                warn!("Skipping file with invalid naming pattern: {}", filename);
             }
         }
-        progress_bar.inc(1);
     }
 
     progress_bar.finish_with_message("Import complete");

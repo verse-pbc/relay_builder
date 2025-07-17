@@ -46,6 +46,8 @@ rayon = "1.10"
 num_cpus = "1.16"
 negentropy = { version = "0.5", features = ["std"] }
 hex = "0.4.3"
+heed = { version = "0.20", default-features = false, features = ["read-txn-no-tls"] }
+twox-hash = "1.6"
 
 # Optional dependencies for the built-in server
 axum = { version = "0.8", features = ["ws", "http1"], optional = true }
@@ -111,3 +113,10 @@ path = "src/bin/export_import.rs"
 name = "negentropy_sync"
 path = "src/bin/negentropy_sync.rs"
 
+[[bin]]
+name = "nostr-lmdb-dump"
+path = "src/bin/nostr-lmdb-dump.rs"
+
+[[bin]]
+name = "nostr-lmdb-integrity"
+path = "src/bin/nostr-lmdb-integrity.rs"
