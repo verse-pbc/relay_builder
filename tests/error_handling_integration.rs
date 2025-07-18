@@ -1,7 +1,7 @@
 //! Integration tests for error handling middleware
 
-use nostr_relay_builder::{ErrorHandlingMiddleware, RelayBuilder, RelayConfig};
 use nostr_sdk::prelude::*;
+use relay_builder::{ErrorHandlingMiddleware, RelayBuilder, RelayConfig};
 
 #[tokio::test]
 async fn test_error_handling_middleware_in_relay() {

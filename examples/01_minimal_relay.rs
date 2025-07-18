@@ -11,8 +11,8 @@
 
 use anyhow::Result;
 use axum::{routing::get, Router};
-use nostr_relay_builder::{RelayBuilder, RelayConfig, RelayInfo};
 use nostr_sdk::prelude::*;
+use relay_builder::{RelayBuilder, RelayConfig, RelayInfo};
 use std::net::SocketAddr;
 
 #[tokio::main]
@@ -33,7 +33,7 @@ async fn main() -> Result<()> {
         pubkey: config.keys.public_key().to_hex(),
         contact: "admin@minimal.relay".to_string(),
         supported_nips: vec![1, 9, 50],
-        software: "nostr_relay_builder".to_string(),
+        software: "relay_builder".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         icon: None,
     };

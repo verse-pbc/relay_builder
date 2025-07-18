@@ -9,11 +9,11 @@
 
 use async_trait::async_trait;
 use axum::{routing::get, Router};
-use nostr_relay_builder::{
+use nostr_sdk::prelude::*;
+use relay_builder::{
     crypto_helper::CryptoHelper, middlewares::*, Error, EventContext, EventProcessor, RelayBuilder,
     RelayConfig, RelayInfo, StoreCommand,
 };
-use nostr_sdk::prelude::*;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio_util::task::TaskTracker;
@@ -48,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "bare_relay=debug,nostr_relay_builder=debug".into()),
+                .unwrap_or_else(|_| "bare_relay=debug,relay_builder=debug".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -89,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pubkey: keys.public_key().to_string(),
         contact: "admin@example.com".to_string(),
         supported_nips: vec![1, 9, 50],
-        software: "https://github.com/verse-pbc/nostr_relay_builder".to_string(),
+        software: "https://github.com/verse-pbc/relay_builder".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         icon: None,
     };

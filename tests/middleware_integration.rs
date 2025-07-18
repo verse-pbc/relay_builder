@@ -1,12 +1,12 @@
 //! Integration tests for RelayMiddleware
 
 use async_trait::async_trait;
-use nostr_relay_builder::{
+use nostr_sdk::prelude::*;
+use nostr_sdk::RelayUrl;
+use relay_builder::{
     Error, EventContext, EventProcessor, NostrConnectionState, RelayDatabase, RelayMiddleware,
     StoreCommand,
 };
-use nostr_sdk::prelude::*;
-use nostr_sdk::RelayUrl;
 use std::sync::Arc;
 use tokio_util::task::TaskTracker;
 
@@ -109,8 +109,8 @@ mod tests {
     async fn test_relay_middleware_creation() {
         let (database, keys, _tmp_dir) = setup_test().await;
         let processor = TestEventProcessor::new(true);
-        let registry = Arc::new(nostr_relay_builder::SubscriptionRegistry::new(None));
-        let crypto_helper = nostr_relay_builder::CryptoHelper::new(Arc::new(keys.clone()));
+        let registry = Arc::new(relay_builder::SubscriptionRegistry::new(None));
+        let crypto_helper = relay_builder::CryptoHelper::new(Arc::new(keys.clone()));
         let middleware = RelayMiddleware::new(
             processor,
             keys.public_key(),

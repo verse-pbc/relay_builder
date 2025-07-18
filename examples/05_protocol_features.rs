@@ -8,10 +8,10 @@
 
 use anyhow::Result;
 use axum::{routing::get, Router};
-use nostr_relay_builder::{
+use nostr_sdk::prelude::*;
+use relay_builder::{
     Nip40ExpirationMiddleware, Nip70Middleware, RelayBuilder, RelayConfig, RelayInfo,
 };
-use nostr_sdk::prelude::*;
 use std::net::SocketAddr;
 use tokio_util::task::TaskTracker;
 
@@ -35,7 +35,7 @@ async fn main() -> Result<()> {
         pubkey: config.keys.public_key().to_string(),
         contact: "admin@example.com".to_string(),
         supported_nips: vec![1, 9, 40, 70, 50], // List all supported NIPs
-        software: "nostr_relay_builder".to_string(),
+        software: "relay_builder".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         icon: None,
     };

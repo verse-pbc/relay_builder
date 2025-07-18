@@ -1,11 +1,9 @@
 //! Integration tests for EventProcessor trait and implementations
 
 use async_trait::async_trait;
-use nostr_relay_builder::{
-    Error, EventContext, EventProcessor, NostrConnectionState, StoreCommand,
-};
 use nostr_sdk::prelude::*;
 use nostr_sdk::RelayUrl;
+use relay_builder::{Error, EventContext, EventProcessor, NostrConnectionState, StoreCommand};
 use std::sync::Arc;
 
 /// Basic public event processor implementation for testing

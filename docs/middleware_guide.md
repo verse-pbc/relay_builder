@@ -2,7 +2,7 @@
 
 ## Overview
 
-The `nostr_relay_builder` provides two ways to customize relay behavior:
+The `relay_builder` provides two ways to customize relay behavior:
 
 1. **EventProcessor** - High-level business logic API (recommended for most use cases)
 2. **Middleware** - Low-level message processing API (for protocol extensions)

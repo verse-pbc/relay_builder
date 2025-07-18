@@ -6,7 +6,7 @@ RED='\033[0;31m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-echo "Setting up git hooks for nostr_relay_builder..."
+echo "Setting up git hooks for relay_builder..."
 
 # Create the pre-commit hook
 cat > .git/hooks/pre-commit << 'EOF'

@@ -1,6 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use nostr_relay_builder::RelayDatabase;
 use nostr_sdk::prelude::*;
+use relay_builder::RelayDatabase;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::runtime::Runtime;

@@ -1,11 +1,11 @@
 [package]
-name = "nostr_relay_builder"
+name = "relay_builder"
 version = "0.5.0-alpha.1"
 edition = "2021"
 authors = ["Daniel Cadenas <dcadenas@gmail.com>"]
 description = "A framework for building custom Nostr relays with pluggable business logic and middleware support"
 license = "MIT"
-repository = "https://github.com/verse-pbc/nostr_relay_builder"
+repository = "https://github.com/verse-pbc/relay_builder"
 keywords = ["nostr", "relay", "websocket", "middleware"]
 categories = ["network-programming", "web-programming::websocket"]
 readme = "README.md"

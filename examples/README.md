@@ -1,6 +1,6 @@
-# Nostr Relay Builder Examples
+# Relay Builder Examples
 
-This guide walks through nostr_relay_builder features with progressive examples.
+This guide walks through relay_builder features with progressive examples.
 
 ## Prerequisites
 - Basic Rust knowledge
@@ -18,7 +18,7 @@ All examples work with both WebSocket backends:
 
 To run examples with fastwebsockets, modify the `websocket_builder` dependency in `Cargo.toml`:
 ```toml
-websocket_builder = { git = "https://github.com/verse-pbc/websocket_builder", default-features = false, features = ["fastwebsockets"] }
+websocket_builder = { path = "../websocket_builder", default-features = false, features = ["fastwebsockets"] }
 ```
 
 ## Step 1: Minimal Relay
@@ -226,6 +226,6 @@ RelayConfig::new(url, db_path, keys)    // db_path can be String or (Arc<RelayDa
 
 - Explore each example file to see the code in action
 - Check out production implementations:
-  - [groups_relay](https://github.com/verse-pbc/groups_relay) - NIP-29 group chat relay
+  - [groups_relay](https://github.com/verse-pbc/groups) - NIP-29 group chat relay
   - [profile_aggregator](https://github.com/verse-pbc/profile_aggregator) - Profile aggregation service
 - Read the [middleware guide](../docs/middleware_guide.md) for deeper understanding

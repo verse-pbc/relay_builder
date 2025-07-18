@@ -1,4 +1,4 @@
-# Nostr Relay Builder
+# Relay Builder
 
 A framework for building custom Nostr relays in Rust.
 
@@ -18,13 +18,13 @@ A framework for building custom Nostr relays in Rust.
 
 ```toml
 [dependencies]
-nostr_relay_builder = { git = "https://github.com/verse-pbc/nostr_relay_builder", features = ["axum"] }
+relay_builder = { git = "https://github.com/verse-pbc/relay_builder", features = ["axum"] }
 ```
 
 ```rust
 use anyhow::Result;
 use axum::{routing::get, Router};
-use nostr_relay_builder::{RelayBuilder, RelayConfig, RelayInfo};
+use relay_builder::{RelayBuilder, RelayConfig, RelayInfo};
 use nostr_sdk::prelude::*;
 use std::net::SocketAddr;
 
@@ -68,20 +68,20 @@ To use fastwebsockets, modify your `Cargo.toml`:
 
 ```toml
 [dependencies]
-websocket_builder = { git = "https://github.com/verse-pbc/websocket_builder", default-features = false, features = ["fastwebsockets"] }
-nostr_relay_builder = { git = "https://github.com/verse-pbc/nostr_relay_builder", features = ["axum"] }
+websocket_builder = { path = "../websocket_builder", default-features = false, features = ["fastwebsockets"] }
+relay_builder = { git = "https://github.com/verse-pbc/relay_builder", features = ["axum"] }
 ```
 
 ## Documentation
 
 - [Tutorial](./examples/README.md) - Step-by-step guide with progressive examples
 - [Examples](./examples/) - Working code samples
-- [API Docs](https://docs.rs/nostr_relay_builder) - API reference
+- [API Docs](https://docs.rs/relay_builder) - API reference
 
 ## Production Usage
 
 This framework powers:
-- [groups_relay](https://github.com/verse-pbc/groups_relay) - NIP-29 group chat relay
+- [groups_relay](https://github.com/verse-pbc/groups) - NIP-29 group chat relay
 - [profile_aggregator](https://github.com/verse-pbc/profile_aggregator) - Profile aggregation service
 
 ## License

@@ -68,7 +68,7 @@ impl std::fmt::Debug for HtmlOption {
 ///
 /// # Example
 /// ```rust,no_run
-/// use nostr_relay_builder::{RelayBuilder, EventProcessor, EventContext, RelayConfig};
+/// use relay_builder::{RelayBuilder, EventProcessor, EventContext, RelayConfig};
 /// use nostr_sdk::prelude::*;
 ///
 /// #[derive(Debug, Clone, Default)]
@@ -85,7 +85,7 @@ impl std::fmt::Debug for HtmlOption {
 /// #         event: nostr_sdk::Event,
 /// #         custom_state: std::sync::Arc<parking_lot::RwLock<MyState>>,
 /// #         context: EventContext<'_>,
-/// #     ) -> Result<Vec<nostr_relay_builder::StoreCommand>, nostr_relay_builder::Error> {
+/// #     ) -> Result<Vec<relay_builder::StoreCommand>, relay_builder::Error> {
 /// #         Ok(vec![])
 /// #     }
 /// # }
@@ -435,7 +435,7 @@ where
                 pubkey: self.config.keys.public_key().to_string(),
                 contact: "".to_string(),
                 supported_nips: vec![1],
-                software: "nostr_relay_builder".to_string(),
+                software: "relay_builder".to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 icon: None,
             });

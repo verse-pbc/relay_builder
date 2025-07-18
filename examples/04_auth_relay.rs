@@ -8,11 +8,11 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use axum::{routing::get, Router};
-use nostr_relay_builder::{
+use nostr_sdk::prelude::*;
+use relay_builder::{
     Error, EventContext, EventProcessor, RelayBuilder, RelayConfig, RelayInfo,
     Result as RelayResult, StoreCommand,
 };
-use nostr_sdk::prelude::*;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -60,7 +60,7 @@ async fn main() -> Result<()> {
         pubkey: config.keys.public_key().to_string(),
         contact: "admin@example.com".to_string(),
         supported_nips: vec![1, 11, 42], // Including NIP-42
-        software: "nostr_relay_builder".to_string(),
+        software: "relay_builder".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         icon: None,
     };

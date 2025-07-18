@@ -8,11 +8,11 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use axum::{routing::get, Router};
-use nostr_relay_builder::{
+use nostr_sdk::prelude::*;
+use relay_builder::{
     EventContext, EventProcessor, RelayBuilder, RelayConfig, RelayInfo, Result as RelayResult,
     StoreCommand,
 };
-use nostr_sdk::prelude::*;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -65,7 +65,7 @@ impl EventProcessor<UserSession> for SessionTrackingProcessor {
         // Simple spam prevention based on message count
         if state.messages_sent > 100 {
             tracing::warn!("User {} exceeded 100 messages in session", event.pubkey);
-            return Err(nostr_relay_builder::Error::restricted(
+            return Err(relay_builder::Error::restricted(
                 "too many messages in this session",
             ));
         }
@@ -92,7 +92,7 @@ async fn main() -> Result<()> {
         pubkey: config.keys.public_key().to_string(),
         contact: "admin@example.com".to_string(),
         supported_nips: vec![1, 9, 50],
-        software: "nostr_relay_builder".to_string(),
+        software: "relay_builder".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         icon: None,
     };

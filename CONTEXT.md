@@ -1,4 +1,4 @@
-# Nostr Relay Builder
+# Relay Builder
 
 A framework for building custom Nostr relays with middleware support. Built on top of `websocket_builder`.
 
@@ -14,7 +14,7 @@ A framework for building custom Nostr relays with middleware support. Built on t
 ## Project Structure
 
 ```
-nostr_relay_builder/
+relay_builder/
 ├── src/
 │   ├── relay_builder.rs      # Main builder pattern implementation
 │   ├── event_processor.rs    # Core trait for business logic
@@ -50,7 +50,7 @@ nostr_relay_builder/
 
 1. **Create a new relay**:
    ```rust
-   use nostr_relay_builder::{RelayBuilder, EventProcessor, EventContext, StoreCommand};
+   use relay_builder::{RelayBuilder, EventProcessor, EventContext, StoreCommand};
 
    let processor = MyBusinessLogic::new();
    let handler = RelayBuilder::new(config)

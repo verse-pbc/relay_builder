@@ -6,8 +6,8 @@
 //! PERF_TEST_EVENT_COUNT=20000 cargo test test_crypto_verification_performance
 //! ```
 
-use nostr_relay_builder::crypto_helper::CryptoHelper;
 use nostr_sdk::prelude::*;
+use relay_builder::crypto_helper::CryptoHelper;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio_util::task::TaskTracker;

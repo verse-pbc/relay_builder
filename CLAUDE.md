@@ -36,7 +36,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Architecture Overview
 
-nostr_relay_builder is a Rust framework for building custom Nostr relays with a middleware-based architecture. It provides a flexible foundation for implementing Nostr protocol relays with pluggable business logic.
+relay_builder is a Rust framework for building custom Nostr relays with a middleware-based architecture. It provides a flexible foundation for implementing Nostr protocol relays with pluggable business logic.
 
 ### Core Design Principles
 

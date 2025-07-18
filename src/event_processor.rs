@@ -40,7 +40,7 @@ pub struct EventContext<'a> {
 /// ## Example
 ///
 /// ```rust,no_run
-/// use nostr_relay_builder::{EventProcessor, EventContext, StoreCommand};
+/// use relay_builder::{EventProcessor, EventContext, StoreCommand};
 /// use nostr_sdk::prelude::*;
 /// use async_trait::async_trait;
 /// use std::sync::Arc;
@@ -63,7 +63,7 @@ pub struct EventContext<'a> {
 ///         _event: &Event,
 ///         custom_state: Arc<parking_lot::RwLock<RateLimitState>>,
 ///         _context: EventContext<'_>,
-///     ) -> Result<bool, nostr_relay_builder::Error> {
+///     ) -> Result<bool, relay_builder::Error> {
 ///         // For read-only access, use read lock
 ///         let state = custom_state.read();
 ///         Ok(state.tokens > 0.0)
@@ -74,12 +74,12 @@ pub struct EventContext<'a> {
 ///         event: Event,
 ///         custom_state: Arc<parking_lot::RwLock<RateLimitState>>,
 ///         context: EventContext<'_>,
-///     ) -> Result<Vec<StoreCommand>, nostr_relay_builder::Error> {
+///     ) -> Result<Vec<StoreCommand>, relay_builder::Error> {
 ///         // Get a write lock since we need to modify the rate limit state
 ///         let mut state = custom_state.write();
 ///
 ///         if state.tokens < self.tokens_per_event {
-///             return Err(nostr_relay_builder::Error::restricted("Rate limit exceeded"));
+///             return Err(relay_builder::Error::restricted("Rate limit exceeded"));
 ///         }
 ///
 ///         state.tokens -= self.tokens_per_event;

@@ -11,8 +11,8 @@
 
 use anyhow::Result;
 use axum::{extract::State, routing::get, Router};
-use nostr_relay_builder::{RelayBuilder, RelayConfig, RelayInfo, WebSocketConfig};
 use nostr_sdk::prelude::*;
+use relay_builder::{RelayBuilder, RelayConfig, RelayInfo, WebSocketConfig};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -51,7 +51,7 @@ async fn main() -> Result<()> {
         pubkey: config.keys.public_key().to_string(),
         contact: "ops@example.com".to_string(),
         supported_nips: vec![1, 9, 50],
-        software: "nostr_relay_builder".to_string(),
+        software: "relay_builder".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         icon: None,
     };
