@@ -6,9 +6,9 @@
 
 use crate::error::Result;
 use crate::subscription_coordinator::StoreCommand;
-use async_trait::async_trait;
 use nostr_lmdb::Scope;
 use nostr_sdk::prelude::*;
+use std::future::Future;
 use std::sync::Arc;
 
 /// Minimal context for event visibility checks
@@ -42,8 +42,8 @@ pub struct EventContext<'a> {
 /// ```rust,no_run
 /// use relay_builder::{EventProcessor, EventContext, StoreCommand};
 /// use nostr_sdk::prelude::*;
-/// use async_trait::async_trait;
 /// use std::sync::Arc;
+/// use std::future::Future;
 ///
 /// #[derive(Debug, Clone, Default)]
 /// struct RateLimitState {
@@ -56,7 +56,6 @@ pub struct EventContext<'a> {
 ///     tokens_per_event: f32,
 /// }
 ///
-/// #[async_trait]
 /// impl EventProcessor<RateLimitState> for RateLimitedProcessor {
 ///     fn can_see_event(
 ///         &self,
@@ -69,12 +68,13 @@ pub struct EventContext<'a> {
 ///         Ok(state.tokens > 0.0)
 ///     }
 ///
-///     async fn handle_event(
+///     fn handle_event(
 ///         &self,
 ///         event: Event,
 ///         custom_state: Arc<parking_lot::RwLock<RateLimitState>>,
 ///         context: EventContext<'_>,
-///     ) -> Result<Vec<StoreCommand>, relay_builder::Error> {
+///     ) -> impl Future<Output = Result<Vec<StoreCommand>, relay_builder::Error>> + Send {
+///         async move {
 ///         // Get a write lock since we need to modify the rate limit state
 ///         let mut state = custom_state.write();
 ///
@@ -90,10 +90,10 @@ pub struct EventContext<'a> {
 ///             context.subdomain.clone(),
 ///             None,
 ///         )])
+///         }
 ///     }
 /// }
 /// ```
-#[async_trait]
 pub trait EventProcessor<T = ()>: Send + Sync + std::fmt::Debug + 'static
 where
     T: Send + Sync + 'static,
@@ -161,15 +161,17 @@ where
     /// # Returns
     /// * `Ok(commands)` - List of database commands to execute
     /// * `Err(Error)` - Processing failed (will be converted to NOTICE)
-    async fn handle_event(
+    fn handle_event(
         &self,
         event: Event,
         custom_state: Arc<parking_lot::RwLock<T>>,
         context: EventContext<'_>,
-    ) -> Result<Vec<StoreCommand>> {
-        // Default implementation: store all valid events
-        let _ = custom_state; // Unused in default implementation
-        Ok(vec![(event, context.subdomain.clone()).into()])
+    ) -> impl Future<Output = Result<Vec<StoreCommand>>> + Send {
+        async move {
+            // Default implementation: store all valid events
+            let _ = custom_state; // Unused in default implementation
+            Ok(vec![(event, context.subdomain.clone()).into()])
+        }
     }
 }
 
@@ -187,7 +189,6 @@ impl<T> Default for DefaultRelayProcessor<T> {
     }
 }
 
-#[async_trait]
 impl<T> EventProcessor<T> for DefaultRelayProcessor<T>
 where
     T: Send + Sync + std::fmt::Debug + 'static,

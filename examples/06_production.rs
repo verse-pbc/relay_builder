@@ -7,10 +7,15 @@
 //! - Health endpoints
 //! - Configuration limits
 //!
-//! Run with: cargo run --example 09_production --features axum
+//! Run with: cargo run --example 06_production
 
 use anyhow::Result;
-use axum::{extract::State, routing::get, Router};
+use axum::{
+    extract::State,
+    response::{Html, IntoResponse},
+    routing::get,
+    Router,
+};
 use nostr_sdk::prelude::*;
 use relay_builder::{RelayBuilder, RelayConfig, RelayInfo, WebSocketConfig};
 use std::net::SocketAddr;
@@ -18,6 +23,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
+use websocket_builder::{handle_upgrade, HandlerFactory, WebSocketUpgrade};
 
 /// Health check endpoint
 async fn health(State(counter): State<Arc<AtomicUsize>>) -> String {
@@ -62,21 +68,58 @@ async fn main() -> Result<()> {
     let connection_counter = Arc::new(AtomicUsize::new(0));
 
     // Build relay with all production features
-    let service = RelayBuilder::<()>::new(config)
-        .with_task_tracker(task_tracker.clone())
-        .with_cancellation_token(shutdown_token.clone())
-        .with_connection_counter(connection_counter.clone())
-        // In production, you might also add:
-        // .with_metrics(your_metrics_handler)
-        // .with_subscription_metrics(PrometheusSubscriptionMetricsHandler)
-        .build_relay_service(relay_info)
-        .await?;
+    let handler_factory = Arc::new(
+        RelayBuilder::<()>::new(config)
+            .task_tracker(task_tracker.clone())
+            .cancellation_token(shutdown_token.clone())
+            .connection_counter(connection_counter.clone())
+            // In production, you might also add:
+            // .metrics(your_metrics_handler)
+            // .subscription_metrics(PrometheusSubscriptionMetricsHandler)
+            .build()
+            .await?,
+    );
+
+    // Create a handler that supports WebSocket, NIP-11, and health check
+    let relay_info_clone = relay_info.clone();
+    let connection_counter_clone = connection_counter.clone();
+    let ws_handler = move |ws: Option<WebSocketUpgrade>,
+                           axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<
+        SocketAddr,
+    >,
+                           headers: axum::http::HeaderMap| {
+        let handler_factory = handler_factory.clone();
+        let relay_info = relay_info_clone.clone();
+
+        async move {
+            match ws {
+                Some(ws) => {
+                    // Handle WebSocket upgrade
+                    let handler = handler_factory.create(&headers);
+                    handle_upgrade(ws, addr, handler).await
+                }
+                None => {
+                    // Check for NIP-11 JSON request
+                    if let Some(accept) = headers.get(axum::http::header::ACCEPT) {
+                        if let Ok(value) = accept.to_str() {
+                            if value == "application/nostr+json" {
+                                return axum::Json(&relay_info).into_response();
+                            }
+                        }
+                    }
+
+                    // Serve HTML info page
+                    Html(relay_builder::handlers::default_relay_html(&relay_info)).into_response()
+                }
+            }
+        }
+    };
 
     // Create HTTP server with health endpoint
     let app = Router::new()
-        .route("/", get(service.axum_root_handler()))
+        .route("/", get(ws_handler))
         .route("/health", get(health))
-        .with_state(connection_counter.clone());
+        .with_state(connection_counter_clone);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -97,37 +140,33 @@ async fn main() -> Result<()> {
     println!("  - PrometheusSubscriptionMetricsHandler");
     println!("  - Custom ValidationMiddleware");
     println!("  - SampledMetricsHandler");
+    println!();
 
-    // Close task tracker early - no new tasks will be spawned
-    task_tracker.close();
+    // Set up graceful shutdown
+    let shutdown_handle = shutdown_token.clone();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to install CTRL+C signal handler");
+        println!("\n📛 Shutdown signal received, closing connections...");
+        shutdown_handle.cancel();
+    });
 
-    // Graceful shutdown handler
-    let shutdown_signal = async move {
-        tokio::signal::ctrl_c().await.unwrap();
-        println!("\n⏹️  Shutting down gracefully...");
-        shutdown_token.cancel();
-    };
-
-    // Run server
-    axum::serve(
+    // Run server with graceful shutdown
+    let server = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal)
-    .await?;
+    .with_graceful_shutdown(async move {
+        shutdown_token.cancelled().await;
+    });
 
-    // At this point, the app and all its handlers should be dropped
-    // The service Arc was moved into the handler, so it will be dropped
-    // when the server shuts down and the handler is dropped
+    server.await?;
 
-    // Note: The database will show a warning about not calling shutdown()
-    // This is a known limitation - the RelayService doesn't expose a shutdown method
-    // In production, you might want to modify the library to add proper shutdown support
-
-    println!("⏳ Waiting for background tasks to complete...");
+    // Wait for all tasks to complete
+    task_tracker.close();
     task_tracker.wait().await;
 
-    println!("✅ Shutdown complete");
-
+    println!("✅ All tasks completed. Goodbye!");
     Ok(())
 }

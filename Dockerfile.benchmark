@@ -1,27 +1,27 @@
-# Dockerfile for benchmarking minimal_relay
-FROM rust:1.75-slim as builder
-
+# Build stage - compile for Linux
+FROM rust:1.82-alpine AS builder
+RUN apk add --no-cache musl-dev openssl-dev pkgconfig
 WORKDIR /app
 
-# Copy manifests
+# Copy only necessary files for building
 COPY Cargo.toml Cargo.lock ./
-
-# Copy source code
 COPY src ./src
 COPY examples ./examples
+COPY ../websocket_builder ../websocket_builder
 
-# Build minimal_relay example in release mode
-RUN cargo build --release --example minimal_relay --features axum
+# Build with optimizations for Linux
+RUN RUSTFLAGS="-C target-cpu=native -C opt-level=3 -C codegen-units=1"     cargo build --release --example 01_minimal_relay --features axum
 
 # Runtime stage
-FROM debian:bookworm-slim
+FROM alpine:3.18
+RUN apk add --no-cache libgcc
+WORKDIR /app
 
-RUN apt-get update && apt-get install -y \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY --from=builder /app/target/release/examples/minimal_relay /usr/local/bin/minimal_relay
+# Copy the Linux binary from builder
+COPY --from=builder /app/target/release/examples/01_minimal_relay /app/minimal_relay
+RUN mkdir -p /app/relay-data
 
 EXPOSE 8080
-
-CMD ["minimal_relay"]
+ENV RELAY_DATA_DIR=/app/relay-data
+ENV RUST_LOG=nostr_lmdb=info,relay_builder=info
+ENTRYPOINT ["/app/minimal_relay"]

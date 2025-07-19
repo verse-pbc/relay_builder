@@ -1,65 +1,69 @@
 //! NIP-70: Protected Events middleware
 
 use crate::error::Error;
-use crate::state::NostrConnectionState;
+use crate::nostr_middleware::{InboundContext, InboundProcessor, NostrMiddleware, OutboundContext};
 use anyhow::Result;
-use async_trait::async_trait;
 use nostr_sdk::prelude::*;
-use websocket_builder::{InboundContext, Middleware, OutboundContext, SendMessage};
 
 /// Middleware implementing NIP-70: Protected Events
 ///
 /// This middleware ensures that events marked with the "-" tag (protected)
 /// can only be published by their original author. This prevents anyone
 /// else from republishing or redistributing these protected events.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Nip70Middleware;
 
-#[async_trait]
-impl Middleware for Nip70Middleware {
-    type State = NostrConnectionState;
-    type IncomingMessage = ClientMessage<'static>;
-    type OutgoingMessage = RelayMessage<'static>;
-
-    async fn process_inbound(
+impl<T> NostrMiddleware<T> for Nip70Middleware
+where
+    T: Send + Sync + Clone + 'static,
+{
+    fn process_inbound<Next>(
         &self,
-        ctx: &mut InboundContext<Self::State, ClientMessage<'static>, RelayMessage<'static>>,
-    ) -> Result<(), anyhow::Error> {
-        let Some(ClientMessage::Event(event)) = &ctx.message else {
-            return ctx.next().await;
-        };
+        ctx: InboundContext<'_, T, Next>,
+    ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send
+    where
+        Next: InboundProcessor<T>,
+    {
+        async move {
+            let Some(ClientMessage::Event(event)) = ctx.message else {
+                return ctx.next().await;
+            };
 
-        // Check if the event has a protected tag ("-")
-        if event.tags.find_standardized(TagKind::Protected).is_none() {
-            return ctx.next().await;
+            // Check if the event has a protected tag ("-")
+            if event.tags.find_standardized(TagKind::Protected).is_none() {
+                return ctx.next().await;
+            }
+
+            // Protected events require authentication
+            let Some(auth_pubkey) = ctx.state.read().authed_pubkey else {
+                return Err(
+                    Error::auth_required("this event may only be published by its author").into(),
+                );
+            };
+
+            // Only the original author can publish protected events
+            if auth_pubkey != event.pubkey {
+                ctx.sender.send(RelayMessage::ok(
+                    event.id,
+                    false,
+                    "rejected: this event may only be published by its author",
+                ))?;
+                return Ok(());
+            }
+
+            ctx.next().await
         }
-
-        // Protected events require authentication
-        let Some(auth_pubkey) = ctx.state.read().authed_pubkey else {
-            return Err(
-                Error::auth_required("this event may only be published by its author").into(),
-            );
-        };
-
-        // Only the original author can publish protected events
-        if auth_pubkey != event.pubkey {
-            return ctx.send_message(RelayMessage::ok(
-                event.id,
-                false,
-                "rejected: this event may only be published by its author",
-            ));
-        }
-
-        ctx.next().await
     }
 
-    async fn process_outbound(
+    fn process_outbound(
         &self,
-        ctx: &mut OutboundContext<Self::State, ClientMessage<'static>, RelayMessage<'static>>,
-    ) -> Result<(), anyhow::Error> {
-        // No special handling needed for outbound messages in NIP-70
-        // Protected events can be sent to authenticated users
-        ctx.next().await
+        _ctx: OutboundContext<'_, T>,
+    ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
+        async move {
+            // No special handling needed for outbound messages in NIP-70
+            // Protected events can be sent to authenticated users
+            Ok(())
+        }
     }
 }
 

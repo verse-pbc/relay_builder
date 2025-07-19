@@ -6,7 +6,7 @@ A framework for building custom Nostr relays with middleware support. Built on t
 
 - **Language**: Rust (edition 2021)
 - **Async Runtime**: Tokio
-- **WebSocket**: Tungstenite based websocket_builder for stateful connection middleware pipelines
+- **WebSocket**: Tungstenite via websocket_builder for middleware pipelines
 - **Database**: LMDB via a nostr-lmdb fork that provides multitenant support
 - **Web Framework**: Axum
 - **Nostr**: Custom fork of nostr-lmdb library for multitenancy and batched writes
@@ -18,10 +18,9 @@ relay_builder/
 ├── src/
 │   ├── relay_builder.rs      # Main builder pattern implementation
 │   ├── event_processor.rs    # Core trait for business logic
-│   ├── middleware.rs         # Relay middleware that bridges to WebSocket
+│   ├── relay_middleware.rs   # Relay middleware that bridges to WebSocket
 │   ├── middlewares/          # Built-in middleware implementations
 │   │   ├── error_handling.rs # Global error recovery
-│   │   ├── event_verifier.rs # Cryptographic verification
 │   │   ├── logger.rs         # Request/response logging
 │   │   ├── metrics.rs        # Performance metrics
 │   │   ├── nip40_expiration.rs # NIP-40 expiration
@@ -29,16 +28,17 @@ relay_builder/
 │   │   └── nip70_protected.rs # NIP-70 protected events
 │   ├── crypto_helper.rs     # Cryptographic operations helper
 │   ├── database.rs          # Async database abstraction
-│   ├── subscription_service.rs # Nostr subscriptions
+│   ├── subscription_coordinator.rs # Event storage and subscription management
+│   ├── subscription_registry.rs # Subscription tracking
+│   ├── subscription_index.rs # Event distribution optimization
 │   └── state.rs             # Connection state management
 ├── examples/
-│   ├── minimal_relay.rs     # Basic relay in ~80 lines
-│   ├── custom_middleware.rs # Middleware patterns
-│   ├── private_relay.rs     # Access-controlled relay
-│   ├── advanced_relay.rs    # Moderation features
-│   ├── subdomain_relay.rs   # Multi-tenant isolation
-│   ├── custom_state_relay.rs # Custom connection state
-│   └── production_relay.rs  # Production-ready setup (requires axum)
+│   ├── 01_minimal_relay.rs     # Basic relay
+│   ├── 02_event_processing.rs  # Custom business logic
+│   ├── 03_protocol_features.rs # NIPs support
+│   ├── 04_advanced_state.rs    # Custom state and multi-tenancy
+│   ├── 05_custom_middleware.rs # Middleware patterns
+│   └── 06_production.rs        # Production-ready setup
 └── tests/
     ├── logic_integration.rs
     ├── middleware_integration.rs
@@ -54,16 +54,16 @@ relay_builder/
 
    let processor = MyBusinessLogic::new();
    let handler = RelayBuilder::new(config)
-       .with_event_processor(processor)
-       .with_relay_info(relay_info)
-       .build_axum()
+       .event_processor(processor)
+       .relay_info(relay_info)
+       .build()
        .await?;
    ```
 
 2. **Run examples**:
    ```bash
-   cargo run --example minimal_relay --features axum
-   cargo run --example custom_middleware  # No axum required
+   cargo run --example 01_minimal_relay
+   cargo run --example 05_custom_middleware
    ```
 
 3. **Run tests**:
@@ -155,6 +155,7 @@ impl EventProcessor for AcceptAllProcessor {
         Ok(vec![StoreCommand::SaveSignedEvent(
             Box::new(event),
             context.subdomain.clone(),
+            None,
         )])
     }
 }
@@ -223,7 +224,7 @@ cargo bench
 
 ## Production Deployment
 
-See `examples/production_relay.rs` for:
+See `examples/06_production.rs` for:
 - Metrics collection via metrics middleware
 - Error recovery with error_handling middleware
 - Rate limiting patterns would need to be added. We will add a middleware for this in the future and grow the collection from community usage.
@@ -244,7 +245,7 @@ Core dependencies from Cargo.toml:
 - `nostr-sdk`, `nostr`, `nostr-database`, `nostr-lmdb` from verse-pbc/nostr fork
 - `tokio` with full features
 - `async-trait = "0.1.82"`
-- `axum` (optional feature for web server)
+- `axum` for web server integration
 
 ## Example Applications
 

@@ -103,7 +103,7 @@ Use `Middleware` when you need to:
    - `Nip70Middleware` - Protected events
 
 2. **Validation/Filtering**
-   - `EventVerifierMiddleware` - Verifies signatures
+   - Event signature verification is handled automatically by EventIngester
    - `ValidationMiddleware` - Custom validation rules
    - Rate limiting middleware
 
@@ -120,7 +120,7 @@ All middleware work seamlessly with custom state:
 let builder = RelayBuilder::<MyState>::new(config)
     .with_middleware(LoggerMiddleware::new())
     .with_middleware(ErrorHandlingMiddleware::new())
-    .with_middleware(EventVerifierMiddleware::new(crypto_helper));
+    // Event verification is handled automatically by EventIngester
 ```
 
 ### Example:
@@ -184,7 +184,7 @@ Client Message Flow:
     ↓
 [Nip42Middleware]           // Authentication
     ↓
-[EventVerifierMiddleware]   // Signature verification
+[EventIngester - automatic] // Signature verification (not a middleware)
     ↓
 [ValidationMiddleware]      // Custom validation
     ↓

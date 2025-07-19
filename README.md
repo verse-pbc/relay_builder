@@ -8,23 +8,25 @@ A framework for building custom Nostr relays in Rust.
 
 - Built on async Rust with Tokio
 - Pluggable business logic via EventProcessor trait
+- Custom middleware support with static dispatch (zero-cost abstractions)
 - Automatic signature verification and error handling
 - Built-in NIPs: 09 (deletion), 40 (expiration), 42 (auth), 70 (protected)
 - Subdomain isolation for multi-tenant deployments
 - Metrics, monitoring, and graceful shutdown
-- WebSocket backend support: tungstenite (default) or fastwebsockets
+- WebSocket backend support via tungstenite
 
 ## Quick Start
 
 ```toml
 [dependencies]
-relay_builder = { git = "https://github.com/verse-pbc/relay_builder", features = ["axum"] }
+relay_builder = { git = "https://github.com/verse-pbc/relay_builder" }
 ```
 
 ```rust
 use anyhow::Result;
 use axum::{routing::get, Router};
-use relay_builder::{RelayBuilder, RelayConfig, RelayInfo};
+use relay_builder::{RelayBuilder, RelayConfig};
+use relay_builder::handlers::RelayInfo;
 use nostr_sdk::prelude::*;
 use std::net::SocketAddr;
 
@@ -42,8 +44,8 @@ async fn main() -> Result<()> {
     
     // Build with default settings (accepts all valid events)
     let handler = RelayBuilder::new(config)
-        .with_relay_info(relay_info)
-        .build_axum()
+        .relay_info(relay_info)
+        .build()
         .await?;
     
     // Serve with Axum
@@ -57,24 +59,14 @@ async fn main() -> Result<()> {
 }
 ```
 
-## WebSocket Backend Configuration
+## WebSocket Backend
 
-The framework supports two WebSocket backends via the `websocket_builder` dependency:
-
-- **tungstenite** (default): Mature, widely-used WebSocket implementation
-- **fastwebsockets**: High-performance alternative with lower latency
-
-To use fastwebsockets, modify your `Cargo.toml`:
-
-```toml
-[dependencies]
-websocket_builder = { path = "../websocket_builder", default-features = false, features = ["fastwebsockets"] }
-relay_builder = { git = "https://github.com/verse-pbc/relay_builder", features = ["axum"] }
-```
+The framework uses tungstenite for WebSocket connections via the `websocket_builder` dependency.
 
 ## Documentation
 
 - [Tutorial](./examples/README.md) - Step-by-step guide with progressive examples
+- [Custom Middleware Guide](./docs/CUSTOM_MIDDLEWARE.md) - Creating custom middleware
 - [Examples](./examples/) - Working code samples
 - [API Docs](https://docs.rs/relay_builder) - API reference
 

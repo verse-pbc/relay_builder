@@ -7,59 +7,30 @@ This guide walks through relay_builder features with progressive examples.
 - Familiarity with Nostr protocol basics
 
 ## Structure
-- Examples are numbered 01 through 09
+- Examples are numbered 01 through 06
 - Each builds on previous concepts
-- Run with: `cargo run --example 01_minimal_relay --features axum`
+- Run with: `cargo run --example 01_minimal_relay`
 
-## WebSocket Backend Support
-All examples work with both WebSocket backends:
-- **tungstenite** (default): Standard WebSocket implementation
-- **fastwebsockets**: High-performance alternative
 
-To run examples with fastwebsockets, modify the `websocket_builder` dependency in `Cargo.toml`:
-```toml
-websocket_builder = { path = "../websocket_builder", default-features = false, features = ["fastwebsockets"] }
-```
+## Example 1: Minimal Relay
 
-## Step 1: Minimal Relay
-
-Basic relay with default configuration.
+Basic relay with default configuration - the simplest possible implementation.
 
 **Library Features:**
 - `RelayBuilder::new(config)` - Create a builder
-- `RelayConfig::new(url, db_path, keys)` - Basic configuration (path or database instance)
-- `.with_relay_info()` - NIP-11 relay information
-- `.build_axum()` - Build for Axum framework
-- Default middlewares (logger, error handler, signature verifier)
+- `RelayConfig::new(url, db_path, keys)` - Basic configuration
+- Default middlewares (logger, error handler)
+- Automatic event signature verification via EventIngester
 
 **What happens by default:**
-- Signature verification (EventVerifierMiddleware)
-- Error handling (ErrorHandlingMiddleware)
-- Request logging (LoggerMiddleware)
+- Event signature verification (automatic)
+- Error handling and request logging
 - Event storage and retrieval
 - Subscription management
 
-**Run:** `cargo run --example 01_minimal_relay --features axum`
+**Run:** `cargo run --example 01_minimal_relay`
 
-## Step 2: Bare Mode
-
-Manual middleware configuration without defaults.
-
-**Library Features:**
-- `.bare()` - Disable automatic middleware
-- Manual middleware addition order
-- Understanding the middleware stack
-
-**Key Learning:**
-- Why signature verification is critical
-- How middleware ordering affects processing
-- When you might need bare mode (rarely!)
-
-**Warning:** Without EventVerifierMiddleware, invalid signatures are accepted!
-
-**Run:** `cargo run --example 02_bare_mode --features axum`
-
-## Step 3: EventProcessor
+## Example 2: Event Processing
 
 Implement custom business logic for event handling.
 
@@ -68,98 +39,84 @@ Implement custom business logic for event handling.
 - `handle_event()` - Decide what to accept/reject
 - `EventContext` - Access connection state and metadata
 - `StoreCommand` - Control what gets stored
+- Content filtering (spam detection)
+- Rate limiting per public key
+- Custom rejection messages
 
-**EventProcessor vs Middleware:**
+**Key Learning:**
 - EventProcessor = WHAT events to accept (business logic)
-- Middleware = HOW messages flow (protocol handling)
+- Implement complex validation rules
+- Track state across events
+- Provide user-friendly error messages
 
-**Run:** `cargo run --example 03_spam_filter --features axum`
+**Run:** `cargo run --example 02_event_processing`
 
-## Step 4: Authentication
+## Example 3: Protocol Features
 
-NIP-42 authentication support.
+NIPs support for authentication, expiration, and protected events.
 
 **Library Features:**
-- `config.enable_auth = true` - Enable authentication
-- `.with_auth(AuthConfig)` - Configure auth behavior
-- `context.state.authed_pubkey` - Check authentication
-- Automatic AUTH message handling
+- `config.enable_auth = true` - Enable NIP-42 authentication
+- Event expiration handling (NIP-40)
+- Protected events (NIP-70)
+- `context.authed_pubkey` - Check authentication status
 
 **Key Points:**
-- Auth middleware (Nip42Middleware) is added automatically when enabled
-- Users must authenticate before posting
-- Check authed_pubkey in your EventProcessor
+- Auth middleware is added automatically when enabled
+- Combine multiple protocol features
+- Protocol-level concerns handled automatically
+- Check auth status in your EventProcessor
 
-**Run:** `cargo run --example 04_auth_relay --features axum`
+**Run:** `cargo run --example 03_protocol_features`
 
-## Step 5: Protocol Features
+## Example 4: Advanced State Management
 
-NIP support for expiration and protected events.
-
-**Library Features:**
-- `.with_middleware(Nip40ExpirationMiddleware)` - Event expiration (NIP-40)
-- `.with_middleware(Nip70Middleware)` - Protected events (NIP-70)
-
-**How they work:**
-- Run BEFORE your EventProcessor
-- Handle protocol-level concerns automatically
-- Can be combined as needed
-
-**Run:** `cargo run --example 05_protocol_features --features axum`
-
-## Step 6: Custom Middleware
-
-Implement middleware for cross-cutting concerns.
-
-**Library Features:**
-- `Middleware` trait - Low-level message processing
-- `process_inbound()` - Intercept incoming messages
-- `ctx.next().await` - Continue the chain
-- `ctx.send()` - Send responses
-
-**When to use Middleware vs EventProcessor:**
-- Middleware: Rate limiting, metrics, protocol extensions
-- EventProcessor: Business rules, access control
-
-**Run:** `cargo run --example 06_rate_limiter --features axum`
-
-## Step 7: Per-Connection State
-
-Maintain state for each connection.
+Per-connection state and multi-tenant support.
 
 **Library Features:**
 - `EventProcessor<T>` - Generic over state type
-- `.with_custom_state::<T>()` - Change state type
-- State initialized via `Default` trait
-- Mutable state in async contexts
+- `.custom_state::<T>()` - Change state type
+- `ScopeConfig::Subdomain` - Enable subdomain isolation
+- `context.subdomain` - Access current subdomain
+- Automatic data isolation by subdomain
+- Different behavior per tenant
 
 **Use cases:**
-- Per-user rate limiting
-- Session tracking
+- Per-user rate limiting and session tracking
+- Multi-tenant SaaS deployments
+- Community hosting with isolation
 - Reputation systems
 
-**Run:** `cargo run --example 07_user_sessions --features axum`
+**Run:** `cargo run --example 04_advanced_state`
 
-## Step 8: Multi-Tenant Support
+## Example 5: Custom Middleware
 
-Subdomain-based data isolation.
+Create your own middleware for cross-cutting concerns.
 
 **Library Features:**
-- `ScopeConfig::Subdomain` - Enable subdomain isolation
-- `.with_subdomains_from_url()` - Parse from URL (used in groups_relay)
-- `context.subdomain` - Access current subdomain
-- Automatic data isolation
+- `NostrMiddleware<T>` trait - Implement custom middleware
+- `build_with()` - Compose custom middleware chains
+- `without_defaults()` - Disable default middleware for full control
+- `process_inbound()` - Intercept incoming messages
+- `on_connect()` - Handle new connections
+- `.without_defaults()` mode for complete control
 
-**How it works:**
-- alice.relay.com → data scoped to "alice"
-- bob.relay.com → data scoped to "bob"
-- Automatic scoping based on subdomain
+**When to use Custom Middleware:**
+- Request/response timing and monitoring
+- Custom authentication schemes
+- Protocol extensions
+- Message transformation
+- Welcome messages and connection handling
 
-**Run:** `cargo run --example 08_multi_tenant --features axum`
+**Two Approaches Shown:**
+1. Default: Automatic logger and error handling
+2. Advanced: `without_defaults()` mode with full control
 
-## Step 9: Production Configuration
+**Run:** `cargo run --example 05_custom_middleware`
 
-Monitoring, metrics, and graceful shutdown.
+## Example 6: Production Configuration
+
+Monitoring, metrics, and graceful shutdown for production deployments.
 
 **Library Features:**
 - `.with_task_tracker()` - Graceful shutdown
@@ -171,11 +128,14 @@ Monitoring, metrics, and graceful shutdown.
 - `.with_subscription_limits()` - Query limits
 - `.build_relay_service()` - Full service access
 
-**Production patterns from real relays:**
-- **groups_relay**: Custom ValidationMiddleware, PrometheusSubscriptionMetricsHandler
-- **profile_aggregator**: TaskTracker for graceful shutdown
+**Production patterns:**
+- Health check endpoints
+- Prometheus metrics
+- Graceful shutdown on signals
+- Connection and subscription limits
+- Resource management
 
-**Run:** `cargo run --example 09_production --features axum`
+**Run:** `cargo run --example 06_production`
 
 ## Quick Reference
 
@@ -183,44 +143,47 @@ Monitoring, metrics, and graceful shutdown.
 ```rust
 RelayBuilder::new(config)
     // Mode
-    .bare()                              // Disable defaults
+    .without_defaults()                  // Disable default middleware
     
     // State
-    .with_custom_state::<T>()            // Custom state type (uses T::default())
+    .custom_state::<T>()                 // Custom state type (uses T::default())
     
     // Features
-    .with_auth(AuthConfig {...})         // NIP-42 authentication
-    .with_middleware(middleware)         // Add middleware
-    .with_event_processor(processor)     // Business logic
+    .event_processor(processor)          // Business logic
     
     // Monitoring
-    .with_metrics(handler)               // Performance metrics
-    .with_subscription_metrics(handler)  // Subscription metrics
+    .metrics(handler)                    // Performance metrics
+    .subscription_metrics(handler)       // Subscription metrics
     
     // Lifecycle
-    .with_task_tracker(tracker)          // Graceful shutdown
-    .with_cancellation_token(token)      // Shutdown signal
-    .with_connection_counter(counter)    // Connection tracking
+    .task_tracker(tracker)               // Graceful shutdown
+    .cancellation_token(token)           // Shutdown signal
+    .connection_counter(counter)         // Connection tracking
     
     // Configuration
-    .with_websocket_config(config)       // WebSocket settings
-    .with_subscription_limits(max, limit)// Query limits
-    .with_relay_info(info)               // NIP-11 info
+    .relay_info(info)                    // NIP-11 info
     
     // Build
     .build()                             // → WebSocket handler
-    .build_axum()                        // → Axum handler  
-    .build_relay_service(info)           // → Full service
+    .build_with(closure)                 // → Custom middleware chain
 ```
 
 ### RelayConfig Methods
 ```rust
-RelayConfig::new(url, db_path, keys)    // db_path can be String or (Arc<RelayDatabase>, DatabaseSender)
+RelayConfig::new(url, db_path, keys)    // db_path can be String or Arc<RelayDatabase>
     .with_subdomains_from_url(url)      // Parse subdomains
-    .with_auth(AuthConfig {...})         // Auth settings
     .with_websocket_config(config)       // Connection config
     .with_subscription_limits(max, limit)// Query limits
 ```
+
+## Learning Path
+
+1. **Start with Example 1** - Understand the basics
+2. **Example 2** - Learn EventProcessor for business logic
+3. **Example 3** - Add protocol features as needed
+4. **Example 4** - Advanced state when you need per-connection data or multi-tenancy
+5. **Example 5** - Custom middleware for specialized requirements
+6. **Example 6** - Production deployment considerations
 
 ## Next Steps
 
@@ -228,4 +191,4 @@ RelayConfig::new(url, db_path, keys)    // db_path can be String or (Arc<RelayDa
 - Check out production implementations:
   - [groups_relay](https://github.com/verse-pbc/groups) - NIP-29 group chat relay
   - [profile_aggregator](https://github.com/verse-pbc/profile_aggregator) - Profile aggregation service
-- Read the [middleware guide](../docs/middleware_guide.md) for deeper understanding
+- Read the [custom middleware guide](../docs/CUSTOM_MIDDLEWARE.md) for creating your own middleware

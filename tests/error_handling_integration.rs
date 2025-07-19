@@ -16,8 +16,12 @@ async fn test_error_handling_middleware_in_relay() {
     let keys = Keys::generate();
     let config = RelayConfig::new("ws://test", db_path, keys);
 
-    let _relay_builder =
-        RelayBuilder::<()>::new(config).with_middleware(ErrorHandlingMiddleware::new());
+    // ErrorHandlingMiddleware is now added by default
+    // Test that we can build a relay (which will include ErrorHandlingMiddleware automatically)
+    let _handler_factory = RelayBuilder::<()>::new(config)
+        .build()
+        .await
+        .expect("Should build relay with default error handling");
 
     // The actual middleware execution is tested in the error_handling.rs unit tests
     // and through the websocket_builder's integration test pattern
@@ -26,12 +30,12 @@ async fn test_error_handling_middleware_in_relay() {
 #[test]
 fn test_error_handling_middleware_creation() {
     // Verify the middleware can be created
-    let _middleware = ErrorHandlingMiddleware::<()>::new();
+    let _middleware = ErrorHandlingMiddleware::new();
 }
 
 #[test]
 fn test_error_handling_middleware_debug_trait() {
-    let middleware = ErrorHandlingMiddleware::<()>::new();
+    let middleware = ErrorHandlingMiddleware::new();
     let debug_str = format!("{middleware:?}");
     assert!(debug_str.contains("ErrorHandlingMiddleware"));
 }

@@ -1,6 +1,5 @@
 //! Integration tests for EventProcessor trait and implementations
 
-use async_trait::async_trait;
 use nostr_sdk::prelude::*;
 use nostr_sdk::RelayUrl;
 use relay_builder::{Error, EventContext, EventProcessor, NostrConnectionState, StoreCommand};
@@ -10,7 +9,6 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 struct PublicEventProcessor;
 
-#[async_trait]
 impl EventProcessor for PublicEventProcessor {
     async fn handle_event(
         &self,
@@ -27,7 +25,6 @@ impl EventProcessor for PublicEventProcessor {
 #[derive(Debug, Clone)]
 struct AuthRequiredEventProcessor;
 
-#[async_trait]
 impl EventProcessor for AuthRequiredEventProcessor {
     async fn handle_event(
         &self,
@@ -190,7 +187,6 @@ struct FilteringProcessor {
     blocked_keywords: Vec<String>,
 }
 
-#[async_trait]
 impl EventProcessor for FilteringProcessor {
     async fn handle_event(
         &self,

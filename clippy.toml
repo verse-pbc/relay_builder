@@ -1,0 +1,14 @@
+# Clippy configuration for relay_builder
+# Focused on performance and memory efficiency
+
+# Set cognitive complexity threshold
+cognitive-complexity-threshold = 30
+
+# Allow some patterns that are common in async code
+allow-dbg-in-tests = true
+
+# Configure specific lints
+avoid-breaking-exported-api = false
+too-many-arguments-threshold = 8
+
+# Note: Performance lints are configured in src/lib.rs using #![warn(...)] attributes

@@ -1,7 +1,6 @@
 //! Database abstraction for Nostr relays
 
 use crate::error::Error;
-use nostr_database::nostr::{Event, Filter};
 use nostr_database::Events;
 use nostr_lmdb::{NostrLMDB, Scope};
 use nostr_sdk::prelude::*;
@@ -57,6 +56,13 @@ impl RelayDatabase {
 
     /// Save an event directly
     pub async fn save_event(&self, event: &Event, scope: &Scope) -> Result<()> {
+        debug!(
+            "Saving event {} to scope: {:?} (scope_name: {:?})",
+            event.id,
+            scope,
+            scope.name()
+        );
+
         let env = Arc::clone(&self.lmdb);
         let scoped_view = env.scoped(scope).map_err(|e| {
             error!("Error getting scoped view: {:?}", e);
@@ -69,9 +75,10 @@ impl RelayDatabase {
         })?;
 
         debug!(
-            "Event saved successfully: {} for scope: {:?}",
-            event.as_json(),
-            scope
+            "Event {} saved successfully to scope: {:?} (scope_name: {:?})",
+            event.id,
+            scope,
+            scope.name()
         );
         Ok(())
     }

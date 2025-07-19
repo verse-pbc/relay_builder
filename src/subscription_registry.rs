@@ -1,10 +1,15 @@
-//! High-performance subscription registry using DashMap for concurrent access
+//! High-performance subscription registry using inverted indexes for efficient event distribution
 //!
-//! This module replaces the broadcast channel + actor pattern with a more efficient
-//! DashMap-based approach that allows true parallel event distribution.
+//! This module implements the strfry ActiveMonitors optimization to reduce event distribution
+//! complexity from O(n*m) to O(log k + m) where:
+//! - n = number of connections
+//! - m = average filters per connection  
+//! - k = number of unique index keys
 
 use crate::error::Error;
 use crate::metrics::SubscriptionMetricsHandler;
+use crate::nostr_middleware::NostrMessageSender;
+use crate::subscription_index::SubscriptionIndex;
 use dashmap::DashMap;
 use nostr_lmdb::Scope;
 use nostr_sdk::prelude::*;
@@ -12,7 +17,9 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, trace, warn};
-use websocket_builder::MessageSender;
+
+// Temporary type alias for compatibility during migration
+type MessageSender = NostrMessageSender;
 
 /// Trait for distributing events to subscribers
 #[async_trait::async_trait]
@@ -26,6 +33,8 @@ pub trait EventDistributor: Send + Sync {
 pub struct SubscriptionRegistry {
     /// Map of connection_id to their subscription data
     connections: Arc<DashMap<String, Arc<ConnectionSubscriptions>>>,
+    /// Subscription indexes per scope for efficient event distribution
+    indexes: Arc<DashMap<Scope, Arc<SubscriptionIndex>>>,
     /// Optional metrics handler
     metrics_handler: Option<Arc<dyn SubscriptionMetricsHandler>>,
 }
@@ -34,6 +43,7 @@ impl std::fmt::Debug for SubscriptionRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SubscriptionRegistry")
             .field("connections_count", &self.connections.len())
+            .field("scopes_with_indexes", &self.indexes.len())
             .field("has_metrics_handler", &self.metrics_handler.is_some())
             .finish()
     }
@@ -44,7 +54,7 @@ pub struct ConnectionSubscriptions {
     /// Map of subscription_id to filters - RwLock since writes are rare
     subscriptions: RwLock<HashMap<SubscriptionId, Vec<Filter>>>,
     /// Channel to send events to this connection
-    sender: MessageSender<RelayMessage<'static>>,
+    sender: MessageSender,
     /// Authenticated public key if any
     auth_pubkey: Option<PublicKey>,
     /// Subdomain/scope for this connection (Arc for cheap clones)
@@ -63,22 +73,38 @@ impl Drop for ConnectionHandle {
     fn drop(&mut self) {
         debug!("Connection {} dropped, removing from registry", self.id);
 
-        // Count subscriptions before removing the connection
-        let subscription_count = if let Some(connection) = self.registry.connections.get(&self.id) {
-            connection.subscriptions.read().len()
+        // Get subscription IDs and scope before removing the connection
+        let cleanup_info = if let Some(connection) = self.registry.connections.get(&self.id) {
+            let scope = connection.subdomain.as_ref().clone();
+            let subscriptions = connection.subscriptions.read();
+            let ids: Vec<SubscriptionId> = subscriptions.keys().cloned().collect();
+            let count = ids.len();
+            drop(subscriptions);
+            Some((ids, count, scope))
         } else {
-            0
+            None
         };
 
+        // Remove the connection
         self.registry.connections.remove(&self.id);
 
-        if let Some(handler) = &self.registry.metrics_handler {
-            if subscription_count > 0 {
-                handler.decrement_active_subscriptions(subscription_count);
-                debug!(
-                    "Decremented {} subscriptions for dropped connection {}",
-                    subscription_count, self.id
-                );
+        // Clean up from index
+        if let Some((ids, count, scope)) = cleanup_info {
+            if let Some(index_entry) = self.registry.indexes.get(&scope) {
+                let index = index_entry.value();
+                for sub_id in ids {
+                    index.remove_subscription(&self.id, &sub_id);
+                }
+            }
+
+            if let Some(handler) = &self.registry.metrics_handler {
+                if count > 0 {
+                    handler.decrement_active_subscriptions(count);
+                    debug!(
+                        "Decremented {} subscriptions for dropped connection {}",
+                        count, self.id
+                    );
+                }
             }
         }
     }
@@ -89,6 +115,7 @@ impl SubscriptionRegistry {
     pub fn new(metrics_handler: Option<Arc<dyn SubscriptionMetricsHandler>>) -> Self {
         Self {
             connections: Arc::new(DashMap::new()),
+            indexes: Arc::new(DashMap::new()),
             metrics_handler,
         }
     }
@@ -97,7 +124,7 @@ impl SubscriptionRegistry {
     pub fn register_connection(
         &self,
         connection_id: String,
-        sender: MessageSender<RelayMessage<'static>>,
+        sender: MessageSender,
         auth_pubkey: Option<PublicKey>,
         subdomain: Arc<Scope>,
     ) -> ConnectionHandle {
@@ -121,7 +148,7 @@ impl SubscriptionRegistry {
     pub fn add_subscription(
         &self,
         connection_id: &str,
-        subscription_id: SubscriptionId,
+        subscription_id: &SubscriptionId,
         filters: Vec<Filter>,
     ) -> Result<(), Error> {
         let connection = self
@@ -129,8 +156,20 @@ impl SubscriptionRegistry {
             .get(connection_id)
             .ok_or_else(|| Error::internal("Connection not found"))?;
 
+        // Add to connection's local subscriptions
         let mut subscriptions = connection.subscriptions.write();
-        subscriptions.insert(subscription_id.clone(), filters);
+        subscriptions.insert(subscription_id.clone(), filters.clone());
+
+        // Get or create index for this connection's scope
+        let scope = connection.subdomain.as_ref().clone();
+        let index = self
+            .indexes
+            .entry(scope)
+            .or_insert_with(|| Arc::new(SubscriptionIndex::new()))
+            .clone();
+
+        // Add to the index for efficient distribution
+        index.add_subscription(connection_id, subscription_id, filters);
 
         if let Some(handler) = &self.metrics_handler {
             handler.increment_active_subscriptions();
@@ -154,8 +193,16 @@ impl SubscriptionRegistry {
             .get(connection_id)
             .ok_or_else(|| Error::internal("Connection not found"))?;
 
+        let scope = connection.subdomain.as_ref().clone();
         let mut subscriptions = connection.subscriptions.write();
         if subscriptions.remove(subscription_id).is_some() {
+            // Remove from the appropriate scope index
+            if let Some(index_entry) = self.indexes.get(&scope) {
+                index_entry
+                    .value()
+                    .remove_subscription(connection_id, subscription_id);
+            }
+
             if let Some(handler) = &self.metrics_handler {
                 handler.decrement_active_subscriptions(1);
             }
@@ -180,10 +227,10 @@ impl SubscriptionRegistry {
 }
 
 impl SubscriptionRegistry {
-    /// Inline event distribution without spawn_blocking
-    fn distribute_event_inline(&self, event: Arc<Event>, scope: &Scope) {
+    /// Indexed event distribution using strfry optimization
+    fn distribute_event_indexed(&self, event: &Arc<Event>, scope: &Scope) {
         trace!(
-            "Distributing event {} to subscribers in scope {:?}",
+            "Distributing event {} to subscribers using index in scope {:?}",
             event.id,
             scope
         );
@@ -191,55 +238,81 @@ impl SubscriptionRegistry {
         let mut total_matches = 0;
         let mut dead_connections = Vec::new();
 
-        // Synchronous iteration over connections
-        for entry in self.connections.iter() {
-            let conn_id = entry.key();
-            let conn_data = entry.value();
-
-            // Skip connections that don't match the event's scope
-            if conn_data.subdomain.as_ref() != scope {
-                continue;
+        // Get the index for this scope
+        let index = match self.indexes.get(scope) {
+            Some(index_entry) => index_entry.value().clone(),
+            None => {
+                // No subscriptions for this scope
+                trace!("No index found for scope {:?}", scope);
+                return;
             }
+        };
 
-            // Use blocking read - fast since writes are rare
-            let subscriptions = conn_data.subscriptions.read();
+        // Get matching subscriptions from scope's index
+        let matching_subscriptions = index.distribute_event(event);
 
-            for (sub_id, filters) in subscriptions.iter() {
-                if filters.iter().any(|filter| {
-                    filter.match_event(&event, nostr_sdk::filter::MatchEventOptions::default())
-                }) {
-                    total_matches += 1;
+        trace!(
+            "Index found {} potential matches for event {} in scope {:?}",
+            matching_subscriptions.len(),
+            event.id,
+            scope
+        );
 
-                    let message = RelayMessage::event(
-                        sub_id.clone(),
-                        (*event).clone(), // Clone the event data
-                    );
+        // Pre-serialize the event once if we have matches
+        let event_json = if !matching_subscriptions.is_empty() {
+            Some(event.as_json())
+        } else {
+            None
+        };
 
-                    // MessageSender.send() is synchronous and uses try_send internally
-                    let mut sender = conn_data.sender.clone();
-                    if let Err(e) = sender.send(message) {
-                        // Connection is dead, mark for removal
-                        warn!("Failed to send to connection {}: {:?}", conn_id, e);
-                        dead_connections.push(conn_id.clone());
-                        break;
-                    } else {
-                        trace!(
-                            "Sent event to subscription {} on connection {}",
-                            sub_id,
-                            conn_id
-                        );
-                    }
+        for (conn_id, sub_id) in matching_subscriptions {
+            // Get connection data
+            let conn_data = match self.connections.get(&conn_id) {
+                Some(conn) => conn,
+                None => {
+                    // Connection was removed after index returned it
+                    trace!("Connection {} no longer exists", conn_id);
+                    continue;
                 }
+            };
+
+            // Double-check scope matches (should always match since we're using per-scope indexes)
+            debug_assert_eq!(conn_data.subdomain.as_ref(), scope);
+
+            total_matches += 1;
+
+            let message = RelayMessage::event(
+                sub_id.clone(),
+                (**event).clone(), // Clone the event data
+            );
+
+            // Use pre-serialized JSON if available
+            let sender = conn_data.sender.clone();
+            let send_result = if let Some(ref json) = event_json {
+                // Build the complete EVENT message JSON
+                let json_with_sub = format!(r#"["EVENT","{sub_id}",{json}]"#);
+                sender.send_with_json(message, json_with_sub)
+            } else {
+                sender.send(message)
+            };
+
+            if let Err(e) = send_result {
+                // Connection is dead, mark for removal
+                warn!("Failed to send to connection {}: {:?}", conn_id, e);
+                dead_connections.push(conn_id);
+            } else {
+                trace!("Sent event to subscription on connection {}", conn_id);
             }
         }
 
         // Clean up dead connections
         for conn_id in dead_connections {
+            // This will trigger the Drop handler which cleans up the index
             self.connections.remove(&conn_id);
         }
 
         if total_matches > 0 {
-            trace!("Event {} matched {} subscriptions", event.id, total_matches);
+            trace!("Event {} sent to {} subscriptions", event.id, total_matches);
         }
     }
 }
@@ -247,8 +320,8 @@ impl SubscriptionRegistry {
 #[async_trait::async_trait]
 impl EventDistributor for SubscriptionRegistry {
     async fn distribute_event(&self, event: Arc<Event>, scope: &Scope) {
-        // Distribute inline without spawn_blocking
-        self.distribute_event_inline(event, scope);
+        // Use indexed distribution for O(log k + m) performance
+        self.distribute_event_indexed(&event, scope);
     }
 }
 
@@ -261,7 +334,7 @@ mod tests {
         let registry = Arc::new(SubscriptionRegistry::new(None));
 
         // Register a connection
-        let (tx, _rx) = flume::bounded::<(RelayMessage<'static>, usize)>(100);
+        let (tx, _rx) = flume::bounded::<(RelayMessage<'static>, usize, Option<String>)>(100);
         let sender = MessageSender::new(tx, 0);
 
         {
@@ -287,7 +360,7 @@ mod tests {
         let registry = Arc::new(SubscriptionRegistry::new(None));
 
         // Register a connection
-        let (tx, _rx) = flume::bounded::<(RelayMessage<'static>, usize)>(100);
+        let (tx, _rx) = flume::bounded::<(RelayMessage<'static>, usize, Option<String>)>(100);
         let sender = MessageSender::new(tx, 0);
         let _handle = registry.register_connection(
             "conn1".to_string(),
@@ -301,7 +374,7 @@ mod tests {
         let filters = vec![Filter::new()];
 
         registry
-            .add_subscription("conn1", sub_id.clone(), filters)
+            .add_subscription("conn1", &sub_id, filters)
             .unwrap();
 
         // Remove subscription
@@ -316,7 +389,7 @@ mod tests {
         let registry = Arc::new(SubscriptionRegistry::new(None));
 
         // Create two connections with different scopes
-        let (tx1, rx1) = flume::bounded::<(RelayMessage<'static>, usize)>(100);
+        let (tx1, rx1) = flume::bounded::<(RelayMessage<'static>, usize, Option<String>)>(100);
         let sender1 = MessageSender::new(tx1, 0);
         let _handle1 = registry.register_connection(
             "conn_default".to_string(),
@@ -325,7 +398,7 @@ mod tests {
             Arc::new(Scope::Default),
         );
 
-        let (tx2, rx2) = flume::bounded::<(RelayMessage<'static>, usize)>(100);
+        let (tx2, rx2) = flume::bounded::<(RelayMessage<'static>, usize, Option<String>)>(100);
         let sender2 = MessageSender::new(tx2, 0);
         let _handle2 = registry.register_connection(
             "conn_tenant1".to_string(),
@@ -340,10 +413,10 @@ mod tests {
         let filters = vec![Filter::new()];
 
         registry
-            .add_subscription("conn_default", sub_id1.clone(), filters.clone())
+            .add_subscription("conn_default", &sub_id1, filters.clone())
             .unwrap();
         registry
-            .add_subscription("conn_tenant1", sub_id2.clone(), filters)
+            .add_subscription("conn_tenant1", &sub_id2, filters)
             .unwrap();
 
         // Create a test event
@@ -377,6 +450,7 @@ mod tests {
                 event: received_event,
                 ..
             },
+            _,
             _,
         )) = msg1
         {
@@ -415,6 +489,7 @@ mod tests {
                 ..
             },
             _,
+            _,
         )) = msg2
         {
             assert_eq!(received_event.id, event2.id);
@@ -431,7 +506,7 @@ mod tests {
         let registry = Arc::new(SubscriptionRegistry::new(None));
 
         // Create three connections with different named scopes
-        let (tx1, rx1) = flume::bounded::<(RelayMessage<'static>, usize)>(100);
+        let (tx1, rx1) = flume::bounded::<(RelayMessage<'static>, usize, Option<String>)>(100);
         let sender1 = MessageSender::new(tx1, 0);
         let _handle1 = registry.register_connection(
             "conn_tenant1".to_string(),
@@ -440,7 +515,7 @@ mod tests {
             Arc::new(Scope::named("tenant1").unwrap()),
         );
 
-        let (tx2, rx2) = flume::bounded::<(RelayMessage<'static>, usize)>(100);
+        let (tx2, rx2) = flume::bounded::<(RelayMessage<'static>, usize, Option<String>)>(100);
         let sender2 = MessageSender::new(tx2, 0);
         let _handle2 = registry.register_connection(
             "conn_tenant2".to_string(),
@@ -449,7 +524,7 @@ mod tests {
             Arc::new(Scope::named("tenant2").unwrap()),
         );
 
-        let (tx3, rx3) = flume::bounded::<(RelayMessage<'static>, usize)>(100);
+        let (tx3, rx3) = flume::bounded::<(RelayMessage<'static>, usize, Option<String>)>(100);
         let sender3 = MessageSender::new(tx3, 0);
         let _handle3 = registry.register_connection(
             "conn_tenant3".to_string(),
@@ -461,13 +536,21 @@ mod tests {
         // Add subscriptions to all connections
         let filters = vec![Filter::new()];
         registry
-            .add_subscription("conn_tenant1", SubscriptionId::new("sub1"), filters.clone())
+            .add_subscription(
+                "conn_tenant1",
+                &SubscriptionId::new("sub1"),
+                filters.clone(),
+            )
             .unwrap();
         registry
-            .add_subscription("conn_tenant2", SubscriptionId::new("sub2"), filters.clone())
+            .add_subscription(
+                "conn_tenant2",
+                &SubscriptionId::new("sub2"),
+                filters.clone(),
+            )
             .unwrap();
         registry
-            .add_subscription("conn_tenant3", SubscriptionId::new("sub3"), filters)
+            .add_subscription("conn_tenant3", &SubscriptionId::new("sub3"), filters)
             .unwrap();
 
         // Create and distribute event to tenant2 only
@@ -496,6 +579,7 @@ mod tests {
                 event: received_event,
                 ..
             },
+            _,
             _,
         )) = msg2
         {

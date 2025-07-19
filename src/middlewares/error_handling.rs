@@ -1,13 +1,12 @@
 //! Error handling middleware
 
 use crate::error::Error;
-use crate::state::NostrConnectionState;
+use crate::nostr_middleware::{InboundContext, InboundProcessor, NostrMiddleware};
+// use crate::state::NostrConnectionState; // Not directly used
 use anyhow::Result;
-use async_trait::async_trait;
 use nostr_sdk::prelude::*;
 use std::borrow::Cow;
 use tracing::error;
-use websocket_builder::{InboundContext, Middleware, OutboundContext, SendMessage};
 
 /// Message ID for error handling
 #[derive(Debug, Clone)]
@@ -17,35 +16,32 @@ pub enum ClientMessageId {
 }
 
 /// Middleware for handling errors in the message processing chain
-#[derive(Debug)]
-pub struct ErrorHandlingMiddleware<T = ()> {
-    _phantom: std::marker::PhantomData<T>,
-}
+#[derive(Debug, Clone)]
+pub struct ErrorHandlingMiddleware;
 
-impl<T> ErrorHandlingMiddleware<T> {
+impl ErrorHandlingMiddleware {
     pub fn new() -> Self {
-        Self {
-            _phantom: std::marker::PhantomData,
-        }
+        Self
     }
 }
 
-impl<T> Default for ErrorHandlingMiddleware<T> {
+impl Default for ErrorHandlingMiddleware {
     fn default() -> Self {
         Self::new()
     }
 }
 
-#[async_trait]
-impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for ErrorHandlingMiddleware<T> {
-    type State = NostrConnectionState<T>;
-    type IncomingMessage = ClientMessage<'static>;
-    type OutgoingMessage = RelayMessage<'static>;
-
-    async fn process_inbound(
+impl<T> NostrMiddleware<T> for ErrorHandlingMiddleware
+where
+    T: Clone + Send + Sync + std::fmt::Debug + 'static,
+{
+    async fn process_inbound<Next>(
         &self,
-        ctx: &mut InboundContext<Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
-    ) -> Result<(), anyhow::Error> {
+        ctx: InboundContext<'_, T, Next>,
+    ) -> Result<(), anyhow::Error>
+    where
+        Next: InboundProcessor<T>,
+    {
         let client_message_id = match &ctx.message {
             Some(ClientMessage::Event(event)) => ClientMessageId::Event(event.id),
             Some(ClientMessage::Req {
@@ -73,11 +69,14 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for ErrorHan
             }
         };
 
+        // Extract what we need before calling next()
+        let sender = ctx.sender.clone();
+
         match ctx.next().await {
             Ok(()) => Ok(()),
             Err(e) => {
                 if let Some(err) = e.downcast_ref::<Error>() {
-                    if let Err(err) = handle_inbound_error(err, ctx, client_message_id).await {
+                    if let Err(err) = handle_inbound_error(err, &sender, client_message_id).await {
                         error!("Failed to handle inbound error: {}", err);
                     }
                 } else {
@@ -87,25 +86,14 @@ impl<T: Clone + Send + Sync + std::fmt::Debug + 'static> Middleware for ErrorHan
             }
         }
     }
-
-    async fn process_outbound(
-        &self,
-        ctx: &mut OutboundContext<Self::State, Self::IncomingMessage, Self::OutgoingMessage>,
-    ) -> Result<(), anyhow::Error> {
-        ctx.next().await
-    }
 }
 
 /// Handle inbound errors by sending appropriate relay messages
-async fn handle_inbound_error<T: Clone + Send + Sync + std::fmt::Debug + 'static>(
+async fn handle_inbound_error(
     error: &Error,
-    ctx: &mut InboundContext<
-        NostrConnectionState<T>,
-        ClientMessage<'static>,
-        RelayMessage<'static>,
-    >,
+    sender: &crate::nostr_middleware::NostrMessageSender,
     client_message_id: ClientMessageId,
-) -> Result<(), anyhow::Error> {
+) -> Result<()> {
     use Error::*;
 
     let message = match error {
@@ -169,7 +157,9 @@ async fn handle_inbound_error<T: Clone + Send + Sync + std::fmt::Debug + 'static
         }
     };
 
-    ctx.send_message(message)
+    sender
+        .send(message)
+        .map_err(|e| anyhow::anyhow!("Failed to send message: {}", e))
 }
 
 #[cfg(test)]
@@ -212,7 +202,7 @@ mod tests {
 
     #[test]
     fn test_error_handling_middleware_debug_impl() {
-        let middleware = ErrorHandlingMiddleware::<()>::new();
+        let middleware = ErrorHandlingMiddleware::new();
         let debug_str = format!("{middleware:?}");
         assert!(debug_str.contains("ErrorHandlingMiddleware"));
     }

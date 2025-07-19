@@ -110,8 +110,8 @@ pub struct RelayConfig {
     pub scope_config: ScopeConfig,
     /// Whether to enable NIP-42 authentication
     pub enable_auth: bool,
-    /// Authentication configuration (if enabled)
-    pub auth_config: Option<crate::middlewares::AuthConfig>,
+    /// Authentication configuration (if enabled) - temporarily disabled
+    // pub auth_config: Option<crate::middlewares::AuthConfig>,
     /// WebSocket server configuration
     pub websocket_config: WebSocketConfig,
     /// Maximum number of active subscriptions per connection
@@ -133,7 +133,7 @@ impl RelayConfig {
             keys,
             scope_config: ScopeConfig::default(),
             enable_auth: false,
-            auth_config: None,
+            // auth_config: None, // Temporarily disabled
             websocket_config: WebSocketConfig::default(),
             max_subscriptions: 50,
             max_limit: 5000,
@@ -145,7 +145,7 @@ impl RelayConfig {
         &self,
         keys: Arc<Keys>,
     ) -> Result<(Arc<RelayDatabase>, CryptoHelper), Error> {
-        let crypto_helper = CryptoHelper::new(keys.clone());
+        let crypto_helper = CryptoHelper::new(keys);
         let database = self.create_database_with_tracker(None, None)?;
         Ok((database, crypto_helper))
     }
@@ -223,12 +223,12 @@ impl RelayConfig {
         self
     }
 
-    /// Enable NIP-42 authentication
-    pub fn with_auth(mut self, auth_config: crate::middlewares::AuthConfig) -> Self {
-        self.enable_auth = true;
-        self.auth_config = Some(auth_config);
-        self
-    }
+    // Enable NIP-42 authentication - temporarily disabled
+    // pub fn with_auth(mut self, auth_config: crate::middlewares::AuthConfig) -> Self {
+    //     self.enable_auth = true;
+    //     self.auth_config = Some(auth_config);
+    //     self
+    // }
 
     /// Configure WebSocket server settings
     pub fn with_websocket_config(mut self, config: WebSocketConfig) -> Self {

@@ -1,14 +1,9 @@
 //! Integration tests for RelayMiddleware
 
-use async_trait::async_trait;
 use nostr_sdk::prelude::*;
 use nostr_sdk::RelayUrl;
-use relay_builder::{
-    Error, EventContext, EventProcessor, NostrConnectionState, RelayDatabase, RelayMiddleware,
-    StoreCommand,
-};
+use relay_builder::{Error, EventContext, EventProcessor, NostrConnectionState, StoreCommand};
 use std::sync::Arc;
-use tokio_util::task::TaskTracker;
 
 /// Test implementation of EventProcessor
 #[derive(Debug, Clone)]
@@ -22,7 +17,6 @@ impl TestEventProcessor {
     }
 }
 
-#[async_trait]
 impl EventProcessor for TestEventProcessor {
     async fn handle_event(
         &self,
@@ -51,7 +45,6 @@ impl EventProcessor for TestEventProcessor {
 #[derive(Debug, Clone)]
 struct RestrictiveEventProcessor;
 
-#[async_trait]
 impl EventProcessor for RestrictiveEventProcessor {
     async fn handle_event(
         &self,
@@ -94,35 +87,6 @@ impl EventProcessor for RestrictiveEventProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
-
-    async fn setup_test() -> (Arc<RelayDatabase>, Keys, TempDir) {
-        let tmp_dir = TempDir::new().unwrap();
-        let db_path = tmp_dir.path();
-        let keys = Keys::generate();
-        let _task_tracker = TaskTracker::new();
-        let database = RelayDatabase::new(db_path).unwrap();
-        (Arc::new(database), keys, tmp_dir)
-    }
-
-    #[tokio::test]
-    async fn test_relay_middleware_creation() {
-        let (database, keys, _tmp_dir) = setup_test().await;
-        let processor = TestEventProcessor::new(true);
-        let registry = Arc::new(relay_builder::SubscriptionRegistry::new(None));
-        let crypto_helper = relay_builder::CryptoHelper::new(Arc::new(keys.clone()));
-        let middleware = RelayMiddleware::new(
-            processor,
-            keys.public_key(),
-            database,
-            registry,
-            500,
-            RelayUrl::parse("ws://test").unwrap(),
-            crypto_helper,
-            None,
-        );
-        assert!(middleware.processor().allow_all);
-    }
 
     #[tokio::test]
     async fn test_verify_filters() {
@@ -216,19 +180,19 @@ mod tests {
 
         // Can add first subscription
         let sub1 = SubscriptionId::new("sub1");
-        assert!(state.try_add_subscription(sub1.clone()).is_ok());
+        assert!(state.try_add_subscription(&sub1).is_ok());
 
         // Can add second subscription
         let sub2 = SubscriptionId::new("sub2");
-        assert!(state.try_add_subscription(sub2.clone()).is_ok());
+        assert!(state.try_add_subscription(&sub2).is_ok());
 
         // Can add third subscription
         let sub3 = SubscriptionId::new("sub3");
-        assert!(state.try_add_subscription(sub3.clone()).is_ok());
+        assert!(state.try_add_subscription(&sub3).is_ok());
 
         // Cannot add fourth subscription
         let sub4 = SubscriptionId::new("sub4");
-        let result = state.try_add_subscription(sub4.clone());
+        let result = state.try_add_subscription(&sub4);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -240,10 +204,10 @@ mod tests {
 
         // Remove a subscription and verify we can add a new one
         assert!(state.remove_tracked_subscription(&sub2));
-        assert!(state.try_add_subscription(sub4).is_ok());
+        assert!(state.try_add_subscription(&sub4).is_ok());
 
         // Verify count is still at limit
         let sub5 = SubscriptionId::new("sub5");
-        assert!(state.try_add_subscription(sub5).is_err());
+        assert!(state.try_add_subscription(&sub5).is_err());
     }
 }

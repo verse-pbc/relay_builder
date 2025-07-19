@@ -2,6 +2,7 @@
 
 use crate::database::RelayDatabase;
 use crate::error::Error;
+use crate::nostr_middleware::NostrMessageSender;
 use crate::subscription_coordinator::StoreCommand;
 use crate::subscription_coordinator::SubscriptionCoordinator;
 use crate::subscription_registry::SubscriptionRegistry;
@@ -13,7 +14,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error};
-use websocket_builder::MessageSender;
+
+// Temporary type alias for compatibility during migration
+// Temporary type alias for compatibility during migration
+type MessageSender = NostrMessageSender;
 
 const DEFAULT_RELAY_URL: &str = "wss://default.relay";
 
@@ -72,7 +76,6 @@ impl<T> NostrConnectionState<T>
 where
     T: Default,
 {
-    /// Create a new connection state with default custom state
     pub fn new(relay_url: RelayUrl) -> Result<Self> {
         Ok(Self {
             relay_url,
@@ -85,6 +88,22 @@ where
             connection_token: CancellationToken::new(),
             registry: None,
             subdomain: Arc::new(Scope::Default),
+            custom_state: T::default(),
+        })
+    }
+
+    pub fn with_subdomain(relay_url: RelayUrl, subdomain: Arc<Scope>) -> Result<Self> {
+        Ok(Self {
+            relay_url,
+            challenge: None,
+            authed_pubkey: None,
+            subscription_coordinator: None,
+            max_subscriptions: None,
+            active_subscriptions: std::collections::HashSet::new(),
+            negentropy_subscriptions: HashMap::new(),
+            connection_token: CancellationToken::new(),
+            registry: None,
+            subdomain,
             custom_state: T::default(),
         })
     }
@@ -112,10 +131,9 @@ where
 }
 
 impl<T> NostrConnectionState<T> {
-    /// Create a new connection state with a custom state value
-    pub fn with_custom(relay_url: String, custom_state: T) -> Result<Self, Error> {
-        let relay_url = RelayUrl::parse(&relay_url)
-            .map_err(|e| Error::internal(format!("Invalid URL: {e}")))?;
+    pub fn with_custom(relay_url: &str, custom_state: T) -> Result<Self, Error> {
+        let relay_url =
+            RelayUrl::parse(relay_url).map_err(|e| Error::internal(format!("Invalid URL: {e}")))?;
 
         Ok(Self {
             relay_url,
@@ -132,13 +150,11 @@ impl<T> NostrConnectionState<T> {
         })
     }
 
-    /// Set the authenticated public key
     pub fn set_authenticated(&mut self, pubkey: PublicKey) {
         self.authed_pubkey = Some(pubkey);
         self.challenge = None; // Clear challenge after successful auth
     }
 
-    /// Check if the user is authenticated
     pub fn is_authenticated(&self) -> bool {
         self.authed_pubkey.is_some()
     }
@@ -149,9 +165,10 @@ impl<T> NostrConnectionState<T> {
         database: Arc<RelayDatabase>,
         registry: Arc<SubscriptionRegistry>,
         connection_id: String,
-        sender: MessageSender<RelayMessage<'static>>,
+        sender: MessageSender,
         crypto_helper: crate::crypto_helper::CryptoHelper,
         max_limit: Option<usize>,
+        replaceable_event_queue: flume::Sender<(UnsignedEvent, Scope)>,
     ) -> Result<(), Error> {
         debug!("Setting up connection for {}", connection_id);
 
@@ -165,9 +182,9 @@ impl<T> NostrConnectionState<T> {
             sender,
             self.authed_pubkey,
             self.subdomain.clone(),
-            self.connection_token.clone(),
             metrics_handler,
             max_limit.unwrap_or(1000), // Default to 1000 if not specified
+            replaceable_event_queue,
         );
         self.subscription_coordinator = Some(coordinator);
 
@@ -175,7 +192,6 @@ impl<T> NostrConnectionState<T> {
         Ok(())
     }
 
-    /// Save events to the database
     pub async fn save_events(&mut self, store_commands: Vec<StoreCommand>) -> Result<(), Error> {
         let Some(coordinator) = &self.subscription_coordinator else {
             return Err(Error::internal("No subscription coordinator available"));
@@ -201,7 +217,7 @@ impl<T> NostrConnectionState<T> {
     }
 
     /// Remove a subscription
-    pub fn remove_subscription(&self, subscription_id: SubscriptionId) -> Result<(), Error> {
+    pub fn remove_subscription(&self, subscription_id: &SubscriptionId) -> Result<(), Error> {
         let Some(coordinator) = &self.subscription_coordinator else {
             return Err(Error::internal("No subscription coordinator available"));
         };
@@ -266,7 +282,7 @@ impl<T> NostrConnectionState<T> {
     }
 
     /// Try to add a subscription, returns error if limit exceeded
-    pub fn try_add_subscription(&mut self, subscription_id: SubscriptionId) -> Result<(), Error> {
+    pub fn try_add_subscription(&mut self, subscription_id: &SubscriptionId) -> Result<(), Error> {
         if !self.can_accept_subscription() {
             let count = self.active_subscriptions.len();
             let max = self.max_subscriptions.unwrap_or(0);

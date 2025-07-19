@@ -50,14 +50,14 @@ impl CryptoHelper {
         // Spawn the verification processor
         let verified_count_clone = Arc::clone(&verified_count);
         std::thread::spawn(move || {
-            Self::run_verify_processor(verify_receiver, verified_count_clone);
+            Self::run_verify_processor(&verify_receiver, &verified_count_clone);
         });
 
         // Spawn the signing processor
         let signed_count_clone = Arc::clone(&signed_count);
         let keys_clone = Arc::clone(&keys);
         std::thread::spawn(move || {
-            Self::run_sign_processor(sign_receiver, keys_clone, signed_count_clone);
+            Self::run_sign_processor(&sign_receiver, &keys_clone, &signed_count_clone);
         });
 
         Self {
@@ -71,8 +71,8 @@ impl CryptoHelper {
 
     /// Run the verification processor that batches and parallelizes verification
     fn run_verify_processor(
-        receiver: flume::Receiver<VerifyRequest>,
-        verified_count: Arc<AtomicUsize>,
+        receiver: &flume::Receiver<VerifyRequest>,
+        verified_count: &Arc<AtomicUsize>,
     ) {
         info!("Crypto verification processor started");
 
@@ -169,9 +169,9 @@ impl CryptoHelper {
 
     /// Run the signing processor that batches and parallelizes signing
     fn run_sign_processor(
-        receiver: flume::Receiver<StoreCommand>,
-        keys: Arc<Keys>,
-        signed_count: Arc<AtomicUsize>,
+        receiver: &flume::Receiver<StoreCommand>,
+        keys: &Arc<Keys>,
+        signed_count: &Arc<AtomicUsize>,
     ) {
         info!("Crypto signing processor started");
 

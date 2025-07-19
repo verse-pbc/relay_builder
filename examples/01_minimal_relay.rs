@@ -3,17 +3,19 @@
 //! This example shows the absolute minimum code needed to run a functional Nostr relay.
 //! It accepts all events without any filtering or authentication.
 //!
-//! This example works with both tungstenite (default) and fastwebsockets backends.
-//! To use fastwebsockets, modify the websocket_builder dependency in Cargo.toml:
-//! websocket_builder = { path = "../websocket_builder", default-features = false, features = ["fastwebsockets"] }
-//!
-//! Run with: cargo run --example minimal_relay --features axum
+//! Run with: cargo run --example 01_minimal_relay
 
 use anyhow::Result;
-use axum::{routing::get, Router};
+use axum::{
+    response::{Html, IntoResponse},
+    routing::get,
+    Router,
+};
 use nostr_sdk::prelude::*;
 use relay_builder::{RelayBuilder, RelayConfig, RelayInfo};
 use std::net::SocketAddr;
+use std::sync::Arc;
+use websocket_builder::{handle_upgrade, HandlerFactory, WebSocketUpgrade};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -38,11 +40,43 @@ async fn main() -> Result<()> {
         icon: None,
     };
 
-    // Build the relay - uses DefaultRelayProcessor which accepts all valid events
-    let root_handler = RelayBuilder::<()>::new(config.clone())
-        .with_relay_info(relay_info)
-        .build_axum()
-        .await?;
+    // Build the relay handler factory
+    let handler_factory = Arc::new(RelayBuilder::<()>::new(config.clone()).build().await?);
+
+    // Create a unified handler that supports both WebSocket and HTTP on the same route
+    let root_handler = {
+        let relay_info_clone = relay_info.clone();
+        move |ws: Option<WebSocketUpgrade>,
+              axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
+              headers: axum::http::HeaderMap| {
+            let handler_factory = handler_factory.clone();
+            let relay_info = relay_info_clone.clone();
+
+            async move {
+                match ws {
+                    Some(ws) => {
+                        // Handle WebSocket upgrade
+                        let handler = handler_factory.create(&headers);
+                        handle_upgrade(ws, addr, handler).await
+                    }
+                    None => {
+                        // Check for NIP-11 JSON request
+                        if let Some(accept) = headers.get(axum::http::header::ACCEPT) {
+                            if let Ok(value) = accept.to_str() {
+                                if value == "application/nostr+json" {
+                                    return axum::Json(&relay_info).into_response();
+                                }
+                            }
+                        }
+
+                        // Serve HTML info page
+                        Html(relay_builder::handlers::default_relay_html(&relay_info))
+                            .into_response()
+                    }
+                }
+            }
+        }
+    };
 
     // Create HTTP server
     let app = Router::new().route("/", get(root_handler));

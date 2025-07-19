@@ -13,14 +13,13 @@ exclude = ["assets/", "*.json", ".github/"]
 
 [features]
 default = []
-axum = ["dep:axum", "axum-server", "tower-http", "tower"]
 
 [dependencies]
-websocket_builder = { git = "https://github.com/verse-pbc/websocket_builder.git" }
-nostr-sdk = { git = "https://github.com/verse-pbc/nostr.git", features = ["all-nips"] }
-nostr = { git = "https://github.com/verse-pbc/nostr.git", features = ["std"] }
-nostr-database = { git = "https://github.com/verse-pbc/nostr.git" }
-nostr-lmdb = { git = "https://github.com/verse-pbc/nostr.git" }
+websocket_builder = { git = "https://github.com/verse-pbc/websocket_builder" }
+nostr-sdk = { git = "https://github.com/verse-pbc/nostr", features = ["all-nips"] }
+nostr = { git = "https://github.com/verse-pbc/nostr", features = ["std"] }
+nostr-database = { git = "https://github.com/verse-pbc/nostr" }
+nostr-lmdb = { git = "https://github.com/verse-pbc/nostr" }
 tokio = { version = "1.45", features = ["full", "tracing"] }
 tokio-util = { version = "0.7.12", features = ["rt"] }
 tracing = "0.1"
@@ -48,12 +47,13 @@ negentropy = { version = "0.5", features = ["std"] }
 hex = "0.4.3"
 heed = { version = "0.20", default-features = false, features = ["read-txn-no-tls"] }
 twox-hash = "1.6"
+thiserror = "2.0"
 
-# Optional dependencies for the built-in server
-axum = { version = "0.8", features = ["ws", "http1"], optional = true }
-axum-server = { version = "0.6", optional = true }
-tower-http = { version = "0.6.2", features = ["trace", "cors", "fs"], optional = true }
-tower = { version = "0.4.13", features = ["util"], optional = true }
+# Dependencies for the built-in server
+axum = { version = "0.8", features = ["ws", "http1"] }
+axum-server = { version = "0.6" }
+tower-http = { version = "0.6.2", features = ["trace", "cors", "fs"] }
+tower = { version = "0.4.13", features = ["util"] }
 
 [dev-dependencies]
 tempfile = "3.10"
@@ -67,43 +67,22 @@ console-subscriber = "0.4"
 
 [[example]]
 name = "01_minimal_relay"
-required-features = ["axum"]
 
 [[example]]
-name = "02_bare_mode"
-required-features = ["axum"]
+name = "02_event_processing"
 
 [[example]]
-name = "03_spam_filter"
-required-features = ["axum"]
+name = "03_protocol_features"
 
 [[example]]
-name = "04_auth_relay"
-required-features = ["axum"]
+name = "04_advanced_state"
 
 [[example]]
-name = "05_protocol_features"
-required-features = ["axum"]
+name = "05_custom_middleware"
 
 [[example]]
-name = "06_rate_limiter"
-required-features = ["axum"]
+name = "06_production"
 
-[[example]]
-name = "07_user_sessions"
-required-features = ["axum"]
-
-[[example]]
-name = "08_multi_tenant"
-required-features = ["axum"]
-
-[[example]]
-name = "09_production"
-required-features = ["axum"]
-
-[[example]]
-name = "configurable_relay"
-required-features = ["axum"]
 
 [[bin]]
 name = "export_import"
@@ -120,3 +99,11 @@ path = "src/bin/nostr-lmdb-dump.rs"
 [[bin]]
 name = "nostr-lmdb-integrity"
 path = "src/bin/nostr-lmdb-integrity.rs"
+
+[[bench]]
+name = "channel_performance"
+harness = false
+
+[[bench]]
+name = "event_ingester_bench"
+harness = false

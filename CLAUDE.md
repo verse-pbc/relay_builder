@@ -60,12 +60,13 @@ relay_builder is a Rust framework for building custom Nostr relays with a middle
 
 Built-in middleware in `src/middlewares/`:
 - `error_handling.rs` - Global error handling and recovery
-- `event_verifier.rs` - Cryptographic signature verification
 - `logger.rs` - Request/response logging
 - `metrics.rs` - Performance metrics collection
 - `nip40_expiration.rs` - NIP-40 event expiration
 - `nip42_auth.rs` - NIP-42 authentication
 - `nip70_protected.rs` - NIP-70 protected events
+
+Note: Event signature verification is handled automatically by EventIngester (not a middleware).
 
 ### Multi-Tenant Support
 
