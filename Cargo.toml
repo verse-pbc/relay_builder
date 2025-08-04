@@ -13,6 +13,7 @@ exclude = ["assets/", "*.json", ".github/"]
 
 [features]
 default = []
+axum = ["dep:axum", "dep:axum-server", "dep:tower-http", "dep:tower"]
 
 [dependencies]
 websocket_builder = { git = "https://github.com/verse-pbc/websocket_builder" }
@@ -50,10 +51,10 @@ twox-hash = "1.6"
 thiserror = "2.0"
 
 # Dependencies for the built-in server
-axum = { version = "0.8", features = ["ws", "http1"] }
-axum-server = { version = "0.6" }
-tower-http = { version = "0.6.2", features = ["trace", "cors", "fs"] }
-tower = { version = "0.4.13", features = ["util"] }
+axum = { version = "0.8", features = ["ws", "http1"], optional = true }
+axum-server = { version = "0.6", optional = true }
+tower-http = { version = "0.6.2", features = ["trace", "cors", "fs"], optional = true }
+tower = { version = "0.4.13", features = ["util"], optional = true }
 
 [dev-dependencies]
 tempfile = "3.10"

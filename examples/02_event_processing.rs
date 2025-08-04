@@ -6,25 +6,21 @@
 //! - Rate limiting per public key
 //! - Custom rejection messages
 //!
-//! Run with: cargo run --example 02_event_processing
+//! Run with: cargo run --example 02_event_processing --features axum
+
+mod common;
 
 use anyhow::Result;
-use axum::{
-    response::{Html, IntoResponse},
-    routing::get,
-    Router,
-};
+use axum::{routing::get, Router};
 use nostr_sdk::prelude::*;
 use relay_builder::{
-    EventContext, EventProcessor, RelayBuilder, RelayConfig, RelayInfo, Result as RelayResult,
-    StoreCommand,
+    EventContext, EventProcessor, RelayBuilder, RelayConfig, Result as RelayResult, StoreCommand,
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
-use websocket_builder::{handle_upgrade, HandlerFactory, WebSocketUpgrade};
 
 /// Track rate limit info per public key
 #[derive(Debug, Clone)]
@@ -141,8 +137,7 @@ impl EventProcessor for SmartEventProcessor {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
-    tracing_subscriber::fmt::init();
+    common::init_logging();
 
     // Create relay configuration
     let relay_url = "ws://localhost:8080";
@@ -151,16 +146,12 @@ async fn main() -> Result<()> {
         RelayConfig::new(relay_url, "./data/event_processing", keys).with_max_connections(100);
 
     // Relay information for NIP-11
-    let relay_info = RelayInfo {
-        name: "Smart Event Processing Relay".to_string(),
-        description: "A relay with spam filtering and rate limiting".to_string(),
-        pubkey: config.keys.public_key().to_string(),
-        contact: "admin@example.com".to_string(),
-        supported_nips: vec![1, 9, 11, 50],
-        software: "relay_builder".to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        icon: None,
-    };
+    let relay_info = common::create_relay_info(
+        "Smart Event Processing Relay",
+        "A relay with spam filtering and rate limiting",
+        config.keys.public_key(),
+        vec![1, 9, 11, 50],
+    );
 
     // Create processor with spam filter and rate limiter
     let processor = SmartEventProcessor::new(
@@ -181,51 +172,14 @@ async fn main() -> Result<()> {
             .await?,
     );
 
-    // Create a unified handler that supports both WebSocket and HTTP on the same route
-    let root_handler = {
-        let relay_info_clone = relay_info.clone();
-        move |ws: Option<WebSocketUpgrade>,
-              axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
-              headers: axum::http::HeaderMap| {
-            let handler_factory = handler_factory.clone();
-            let relay_info = relay_info_clone.clone();
-
-            async move {
-                match ws {
-                    Some(ws) => {
-                        // Handle WebSocket upgrade
-                        let handler = handler_factory.create(&headers);
-                        handle_upgrade(ws, addr, handler).await
-                    }
-                    None => {
-                        // Check for NIP-11 JSON request
-                        if let Some(accept) = headers.get(axum::http::header::ACCEPT) {
-                            if let Ok(value) = accept.to_str() {
-                                if value == "application/nostr+json" {
-                                    return axum::Json(&relay_info).into_response();
-                                }
-                            }
-                        }
-
-                        // Serve HTML info page
-                        Html(relay_builder::handlers::default_relay_html(&relay_info))
-                            .into_response()
-                    }
-                }
-            }
-        }
-    };
+    // Create the root handler
+    let root_handler = common::create_root_handler(handler_factory, relay_info);
 
     // Create HTTP server with the relay handler
     let app = Router::new().route("/", get(root_handler));
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
-    let listener = tokio::net::TcpListener::bind(addr).await?;
 
-    println!("🚀 Smart Event Processing Relay running at:");
-    println!("📡 WebSocket: ws://localhost:8080");
-    println!("🌐 Browser: http://localhost:8080");
-    println!();
     println!("Features:");
     println!("🛡️  Spam filtering with blocked words");
     println!("⚡ Rate limiting: 10 events per minute per public key");
@@ -233,11 +187,5 @@ async fn main() -> Result<()> {
     println!();
     println!("Try sending events with spam words or too fast to see rejections!");
 
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await?;
-
-    Ok(())
+    common::run_relay_server(app, addr, "Smart Event Processing Relay").await
 }

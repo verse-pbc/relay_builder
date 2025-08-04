@@ -5,22 +5,19 @@
 //! - NIP-40: Event expiration (built into EventProcessor)
 //! - NIP-70: Protected events (auth required to read)
 //!
-//! Run with: cargo run --example 03_protocol_features
+//! Run with: cargo run --example 03_protocol_features --features axum
+
+mod common;
 
 use anyhow::Result;
-use axum::{
-    response::{Html, IntoResponse},
-    routing::get,
-    Router,
-};
+use axum::{routing::get, Router};
 use nostr_sdk::prelude::*;
 use relay_builder::{
-    Error, EventContext, EventProcessor, RelayBuilder, RelayConfig, RelayInfo,
-    Result as RelayResult, StoreCommand,
+    Error, EventContext, EventProcessor, RelayBuilder, RelayConfig, Result as RelayResult,
+    StoreCommand,
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
-use websocket_builder::{handle_upgrade, HandlerFactory, WebSocketUpgrade};
 
 /// Protocol-aware event processor
 #[derive(Debug, Clone)]
@@ -98,7 +95,7 @@ impl EventProcessor for ProtocolProcessor {
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging
-    tracing_subscriber::fmt::init();
+    common::init_logging();
 
     // Create relay configuration with auth enabled
     let relay_url = "ws://localhost:8081";
@@ -109,16 +106,12 @@ async fn main() -> Result<()> {
     config.enable_auth = true;
 
     // Relay information for NIP-11
-    let relay_info = RelayInfo {
-        name: "Protocol Features Relay".to_string(),
-        description: "Demonstrates authentication, expiration, and protected events".to_string(),
-        pubkey: config.keys.public_key().to_string(),
-        contact: "admin@example.com".to_string(),
-        supported_nips: vec![1, 9, 11, 40, 42, 50, 70], // All supported NIPs
-        software: "relay_builder".to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        icon: None,
-    };
+    let relay_info = common::create_relay_info(
+        "Protocol Features Relay",
+        "Demonstrates authentication, expiration, and protected events",
+        config.keys.public_key(),
+        vec![1, 9, 11, 40, 42, 50, 70], // All supported NIPs
+    );
 
     // Build relay with protocol processor
     let handler_factory = Arc::new(
@@ -130,51 +123,14 @@ async fn main() -> Result<()> {
             .await?,
     );
 
-    // Create a unified handler that supports both WebSocket and HTTP on the same route
-    let root_handler = {
-        let relay_info_clone = relay_info.clone();
-        move |ws: Option<WebSocketUpgrade>,
-              axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
-              headers: axum::http::HeaderMap| {
-            let handler_factory = handler_factory.clone();
-            let relay_info = relay_info_clone.clone();
-
-            async move {
-                match ws {
-                    Some(ws) => {
-                        // Handle WebSocket upgrade
-                        let handler = handler_factory.create(&headers);
-                        handle_upgrade(ws, addr, handler).await
-                    }
-                    None => {
-                        // Check for NIP-11 JSON request
-                        if let Some(accept) = headers.get(axum::http::header::ACCEPT) {
-                            if let Ok(value) = accept.to_str() {
-                                if value == "application/nostr+json" {
-                                    return axum::Json(&relay_info).into_response();
-                                }
-                            }
-                        }
-
-                        // Serve HTML info page
-                        Html(relay_builder::handlers::default_relay_html(&relay_info))
-                            .into_response()
-                    }
-                }
-            }
-        }
-    };
+    // Create the root handler
+    let root_handler = common::create_root_handler(handler_factory, relay_info);
 
     // Create HTTP server
     let app = Router::new().route("/", get(root_handler));
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 8081));
-    let listener = tokio::net::TcpListener::bind(addr).await?;
 
-    println!("🚀 Protocol Features Relay running at:");
-    println!("📡 WebSocket: ws://localhost:8081");
-    println!("🌐 Browser: http://localhost:8081");
-    println!();
     println!("Protocol features:");
     println!("🔐 NIP-42: Authentication required to post");
     println!("⏰ NIP-40: Event expiration support");
@@ -186,11 +142,5 @@ async fn main() -> Result<()> {
     println!("3. Send protected event with [\"-\"] tag");
     println!("4. Try reading protected events without auth");
 
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await?;
-
-    Ok(())
+    common::run_relay_server(app, addr, "Protocol Features Relay").await
 }
