@@ -99,9 +99,7 @@ where
 impl<'a, T, Next> InboundContext<'a, T, Next> {
     /// Send a message to the client
     pub fn send_message(&self, msg: RelayMessage<'static>) -> Result<(), anyhow::Error> {
-        self.sender
-            .send(msg)
-            .map_err(|e| anyhow::anyhow!("Failed to send message: {:?}", e))
+        self.sender.send(msg)
     }
 
     /// Send a notice to the client
@@ -165,9 +163,7 @@ where
 {
     /// Send a message to the client
     pub fn send_message(&self, msg: RelayMessage<'static>) -> Result<(), anyhow::Error> {
-        self.sender
-            .send(msg)
-            .map_err(|e| anyhow::anyhow!("Failed to send message: {:?}", e))
+        self.sender.send(msg)
     }
 
     /// Send a notice to the client

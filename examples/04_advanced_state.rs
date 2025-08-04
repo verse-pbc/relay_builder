@@ -6,7 +6,9 @@
 //! - Tracking session data per user
 //! - Different behavior based on subdomain
 //!
-//! Run with: cargo run --example 04_advanced_state
+//! Run with: cargo run --example 04_advanced_state --features axum
+
+mod common;
 
 use anyhow::Result;
 use axum::{
@@ -140,7 +142,7 @@ impl EventProcessor<UserSession> for AdvancedStateProcessor {
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging
-    tracing_subscriber::fmt::init();
+    common::init_logging();
 
     // Create relay configuration with subdomain support
     let relay_url = "ws://relay.example.com";

@@ -1,5 +1,7 @@
 //! Common utilities for examples to reduce code duplication
 
+#![allow(dead_code)]
+
 use anyhow::Result;
 use axum::{
     response::{Html, IntoResponse, Response},

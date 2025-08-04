@@ -7,7 +7,9 @@
 //! - on_connect handling for welcome messages
 //! - Both default and without_defaults approaches
 //!
-//! Run with: cargo run --example 05_custom_middleware
+//! Run with: cargo run --example 05_custom_middleware --features axum
+
+mod common;
 
 use anyhow::Result;
 use axum::{
@@ -103,7 +105,7 @@ impl EventProcessor for SimpleProcessor {
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging
-    tracing_subscriber::fmt::init();
+    common::init_logging();
 
     // Show both approaches
     println!("Choose middleware approach:");

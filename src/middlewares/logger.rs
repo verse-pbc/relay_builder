@@ -26,6 +26,27 @@ impl<T> LoggerMiddleware<T> {
             _phantom: std::marker::PhantomData,
         }
     }
+
+    /// Extract subdomain from connection state
+    fn extract_subdomain(
+        state: &parking_lot::RwLock<crate::state::NostrConnectionState<T>>,
+    ) -> Option<String> {
+        let state_guard = state.read();
+        match state_guard.subdomain.as_ref() {
+            Scope::Named { name, .. } => Some(name.to_string()),
+            Scope::Default => None,
+        }
+    }
+
+    /// Create a span with connection context
+    fn create_connection_span(connection_id: &str, subdomain: Option<&String>) -> tracing::Span {
+        info_span!(
+            parent: None,
+            "websocket_connection",
+            ip = %connection_id,
+            subdomain = ?subdomain
+        )
+    }
 }
 
 impl<T> NostrMiddleware<T> for LoggerMiddleware<T>
@@ -41,21 +62,11 @@ where
     {
         async move {
             // Extract subdomain from connection state
-            let subdomain = {
-                let state_guard = ctx.state.read();
-                match state_guard.subdomain.as_ref() {
-                    Scope::Named { name, .. } => Some(name.to_string()),
-                    Scope::Default => None,
-                }
-            };
+            let subdomain = Self::extract_subdomain(ctx.state);
 
             // Create a span with connection ID and subdomain to ensure logs always have context
-            let connection_span = info_span!(
-                parent: None,
-                "websocket_connection",
-                ip = %ctx.connection_id,
-                subdomain = ?subdomain
-            );
+            let connection_span =
+                Self::create_connection_span(ctx.connection_id, subdomain.as_ref());
             let _guard = connection_span.enter();
 
             match ctx.message.as_ref() {
@@ -107,21 +118,11 @@ where
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
         async move {
             // Extract subdomain from connection state
-            let subdomain = {
-                let state_guard = ctx.state.read();
-                match state_guard.subdomain.as_ref() {
-                    Scope::Named { name, .. } => Some(name.to_string()),
-                    Scope::Default => None,
-                }
-            };
+            let subdomain = Self::extract_subdomain(ctx.state);
 
             // Create a span with connection ID and subdomain to ensure logs always have context
-            let connection_span = info_span!(
-                parent: None,
-                "websocket_connection",
-                ip = %ctx.connection_id,
-                subdomain = ?subdomain
-            );
+            let connection_span =
+                Self::create_connection_span(ctx.connection_id, subdomain.as_ref());
             let _guard = connection_span.enter();
 
             if let Some(msg_ref) = ctx.message.as_ref() {
@@ -176,21 +177,11 @@ where
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
         async move {
             // Extract subdomain from connection state
-            let subdomain = {
-                let state_guard = ctx.state.read();
-                match state_guard.subdomain.as_ref() {
-                    Scope::Named { name, .. } => Some(name.to_string()),
-                    Scope::Default => None,
-                }
-            };
+            let subdomain = Self::extract_subdomain(ctx.state);
 
             // Create a span with connection ID and subdomain to ensure logs always have context
-            let connection_span = info_span!(
-                parent: None,
-                "websocket_connection",
-                ip = %ctx.connection_id,
-                subdomain = ?subdomain
-            );
+            let connection_span =
+                Self::create_connection_span(ctx.connection_id, subdomain.as_ref());
             let _guard = connection_span.enter();
 
             debug!("Disconnected from relay");

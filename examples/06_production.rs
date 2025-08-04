@@ -7,7 +7,9 @@
 //! - Health endpoints
 //! - Configuration limits
 //!
-//! Run with: cargo run --example 06_production
+//! Run with: cargo run --example 06_production --features axum
+
+mod common;
 
 use anyhow::Result;
 use axum::{
@@ -34,7 +36,7 @@ async fn health(State(counter): State<Arc<AtomicUsize>>) -> String {
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging
-    tracing_subscriber::fmt::init();
+    common::init_logging();
 
     // Production configuration
     let relay_url = "ws://localhost:8080";
