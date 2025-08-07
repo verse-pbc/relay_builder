@@ -6,7 +6,7 @@
 use crate::database::RelayDatabase;
 use crate::error::Error;
 use crate::metrics::SubscriptionMetricsHandler;
-use crate::nostr_middleware::NostrMessageSender;
+use crate::nostr_middleware::MessageSender;
 use crate::subscription_registry::{EventDistributor, SubscriptionRegistry};
 use flume;
 use nostr_lmdb::Scope;
@@ -19,13 +19,10 @@ use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 
-// Temporary type alias for compatibility during migration
-type MessageSender = NostrMessageSender;
-
 #[derive(Debug)]
 pub enum ResponseHandler {
     Oneshot(oneshot::Sender<Result<(), crate::error::Error>>),
-    MessageSender(NostrMessageSender),
+    MessageSender(MessageSender),
 }
 
 /// Commands that can be executed against the database
@@ -280,6 +277,11 @@ impl std::fmt::Debug for SubscriptionCoordinator {
 }
 
 impl SubscriptionCoordinator {
+    /// Get the connection ID for this coordinator
+    pub fn connection_id(&self) -> &str {
+        &self.connection_id
+    }
+
     /// Create a new subscription coordinator
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -321,6 +323,8 @@ impl SubscriptionCoordinator {
         subscription_id: &SubscriptionId,
         filters: Vec<Filter>,
     ) -> Result<(), Error> {
+        // In the on_connect hook path we called register_connection which
+        // matched the scope to the connection_id
         self.registry
             .add_subscription(&self.connection_id, subscription_id, filters)
     }

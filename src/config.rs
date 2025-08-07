@@ -118,6 +118,8 @@ pub struct RelayConfig {
     pub max_subscriptions: usize,
     /// Maximum limit value allowed in subscription filters
     pub max_limit: usize,
+    /// Maximum number of LMDB readers (default: 126)
+    pub max_readers: Option<u32>,
 }
 
 impl RelayConfig {
@@ -137,6 +139,7 @@ impl RelayConfig {
             websocket_config: WebSocketConfig::default(),
             max_subscriptions: 50,
             max_limit: 5000,
+            max_readers: None,
         }
     }
 
@@ -178,10 +181,11 @@ impl RelayConfig {
         _max_subscriptions: usize,
         _task_tracker: Option<tokio_util::task::TaskTracker>,
         _cancellation_token: Option<tokio_util::sync::CancellationToken>,
+        max_readers: Option<u32>,
     ) -> Result<Arc<RelayDatabase>, Error> {
         match database_config {
             DatabaseConfig::Path(path) => {
-                let database = RelayDatabase::new(&path)?;
+                let database = RelayDatabase::with_max_readers(&path, max_readers)?;
                 Ok(Arc::new(database))
             }
             DatabaseConfig::Instance(db) => {
@@ -264,6 +268,12 @@ impl RelayConfig {
     pub fn with_subscription_limits(mut self, max_subscriptions: usize, max_limit: usize) -> Self {
         self.max_subscriptions = max_subscriptions;
         self.max_limit = max_limit;
+        self
+    }
+
+    /// Set the maximum number of LMDB readers
+    pub fn with_max_readers(mut self, max_readers: u32) -> Self {
+        self.max_readers = Some(max_readers);
         self
     }
 

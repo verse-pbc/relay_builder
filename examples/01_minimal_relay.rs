@@ -4,6 +4,16 @@
 //! It accepts all events without any filtering or authentication.
 //!
 //! Run with: cargo run --example 01_minimal_relay --features axum
+//!
+//! For subdomain isolation testing, add to /etc/hosts:
+//!   127.0.0.1 example.local
+//!   127.0.0.1 test.example.local
+//!   127.0.0.1 other.example.local
+//!
+//! Then connect with:
+//!   nak req --stream ws://example.local:8080
+//!   nak req --stream ws://test.example.local:8080
+//! Events sent to one subdomain will only be visible to that subdomain's subscribers.
 
 mod common;
 
@@ -19,10 +29,17 @@ async fn main() -> Result<()> {
     common::init_logging();
 
     // Create relay configuration
-    let relay_url = "ws://localhost:8080";
+    // For subdomain support, use a domain like "ws://example.local:8080"
+    // Then test.example.local and other.example.local will have isolated data
+    let relay_url = "ws://example.local:8080";
+    //let relay_url = "ws://localhost:8080"; // Use this for no subdomain support
     let db_path = "./minimal_relay_db";
     let relay_keys = Keys::generate();
-    let config = RelayConfig::new(relay_url, db_path, relay_keys);
+    let config = RelayConfig::new(relay_url, db_path, relay_keys)
+        // Enable subdomain-based isolation
+        // Use 2 for *.example.local (2 parts in base domain)
+        // Use 3 for *.relay.example.com (3 parts in base domain)
+        .with_subdomains(2); // Enables subdomain isolation
 
     // Create relay info for NIP-11
     let relay_info = common::create_relay_info(

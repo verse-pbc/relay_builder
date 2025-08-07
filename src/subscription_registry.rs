@@ -3,12 +3,12 @@
 //! This module implements the strfry ActiveMonitors optimization to reduce event distribution
 //! complexity from O(n*m) to O(log k + m) where:
 //! - n = number of connections
-//! - m = average filters per connection  
+//! - m = average filters per connection
 //! - k = number of unique index keys
 
 use crate::error::Error;
 use crate::metrics::SubscriptionMetricsHandler;
-use crate::nostr_middleware::NostrMessageSender;
+use crate::nostr_middleware::MessageSender;
 use crate::subscription_index::SubscriptionIndex;
 use dashmap::DashMap;
 use nostr_lmdb::Scope;
@@ -16,16 +16,16 @@ use nostr_sdk::prelude::*;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{debug, trace, warn};
-
-// Temporary type alias for compatibility during migration
-type MessageSender = NostrMessageSender;
+use tracing::{debug, info, trace, warn};
 
 /// Trait for distributing events to subscribers
-#[async_trait::async_trait]
 pub trait EventDistributor: Send + Sync {
     /// Distribute an event to all matching subscriptions within the given scope
-    async fn distribute_event(&self, event: Arc<Event>, scope: &Scope);
+    fn distribute_event(
+        &self,
+        event: Arc<Event>,
+        scope: &Scope,
+    ) -> impl std::future::Future<Output = ()> + Send;
 }
 
 /// Registry for managing all active subscriptions across connections
@@ -65,47 +65,33 @@ pub struct ConnectionSubscriptions {
 pub struct ConnectionHandle {
     /// Connection ID
     pub id: String,
-    /// Reference to the registry for cleanup
-    registry: Arc<SubscriptionRegistry>,
+    /// Weak reference to the registry for cleanup
+    registry: std::sync::Weak<SubscriptionRegistry>,
 }
 
 impl Drop for ConnectionHandle {
     fn drop(&mut self) {
-        debug!("Connection {} dropped, removing from registry", self.id);
-
-        // Get subscription IDs and scope before removing the connection
-        let cleanup_info = if let Some(connection) = self.registry.connections.get(&self.id) {
-            let scope = connection.subdomain.as_ref().clone();
-            let subscriptions = connection.subscriptions.read();
-            let ids: Vec<SubscriptionId> = subscriptions.keys().cloned().collect();
-            let count = ids.len();
-            drop(subscriptions);
-            Some((ids, count, scope))
-        } else {
-            None
+        // Try to upgrade weak reference to Arc
+        let Some(registry) = self.registry.upgrade() else {
+            // Registry is gone, nothing we can do
+            return;
         };
 
-        // Remove the connection
-        self.registry.connections.remove(&self.id);
-
-        // Clean up from index
-        if let Some((ids, count, scope)) = cleanup_info {
-            if let Some(index_entry) = self.registry.indexes.get(&scope) {
-                let index = index_entry.value();
-                for sub_id in ids {
-                    index.remove_subscription(&self.id, &sub_id);
-                }
-            }
-
-            if let Some(handler) = &self.registry.metrics_handler {
-                if count > 0 {
-                    handler.decrement_active_subscriptions(count);
-                    debug!(
-                        "Decremented {} subscriptions for dropped connection {}",
-                        count, self.id
-                    );
-                }
-            }
+        // Check if the connection still exists in the registry
+        // If it does, this means on_disconnect didn't run (unexpected path)
+        if registry.connections.contains_key(&self.id) {
+            warn!(
+                "ConnectionHandle::drop performing fallback cleanup for connection {} - \
+                 on_disconnect may not have executed properly",
+                self.id
+            );
+            registry.cleanup_connection(&self.id);
+        } else {
+            // Connection already cleaned up - this is the expected path
+            trace!(
+                "ConnectionHandle::drop for connection {} - already cleaned up (expected)",
+                self.id
+            );
         }
     }
 }
@@ -122,7 +108,7 @@ impl SubscriptionRegistry {
 
     /// Register a new connection and return a handle for cleanup
     pub fn register_connection(
-        &self,
+        self: &Arc<Self>,
         connection_id: String,
         sender: MessageSender,
         auth_pubkey: Option<PublicKey>,
@@ -140,7 +126,7 @@ impl SubscriptionRegistry {
 
         ConnectionHandle {
             id: connection_id,
-            registry: Arc::new(self.clone()),
+            registry: Arc::downgrade(self),
         }
     }
 
@@ -158,7 +144,9 @@ impl SubscriptionRegistry {
 
         // Add to connection's local subscriptions
         let mut subscriptions = connection.subscriptions.write();
-        subscriptions.insert(subscription_id.clone(), filters.clone());
+        let is_new = subscriptions
+            .insert(subscription_id.clone(), filters.clone())
+            .is_none();
 
         // Get or create index for this connection's scope
         let scope = connection.subdomain.as_ref().clone();
@@ -171,8 +159,11 @@ impl SubscriptionRegistry {
         // Add to the index for efficient distribution
         index.add_subscription(connection_id, subscription_id, filters);
 
-        if let Some(handler) = &self.metrics_handler {
-            handler.increment_active_subscriptions();
+        // Only increment if this was a new subscription, not a replacement
+        if is_new {
+            if let Some(handler) = &self.metrics_handler {
+                handler.increment_active_subscriptions();
+            }
         }
 
         debug!(
@@ -223,6 +214,60 @@ impl SubscriptionRegistry {
         self.connections
             .get(connection_id)
             .map(|conn| (conn.auth_pubkey, Arc::clone(&conn.subdomain)))
+    }
+
+    /// Check if a connection exists (mainly for testing)
+    pub fn has_connection(&self, connection_id: &str) -> bool {
+        self.connections.contains_key(connection_id)
+    }
+
+    /// Clean up a connection and all its subscriptions
+    /// This is used both by Drop handler and when removing dead connections
+    pub fn cleanup_connection(&self, connection_id: &str) {
+        info!("Cleaning up connection {}", connection_id);
+
+        // Get subscription IDs and scope before removing the connection
+        let cleanup_info = if let Some(connection) = self.connections.get(connection_id) {
+            let scope = connection.subdomain.as_ref().clone();
+            let subscriptions = connection.subscriptions.read();
+            let ids: Vec<SubscriptionId> = subscriptions.keys().cloned().collect();
+            let count = ids.len();
+            drop(subscriptions);
+            info!(
+                "Connection {} has {} subscriptions to clean up",
+                connection_id, count
+            );
+            Some((ids, count, scope))
+        } else {
+            warn!(
+                "Connection {} not found in registry during cleanup",
+                connection_id
+            );
+            None
+        };
+
+        // Remove the connection
+        self.connections.remove(connection_id);
+
+        // Clean up from index and decrement metrics
+        if let Some((ids, count, scope)) = cleanup_info {
+            if let Some(index_entry) = self.indexes.get(&scope) {
+                let index = index_entry.value();
+                for sub_id in ids {
+                    index.remove_subscription(connection_id, &sub_id);
+                }
+            }
+
+            if let Some(handler) = &self.metrics_handler {
+                if count > 0 {
+                    handler.decrement_active_subscriptions(count);
+                    info!(
+                        "Successfully decremented {} subscriptions for cleaned up connection {}",
+                        count, connection_id
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -289,7 +334,9 @@ impl SubscriptionRegistry {
             // Use pre-serialized JSON if available
             let sender = conn_data.sender.clone();
             let send_result = if let Some(ref json) = event_json {
-                // Build the complete EVENT message JSON
+                // Build the complete EVENT message JSON. We don't use the
+                // message.as_json() so we can reuse the event json we already
+                // have.
                 let json_with_sub = format!(r#"["EVENT","{sub_id}",{json}]"#);
                 sender.send_with_json(message, json_with_sub)
             } else {
@@ -307,8 +354,8 @@ impl SubscriptionRegistry {
 
         // Clean up dead connections
         for conn_id in dead_connections {
-            // This will trigger the Drop handler which cleans up the index
-            self.connections.remove(&conn_id);
+            // Use the shared cleanup method to ensure metrics are decremented
+            self.cleanup_connection(&conn_id);
         }
 
         if total_matches > 0 {
@@ -317,7 +364,6 @@ impl SubscriptionRegistry {
     }
 }
 
-#[async_trait::async_trait]
 impl EventDistributor for SubscriptionRegistry {
     async fn distribute_event(&self, event: Arc<Event>, scope: &Scope) {
         // Use indexed distribution for O(log k + m) performance

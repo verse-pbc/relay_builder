@@ -19,6 +19,18 @@ impl RelayDatabase {
     /// # Arguments
     /// * `db_path_param` - Path where the database should be stored
     pub fn new(db_path_param: impl AsRef<std::path::Path>) -> Result<Self, Error> {
+        Self::with_max_readers(db_path_param, None)
+    }
+
+    /// Create a new relay database with specified max_readers
+    ///
+    /// # Arguments
+    /// * `db_path_param` - Path where the database should be stored
+    /// * `max_readers` - Maximum number of LMDB readers (None uses default of 126)
+    pub fn with_max_readers(
+        db_path_param: impl AsRef<std::path::Path>,
+        max_readers: Option<u32>,
+    ) -> Result<Self, Error> {
         let db_path = db_path_param.as_ref().to_path_buf();
 
         // Ensure database directory exists
@@ -39,12 +51,18 @@ impl RelayDatabase {
             })?;
         }
 
-        // Open LMDB database with configuration from environment
-        info!("Opening LMDB database with configuration from environment");
+        // Open LMDB database with configuration
+        info!("Opening LMDB database with max_readers: {:?}", max_readers);
         if let Ok(mode) = std::env::var("NOSTR_LMDB_MODE") {
             info!("LMDB mode: {}", mode);
         }
-        let lmdb_instance = NostrLMDB::open(&db_path).map_err(|e| {
+
+        let mut builder = NostrLMDB::builder(&db_path);
+        if let Some(readers) = max_readers {
+            builder = builder.max_readers(readers);
+        }
+
+        let lmdb_instance = builder.build().map_err(|e| {
             Error::database(format!(
                 "Failed to open NostrLMDB at path '{db_path:?}': {e}"
             ))
