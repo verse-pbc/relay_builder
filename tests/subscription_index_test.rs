@@ -395,6 +395,153 @@ fn test_index_stats_accuracy() {
 }
 
 #[test]
+fn test_controlled_benchmark_25_connections() {
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+
+    // Fixed parameters for consistent benchmarking
+    const NUM_CONNECTIONS: usize = 25;
+    const FILTERS_PER_CONNECTION: usize = 10;
+    const NUM_EVENTS: usize = 100;
+    const NUM_RUNS: usize = 5; // Run multiple times for average
+
+    println!("\n=== Controlled Benchmark: 25 Connections ===");
+    println!("Connections: {NUM_CONNECTIONS}");
+    println!("Filters per connection: {FILTERS_PER_CONNECTION}");
+    println!(
+        "Total filters: {}",
+        NUM_CONNECTIONS * FILTERS_PER_CONNECTION
+    );
+    println!("Events to process: {NUM_EVENTS}");
+    println!("Averaging over {NUM_RUNS} runs\n");
+
+    // Generate consistent test data using seeds
+    let mut filter_by_subscription = HashMap::new();
+    let all_authors: Vec<Keys> = (0..50).map(|_| Keys::generate()).collect();
+
+    for conn_idx in 0..NUM_CONNECTIONS {
+        let conn_id = format!("conn{conn_idx}");
+        let sub_id = SubscriptionId::new(format!("sub{conn_idx}"));
+        let mut filters = Vec::new();
+
+        for filter_idx in 0..FILTERS_PER_CONNECTION {
+            let filter = match (conn_idx * 7 + filter_idx * 13) % 5 {
+                0 => Filter::new().author(all_authors[filter_idx % all_authors.len()].public_key()),
+                1 => Filter::new().kind(Kind::from((1000 + filter_idx) as u16)),
+                2 => Filter::new().hashtag(format!("topic_{}", filter_idx % 10)),
+                3 => Filter::new()
+                    .author(all_authors[(conn_idx + filter_idx) % all_authors.len()].public_key())
+                    .kind(Kind::TextNote),
+                _ => Filter::new().id(EventId::from_slice(&[filter_idx as u8; 32]).unwrap()),
+            };
+            filters.push(filter);
+        }
+        filter_by_subscription.insert((conn_id, sub_id), filters);
+    }
+
+    // Generate events (20% match rate)
+    let mut events = Vec::new();
+    for i in 0..NUM_EVENTS {
+        let event = if i % 5 == 0 {
+            // Matching events (20%)
+            let author = &all_authors[i % all_authors.len()];
+            EventBuilder::text_note(format!("Event {i}"))
+                .sign_with_keys(author)
+                .unwrap()
+        } else {
+            // Non-matching events (80%)
+            EventBuilder::new(Kind::from(9999), format!("Event {i}"))
+                .sign_with_keys(&Keys::generate())
+                .unwrap()
+        };
+        events.push(event);
+    }
+
+    // Linear approach
+    fn distribute_linear(
+        event: &Event,
+        filter_by_subscription: &HashMap<(String, SubscriptionId), Vec<Filter>>,
+    ) -> Vec<(String, SubscriptionId)> {
+        let mut matches = Vec::new();
+        let mut seen = HashSet::new();
+
+        for ((conn_id, sub_id), filters) in filter_by_subscription {
+            for filter in filters {
+                if filter.match_event(event, nostr_sdk::filter::MatchEventOptions::default()) {
+                    let key = (conn_id.clone(), sub_id.clone());
+                    if seen.insert(key.clone()) {
+                        matches.push(key);
+                    }
+                    break;
+                }
+            }
+        }
+        matches
+    }
+
+    // Benchmark linear approach
+    let mut linear_times = Vec::new();
+    for run in 0..NUM_RUNS {
+        let start = Instant::now();
+        let mut total_matches = 0;
+        for event in &events {
+            total_matches += distribute_linear(event, &filter_by_subscription).len();
+        }
+        let duration = start.elapsed();
+        linear_times.push(duration);
+        if run == 0 {
+            println!("Linear matches found: {total_matches}");
+        }
+    }
+
+    let avg_linear = linear_times.iter().sum::<Duration>() / NUM_RUNS as u32;
+    let linear_per_event = avg_linear.as_micros() as f64 / NUM_EVENTS as f64;
+    println!("Linear O(n*m):");
+    println!("  Average total time: {avg_linear:?}");
+    println!("  Average per event: {linear_per_event:.2}μs");
+
+    // Benchmark indexed approach
+    let mut indexed_times = Vec::new();
+    for run in 0..NUM_RUNS {
+        let index = SubscriptionIndex::new();
+        for ((conn_id, sub_id), filters) in &filter_by_subscription {
+            index.add_subscription(conn_id, sub_id, filters.clone());
+        }
+
+        let start = Instant::now();
+        let mut total_matches = 0;
+        for event in &events {
+            total_matches += index.distribute_event(event).len();
+        }
+        let duration = start.elapsed();
+        indexed_times.push(duration);
+        if run == 0 {
+            println!("\nIndexed matches found: {total_matches}");
+        }
+    }
+
+    let avg_indexed = indexed_times.iter().sum::<Duration>() / NUM_RUNS as u32;
+    let indexed_per_event = avg_indexed.as_micros() as f64 / NUM_EVENTS as f64;
+    println!("Indexed O(1) lookups:");
+    println!("  Average total time: {avg_indexed:?}");
+    println!("  Average per event: {indexed_per_event:.2}μs");
+
+    // Calculate speedup
+    let speedup = linear_per_event / indexed_per_event;
+    println!("\nSpeedup: {speedup:.1}x faster with indexing");
+
+    // Performance assertions
+    assert!(
+        indexed_per_event < linear_per_event,
+        "Indexed should be faster than linear"
+    );
+    assert!(
+        indexed_per_event < 100.0,
+        "Indexed should process events in < 100μs on average"
+    );
+}
+
+#[test]
 fn test_performance_comparison_linear_vs_indexed() {
     use std::collections::HashMap;
     use std::time::Instant;
