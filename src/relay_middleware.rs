@@ -173,13 +173,11 @@ where
     ) -> Result<(), Error> {
         let subscription_id_obj = SubscriptionId::new(subscription_id.clone());
 
-        // First check subscription limit and verify filters with write lock
+        // First verify filters, then check subscription quota
         {
             let mut connection_state = state.write();
 
-            // Check if we can add this subscription
-            connection_state.try_add_subscription(&subscription_id_obj)?;
-
+            // Create context for filter verification
             let context = EventContext {
                 authed_pubkey: connection_state.authed_pubkey.as_ref(),
                 subdomain: &connection_state.subdomain,
@@ -191,11 +189,12 @@ where
                 connection_state.custom_state.clone(),
             ));
 
+            // Verify filters FIRST (before reserving quota)
             self.processor
                 .verify_filters(&filters, custom_state_wrapper, context)?;
 
-            // Track the subscription
-            connection_state.add_subscription(subscription_id_obj.clone());
+            // NOW reserve quota slot (will handle replacements correctly)
+            connection_state.reserve_quota_slot(&subscription_id_obj)?;
         }
 
         // Extract necessary state with read lock
@@ -526,8 +525,8 @@ where
                         let mut state = ctx.state.write();
                         let subscription_id_owned = subscription_id.into_owned();
 
-                        // Remove from tracked subscriptions
-                        state.remove_tracked_subscription(&subscription_id_owned);
+                        // Release quota slot for this subscription
+                        state.release_quota_slot(&subscription_id_owned);
 
                         if let Some(subscription_coordinator) = state.subscription_coordinator() {
                             let _ = subscription_coordinator

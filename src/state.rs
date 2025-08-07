@@ -13,7 +13,7 @@ use nostr_sdk::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 const DEFAULT_RELAY_URL: &str = "wss://default.relay";
 
@@ -33,8 +33,8 @@ pub struct NostrConnectionState<T = ()> {
     subscription_coordinator: Option<SubscriptionCoordinator>,
     /// Maximum number of subscriptions allowed (set by the connection factory)
     pub(crate) max_subscriptions: Option<usize>,
-    /// Track active subscriptions
-    active_subscriptions: std::collections::HashSet<SubscriptionId>,
+    /// Track subscription IDs for quota management (not actual subscription data)
+    subscription_quota_usage: std::collections::HashSet<SubscriptionId>,
     /// Active negentropy subscriptions
     negentropy_subscriptions: HashMap<SubscriptionId, Negentropy<'static, NegentropyStorageVector>>,
     /// Connection cancellation token
@@ -58,7 +58,7 @@ where
             authed_pubkey: None,
             subscription_coordinator: None,
             max_subscriptions: None,
-            active_subscriptions: std::collections::HashSet::new(),
+            subscription_quota_usage: std::collections::HashSet::new(),
             negentropy_subscriptions: HashMap::new(),
             connection_token: CancellationToken::new(),
             registry: None,
@@ -79,7 +79,7 @@ where
             authed_pubkey: None,
             subscription_coordinator: None,
             max_subscriptions: None,
-            active_subscriptions: std::collections::HashSet::new(),
+            subscription_quota_usage: std::collections::HashSet::new(),
             negentropy_subscriptions: HashMap::new(),
             connection_token: CancellationToken::new(),
             registry: None,
@@ -95,7 +95,7 @@ where
             authed_pubkey: None,
             subscription_coordinator: None,
             max_subscriptions: None,
-            active_subscriptions: std::collections::HashSet::new(),
+            subscription_quota_usage: std::collections::HashSet::new(),
             negentropy_subscriptions: HashMap::new(),
             connection_token: CancellationToken::new(),
             registry: None,
@@ -116,7 +116,7 @@ where
             authed_pubkey: self.authed_pubkey,
             subscription_coordinator: self.subscription_coordinator.clone(),
             max_subscriptions: self.max_subscriptions,
-            active_subscriptions: self.active_subscriptions.clone(),
+            subscription_quota_usage: self.subscription_quota_usage.clone(),
             negentropy_subscriptions: HashMap::new(), // Can't clone Negentropy, so start with empty
             connection_token: self.connection_token.clone(),
             registry: self.registry.clone(),
@@ -137,7 +137,7 @@ impl<T> NostrConnectionState<T> {
             authed_pubkey: None,
             subscription_coordinator: None,
             max_subscriptions: None,
-            active_subscriptions: std::collections::HashSet::new(),
+            subscription_quota_usage: std::collections::HashSet::new(),
             negentropy_subscriptions: HashMap::new(),
             connection_token: CancellationToken::new(),
             registry: None,
@@ -260,57 +260,69 @@ impl<T> NostrConnectionState<T> {
     /// Check if we can accept more subscriptions
     pub fn can_accept_subscription(&self) -> bool {
         if let Some(max) = self.max_subscriptions {
-            self.active_subscriptions.len() < max
+            self.subscription_quota_usage.len() < max
         } else {
             true
         }
     }
 
-    /// Get count of active subscriptions
+    /// Get count of tracked subscriptions for quota purposes
     pub fn subscription_count(&self) -> usize {
-        self.active_subscriptions.len()
+        self.subscription_quota_usage.len()
     }
 
     /// Get remaining subscription capacity
     pub fn remaining_subscription_capacity(&self) -> Option<usize> {
         self.max_subscriptions
-            .map(|max| max.saturating_sub(self.active_subscriptions.len()))
+            .map(|max| max.saturating_sub(self.subscription_quota_usage.len()))
     }
 
-    /// Try to add a subscription, returns error if limit exceeded
-    pub fn try_add_subscription(&mut self, subscription_id: &SubscriptionId) -> Result<(), Error> {
-        if !self.can_accept_subscription() {
-            let count = self.active_subscriptions.len();
-            let max = self.max_subscriptions.unwrap_or(0);
-            return Err(Error::internal(format!(
-                "Subscription limit exceeded: {count}/{max} active subscriptions"
-            )));
+    /// Reserve a quota slot for a subscription (handles replacements gracefully)
+    pub fn reserve_quota_slot(&mut self, subscription_id: &SubscriptionId) -> Result<(), Error> {
+        // Check if this is a replacement (subscription ID already exists)
+        if self.subscription_quota_usage.contains(subscription_id) {
+            debug!(
+                "Updating existing subscription {}, no quota impact",
+                subscription_id
+            );
+            return Ok(());
         }
 
-        self.add_subscription(subscription_id.clone());
-
-        // Double-check we haven't exceeded the limit
+        // For new subscriptions, check the quota limit
         if let Some(max) = self.max_subscriptions {
-            if self.active_subscriptions.len() > max {
-                self.remove_tracked_subscription(&subscription_id);
-                let count = self.active_subscriptions.len();
-                return Err(Error::internal(format!(
-                    "Subscription limit exceeded after adding: {count}/{max}"
+            let count = self.subscription_quota_usage.len();
+            if count >= max {
+                warn!(
+                    "Subscription quota exceeded for connection: {}/{} slots used",
+                    count, max
+                );
+                return Err(Error::restricted(format!(
+                    "Subscription quota exceeded: {count}/{max}"
                 )));
             }
         }
 
+        // Reserve the slot
+        self.subscription_quota_usage
+            .insert(subscription_id.clone());
         Ok(())
     }
 
-    /// Track a new subscription
+    /// Track a new subscription (DEPRECATED - use reserve_quota_slot instead)
+    #[deprecated(note = "Use reserve_quota_slot() instead")]
     pub fn add_subscription(&mut self, subscription_id: SubscriptionId) {
-        self.active_subscriptions.insert(subscription_id);
+        self.subscription_quota_usage.insert(subscription_id);
     }
 
-    /// Remove a subscription
+    /// Release a quota slot when subscription is closed
+    pub fn release_quota_slot(&mut self, subscription_id: &SubscriptionId) -> bool {
+        self.subscription_quota_usage.remove(subscription_id)
+    }
+
+    /// Remove a subscription (DEPRECATED - use release_quota_slot instead)
+    #[deprecated(note = "Use release_quota_slot() instead")]
     pub fn remove_tracked_subscription(&mut self, subscription_id: &SubscriptionId) -> bool {
-        self.active_subscriptions.remove(subscription_id)
+        self.release_quota_slot(subscription_id)
     }
 
     /// Set the maximum number of subscriptions (mainly for testing)
@@ -346,5 +358,76 @@ impl<T> NostrConnectionState<T> {
     /// Get count of active negentropy subscriptions
     pub fn negentropy_subscription_count(&self) -> usize {
         self.negentropy_subscriptions.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_subscription_quota_replacement() {
+        let mut state =
+            NostrConnectionState::<()>::new(RelayUrl::parse("ws://test").unwrap()).unwrap();
+        state.set_max_subscriptions(Some(2));
+
+        let sub1 = SubscriptionId::new("sub1");
+        let sub2 = SubscriptionId::new("sub2");
+
+        // Add two subscriptions (reach limit)
+        assert!(state.reserve_quota_slot(&sub1).is_ok());
+        assert!(state.reserve_quota_slot(&sub2).is_ok());
+        assert_eq!(state.subscription_count(), 2);
+
+        // Replacing existing subscription should work (not count against limit)
+        assert!(state.reserve_quota_slot(&sub1).is_ok());
+        assert_eq!(state.subscription_count(), 2); // Still 2, not 3
+
+        // Adding genuinely new subscription should fail (at limit)
+        let sub3 = SubscriptionId::new("sub3");
+        let result = state.reserve_quota_slot(&sub3);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("quota exceeded"));
+
+        // After removing one, can add new one
+        assert!(state.release_quota_slot(&sub1));
+        assert_eq!(state.subscription_count(), 1);
+        assert!(state.reserve_quota_slot(&sub3).is_ok());
+        assert_eq!(state.subscription_count(), 2);
+    }
+
+    #[test]
+    fn test_subscription_quota_no_limit() {
+        let mut state =
+            NostrConnectionState::<()>::new(RelayUrl::parse("ws://test").unwrap()).unwrap();
+        // No limit set (None)
+
+        // Should be able to add many subscriptions without hitting a limit
+        for i in 0..100 {
+            let sub_id = SubscriptionId::new(format!("sub{i}"));
+            assert!(state.reserve_quota_slot(&sub_id).is_ok());
+        }
+        assert_eq!(state.subscription_count(), 100);
+    }
+
+    #[test]
+    fn test_subscription_quota_replacement_same_id() {
+        let mut state =
+            NostrConnectionState::<()>::new(RelayUrl::parse("ws://test").unwrap()).unwrap();
+        state.set_max_subscriptions(Some(1));
+
+        let sub_id = SubscriptionId::new("nak"); // Common subscription ID used by nak client
+
+        // First add should work
+        assert!(state.reserve_quota_slot(&sub_id).is_ok());
+        assert_eq!(state.subscription_count(), 1);
+
+        // Replacing with same ID should work (not increment count)
+        assert!(state.reserve_quota_slot(&sub_id).is_ok());
+        assert_eq!(state.subscription_count(), 1);
+
+        // Adding different subscription should fail (at limit)
+        let sub2 = SubscriptionId::new("other");
+        assert!(state.reserve_quota_slot(&sub2).is_err());
     }
 }

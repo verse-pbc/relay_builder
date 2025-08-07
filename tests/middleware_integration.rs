@@ -180,34 +180,31 @@ mod tests {
 
         // Can add first subscription
         let sub1 = SubscriptionId::new("sub1");
-        assert!(state.try_add_subscription(&sub1).is_ok());
+        assert!(state.reserve_quota_slot(&sub1).is_ok());
 
         // Can add second subscription
         let sub2 = SubscriptionId::new("sub2");
-        assert!(state.try_add_subscription(&sub2).is_ok());
+        assert!(state.reserve_quota_slot(&sub2).is_ok());
 
         // Can add third subscription
         let sub3 = SubscriptionId::new("sub3");
-        assert!(state.try_add_subscription(&sub3).is_ok());
+        assert!(state.reserve_quota_slot(&sub3).is_ok());
 
         // Cannot add fourth subscription
         let sub4 = SubscriptionId::new("sub4");
-        let result = state.try_add_subscription(&sub4);
+        let result = state.reserve_quota_slot(&sub4);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Subscription limit exceeded"));
+        assert!(result.unwrap_err().to_string().contains("quota exceeded"));
 
         // Can't add another subscription when at limit
         assert_eq!(state.subscription_count(), 3);
 
         // Remove a subscription and verify we can add a new one
-        assert!(state.remove_tracked_subscription(&sub2));
-        assert!(state.try_add_subscription(&sub4).is_ok());
+        assert!(state.release_quota_slot(&sub2));
+        assert!(state.reserve_quota_slot(&sub4).is_ok());
 
         // Verify count is still at limit
         let sub5 = SubscriptionId::new("sub5");
-        assert!(state.try_add_subscription(&sub5).is_err());
+        assert!(state.reserve_quota_slot(&sub5).is_err());
     }
 }

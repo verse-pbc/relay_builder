@@ -323,6 +323,10 @@ impl SubscriptionCoordinator {
         subscription_id: &SubscriptionId,
         filters: Vec<Filter>,
     ) -> Result<(), Error> {
+        // Remove existing subscription first (if it exists)
+        // This ensures clean replacement without filter accumulation in the index
+        let _ = self.remove_subscription(subscription_id);
+
         // In the on_connect hook path we called register_connection which
         // matched the scope to the connection_id
         self.registry
@@ -1365,6 +1369,120 @@ mod tests {
             event_count, max_limit,
             "Should receive exactly max_limit ({}) events even though {} were requested",
             max_limit, 100
+        );
+
+        cancellation_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_subscription_replacement_no_accumulation() {
+        let (_tmp_dir, database, keys) = setup_test_with_database().await;
+        let registry = Arc::new(SubscriptionRegistry::new(None));
+        let cancellation_token = CancellationToken::new();
+        let crypto_helper = create_test_crypto_helper();
+        let replaceable_event_queue = create_test_buffer(
+            database.clone(),
+            crypto_helper.clone(),
+            cancellation_token.clone(),
+            registry.clone(),
+        );
+
+        // Create a channel to track messages
+        let (tx, rx) = flume::bounded(100);
+
+        let coordinator = SubscriptionCoordinator::new(
+            database.clone(),
+            crypto_helper,
+            registry.clone(),
+            "test_conn".to_string(),
+            MessageSender::new(tx, 0),
+            None,
+            Arc::new(Scope::Default),
+            None,
+            1000,
+            replaceable_event_queue,
+        );
+
+        // Create some test events to save
+        let event1 = EventBuilder::text_note("Test 1")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let event2 = EventBuilder::new(Kind::Custom(30000), "Test 2")
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        database.save_event(&event1, &Scope::Default).await.unwrap();
+        database.save_event(&event2, &Scope::Default).await.unwrap();
+
+        sleep(Duration::from_millis(100)).await;
+
+        // Add initial subscription that matches event1 only
+        let sub_id = SubscriptionId::new("test_sub");
+        let filters1 = vec![Filter::new().kind(Kind::TextNote)];
+
+        coordinator
+            .add_subscription(&sub_id, filters1.clone())
+            .expect("Failed to add first subscription");
+
+        // Query with the subscription - should get event1
+        coordinator
+            .process_historical_events(
+                sub_id.clone(),
+                &filters1,
+                None,
+                &Scope::Default,
+                coordinator.outgoing_sender.clone(),
+                |_, _, _| true,
+            )
+            .await
+            .expect("Failed to process historical events");
+
+        let mut count1 = 0;
+        while let Ok(msg) = rx.try_recv() {
+            if matches!(msg.0, RelayMessage::Event { .. }) {
+                count1 += 1;
+            }
+        }
+        assert_eq!(
+            count1, 1,
+            "Should receive 1 event (TextNote) with first filters"
+        );
+
+        // Replace subscription with filters that match event2 only
+        let filters2 = vec![Filter::new().kind(Kind::Custom(30000))];
+
+        coordinator
+            .add_subscription(&sub_id, filters2.clone())
+            .expect("Failed to replace subscription");
+
+        // Query with the replaced subscription - should get event2 only, not both
+        coordinator
+            .process_historical_events(
+                sub_id.clone(),
+                &filters2,
+                None,
+                &Scope::Default,
+                coordinator.outgoing_sender.clone(),
+                |_, _, _| true,
+            )
+            .await
+            .expect("Failed to process historical events after replacement");
+
+        let mut count2 = 0;
+        while let Ok(msg) = rx.try_recv() {
+            if let RelayMessage::Event { event, .. } = msg.0 {
+                count2 += 1;
+                // Verify we get the Custom(30000) event, not TextNote
+                assert_eq!(
+                    event.kind,
+                    Kind::Custom(30000),
+                    "Should receive Custom(30000) event"
+                );
+            }
+        }
+        assert_eq!(
+            count2, 1,
+            "Should receive 1 event (Custom(30000)) after replacement"
         );
 
         cancellation_token.cancel();
