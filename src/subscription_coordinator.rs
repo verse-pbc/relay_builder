@@ -644,8 +644,6 @@ impl SubscriptionCoordinator {
     }
 }
 
-// Temporarily disabled until test_utils is updated
-/*
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -681,8 +679,9 @@ mod tests {
         database: Arc<RelayDatabase>,
         crypto_helper: crate::crypto_helper::CryptoHelper,
         cancellation_token: CancellationToken,
+        registry: Arc<SubscriptionRegistry>,
     ) -> flume::Sender<(UnsignedEvent, Scope)> {
-        let buffer = ReplaceableEventsBuffer::new();
+        let buffer = ReplaceableEventsBuffer::with_registry(registry);
         let sender = buffer.get_sender();
         buffer.start_with_sender(
             database,
@@ -695,7 +694,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_replaceable_event_buffering() {
-        let buffer = ReplaceableEventsBuffer::new();
+        let registry = Arc::new(SubscriptionRegistry::new(None));
+        let buffer = ReplaceableEventsBuffer::with_registry(registry);
         let sender = buffer.get_sender();
 
         // Create a replaceable event
@@ -716,14 +716,14 @@ mod tests {
     async fn test_replaceable_events_broadcast_after_flush() {
         let (_tmp_dir, database, keys) = setup_test_with_database().await;
         let registry = Arc::new(SubscriptionRegistry::new(None));
-        let cancellation_token = CancellationToken::new();
+        let _cancellation_token = CancellationToken::new();
         let crypto_helper = crate::crypto_helper::CryptoHelper::new(Arc::new(keys.clone()));
 
         // Create a mock connection to receive events
         let (tx, rx) = flume::bounded(10);
         let message_sender = MessageSender::new(tx, 0);
         let connection_id = "test_conn".to_string();
-        registry.register_connection(
+        let _connection_handle = registry.register_connection(
             connection_id.clone(),
             message_sender,
             None,
@@ -732,7 +732,9 @@ mod tests {
 
         // Add a subscription that will match our test event
         let filters = vec![Filter::new().kinds(vec![Kind::Custom(39000)])];
-        registry.add_subscription(&connection_id, &"test_sub".to_string(), filters).unwrap();
+        registry
+            .add_subscription(&connection_id, &SubscriptionId::new("test_sub"), filters)
+            .unwrap();
 
         // Create buffer with registry
         let mut buffer = ReplaceableEventsBuffer::with_registry(registry.clone());
@@ -758,17 +760,20 @@ mod tests {
 
         // Check if the event was broadcast to the subscriber
         let received = rx.try_recv();
-        assert!(received.is_ok(), "Event should have been broadcast to subscriber");
+        assert!(
+            received.is_ok(),
+            "Event should have been broadcast to subscriber"
+        );
 
         // Verify it's an EVENT message with our content
-        if let Ok(msg) = received {
+        if let Ok((msg, _idx, _json)) = received {
             match msg {
                 RelayMessage::Event { event, .. } => {
                     // The event should have been signed by the relay
                     assert_eq!(event.kind, Kind::Custom(39000));
                     assert_eq!(event.content, "test metadata");
                 }
-                _ => panic!("Expected EVENT message, got: {:?}", msg),
+                _ => panic!("Expected EVENT message, got: {msg:?}"),
             }
         } else {
             panic!("Failed to receive message");
@@ -786,6 +791,7 @@ mod tests {
             database.clone(),
             crypto_helper.clone(),
             cancellation_token.clone(),
+            registry.clone(),
         );
 
         let coordinator = SubscriptionCoordinator::new(
@@ -889,6 +895,7 @@ mod tests {
             database.clone(),
             crypto_helper.clone(),
             cancellation_token.clone(),
+            registry.clone(),
         );
 
         let coordinator = SubscriptionCoordinator::new(
@@ -974,6 +981,7 @@ mod tests {
             database.clone(),
             crypto_helper.clone(),
             cancellation_token.clone(),
+            registry.clone(),
         );
 
         let coordinator = SubscriptionCoordinator::new(
@@ -1076,6 +1084,7 @@ mod tests {
             database.clone(),
             crypto_helper.clone(),
             cancellation_token.clone(),
+            registry.clone(),
         );
 
         let coordinator = SubscriptionCoordinator::new(
@@ -1174,6 +1183,7 @@ mod tests {
             database.clone(),
             crypto_helper.clone(),
             cancellation_token.clone(),
+            registry.clone(),
         );
 
         let coordinator = SubscriptionCoordinator::new(
@@ -1290,6 +1300,7 @@ mod tests {
             database.clone(),
             crypto_helper.clone(),
             cancellation_token.clone(),
+            registry.clone(),
         );
         let coordinator = SubscriptionCoordinator::new(
             database.clone(),
@@ -1370,6 +1381,7 @@ mod tests {
             database.clone(),
             crypto_helper.clone(),
             cancellation_token.clone(),
+            registry.clone(),
         );
 
         let coordinator = SubscriptionCoordinator::new(
@@ -1438,4 +1450,3 @@ mod tests {
         cancellation_token.cancel();
     }
 }
-*/
