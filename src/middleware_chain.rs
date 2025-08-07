@@ -41,7 +41,6 @@ where
         _connection_id: &str,
         _message: &mut Option<ClientMessage<'static>>,
         _state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
-        _sender: &MessageSender,
     ) -> Result<(), anyhow::Error> {
         // End of chain - no more processing
         Ok(())
@@ -51,7 +50,6 @@ where
         &self,
         _connection_id: &str,
         _state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
-        _sender: &MessageSender,
     ) -> Result<(), anyhow::Error> {
         // End of chain - no more processing
         Ok(())
@@ -67,7 +65,6 @@ where
         _connection_id: &str,
         _message: &mut Option<RelayMessage<'static>>,
         _state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
-        _sender: &MessageSender,
         _from_position: usize,
     ) -> Result<(), anyhow::Error> {
         // End of chain - no more processing
@@ -89,14 +86,6 @@ where
     T: Clone + Send + Sync + 'static,
 {
     // Uses default implementations which are no-ops
-}
-
-/// Static middleware chain with zero-cost abstractions
-#[derive(Clone)]
-pub struct Chain<M, Next> {
-    pub middleware: Arc<M>,
-    pub next: Next,
-    pub position: usize,
 }
 
 /// Blueprint for building connected chains - contains no MessageSender
@@ -207,110 +196,6 @@ where
     }
 }
 
-impl<M, Next, T> InboundProcessor<T> for Chain<M, Next>
-where
-    M: NostrMiddleware<T>,
-    Next: InboundProcessor<T>,
-    T: Send + Sync + Clone + 'static,
-{
-    async fn process_inbound_chain(
-        &self,
-        connection_id: &str,
-        message: &mut Option<ClientMessage<'static>>,
-        state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
-        sender: &MessageSender,
-    ) -> Result<(), anyhow::Error> {
-        // Create a new sender with this middleware's position
-        let positioned_sender = MessageSender::new(sender.raw_sender().clone(), self.position);
-
-        // Create context with next reference
-        let ctx = InboundContext {
-            connection_id,
-            message,
-            state,
-            sender: positioned_sender,
-            next: &self.next,
-        };
-
-        // Process through current middleware
-        self.middleware.process_inbound(ctx).await
-    }
-
-    async fn on_connect_chain(
-        &self,
-        connection_id: &str,
-        state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
-        sender: &MessageSender,
-    ) -> Result<(), anyhow::Error> {
-        // on_connect flows like process_inbound: outer to inner
-        // First call current middleware's on_connect
-        let ctx = crate::nostr_middleware::ConnectionContext {
-            connection_id,
-            state,
-            sender: sender.clone(),
-        };
-        self.middleware.on_connect(ctx).await?;
-
-        // Then propagate to next (inner) middleware
-        self.next
-            .on_connect_chain(connection_id, state, sender)
-            .await
-    }
-}
-
-impl<M, Next, T> OutboundProcessor<T> for Chain<M, Next>
-where
-    M: NostrMiddleware<T>,
-    Next: OutboundProcessor<T>,
-    T: Send + Sync + Clone + 'static,
-{
-    async fn process_outbound_chain(
-        &self,
-        connection_id: &str,
-        message: &mut Option<RelayMessage<'static>>,
-        state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
-        sender: &MessageSender,
-        from_position: usize,
-    ) -> Result<(), anyhow::Error> {
-        if from_position <= self.position {
-            // Message from this position or inner positions
-            // Process through next first (inner middlewares)
-            self.next
-                .process_outbound_chain(connection_id, message, state, sender, from_position)
-                .await?;
-
-            // Then process through this middleware
-            let ctx = OutboundContext {
-                connection_id,
-                message,
-                state,
-                sender,
-            };
-            self.middleware.process_outbound(ctx).await
-        } else {
-            // Message from outer middleware - skip this level
-            self.next
-                .process_outbound_chain(connection_id, message, state, sender, from_position)
-                .await
-        }
-    }
-
-    async fn on_disconnect_chain(
-        &self,
-        connection_id: &str,
-        state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
-    ) -> Result<(), anyhow::Error> {
-        // Always process in reverse order: next first, then this
-        self.next.on_disconnect_chain(connection_id, state).await?;
-
-        let ctx = DisconnectContext {
-            connection_id,
-            state,
-        };
-        self.middleware.on_disconnect(ctx).await
-    }
-}
-
 /// InboundProcessor implementation for ConnectedChain - uses pre-created MessageSender
 impl<M, Next, T> InboundProcessor<T> for ConnectedChain<M, Next>
 where
@@ -323,7 +208,6 @@ where
         connection_id: &str,
         message: &mut Option<ClientMessage<'static>>,
         state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
-        _sender: &MessageSender, // Ignored - we use our pre-created one
     ) -> Result<(), anyhow::Error> {
         // Use pre-created MessageSender - no allocation!
         let ctx = InboundContext {
@@ -342,18 +226,14 @@ where
         &self,
         connection_id: &str,
         state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
-        sender: &MessageSender,
     ) -> Result<(), anyhow::Error> {
-        // Same as Chain implementation
         let ctx = crate::nostr_middleware::ConnectionContext {
             connection_id,
             state,
-            sender: sender.clone(),
+            sender: self.message_sender.clone(),
         };
         self.middleware.on_connect(ctx).await?;
-        self.next
-            .on_connect_chain(connection_id, state, sender)
-            .await
+        self.next.on_connect_chain(connection_id, state).await
     }
 }
 
@@ -369,25 +249,23 @@ where
         connection_id: &str,
         message: &mut Option<RelayMessage<'static>>,
         state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
-        sender: &MessageSender,
         from_position: usize,
     ) -> Result<(), anyhow::Error> {
-        // Same logic as Chain
         if from_position <= self.position {
             self.next
-                .process_outbound_chain(connection_id, message, state, sender, from_position)
+                .process_outbound_chain(connection_id, message, state, from_position)
                 .await?;
 
             let ctx = OutboundContext {
                 connection_id,
                 message,
                 state,
-                sender,
+                sender: &self.message_sender,
             };
             self.middleware.process_outbound(ctx).await
         } else {
             self.next
-                .process_outbound_chain(connection_id, message, state, sender, from_position)
+                .process_outbound_chain(connection_id, message, state, from_position)
                 .await
         }
     }

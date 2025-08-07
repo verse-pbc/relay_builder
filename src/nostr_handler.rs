@@ -6,7 +6,7 @@
 use crate::config::ScopeConfig;
 use crate::event_ingester::{EventIngester, IngesterError};
 use crate::middleware_chain::NostrChainBuilder;
-use crate::nostr_middleware::{InboundProcessor, MessageSender, OutboundProcessor};
+use crate::nostr_middleware::{InboundProcessor, OutboundProcessor};
 use crate::state::NostrConnectionState;
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::stream::{self, SplitSink, StreamExt};
@@ -141,10 +141,8 @@ where
         let state_clone = state.clone();
         let addr_string = addr.to_string();
         let outbound_rx = self.outbound_rx.clone();
-        let outbound_tx = self.outbound_tx.clone();
 
         // Spawn the outbound processing task
-        // This must be done BEFORE calling on_connect_chain so messages can be sent
         tokio::spawn(async move {
             // Buffer size for ready chunks - adjust based on your needs
             let buffer_size = 10;
@@ -172,18 +170,15 @@ where
                         None
                     };
 
-                    let positioned_sender = MessageSender::new(outbound_tx.clone(), 0);
-
                     let mut message_opt = Some(message);
-                    if let Err(e) = OutboundProcessor::process_outbound_chain(
-                        &chain,
-                        &addr_string,
-                        &mut message_opt,
-                        &state_clone,
-                        &positioned_sender,
-                        from_index,
-                    )
-                    .await
+                    if let Err(e) = chain
+                        .process_outbound_chain(
+                            &addr_string,
+                            &mut message_opt,
+                            &state_clone,
+                            from_index,
+                        )
+                        .await
                     {
                         tracing::error!("Outbound middleware processing error: {}", e);
                         continue;
@@ -232,21 +227,15 @@ where
 
         // Now that the outbound task is running, call on_connect on all middlewares
         // They can safely send messages now
-        let positioned_sender = MessageSender::new(self.outbound_tx.clone(), 0);
-
         // Use the connected chain for on_connect
         let connected_chain = self
             .connected_chain
             .as_ref()
             .expect("Connected chain should be set");
 
-        InboundProcessor::on_connect_chain(
-            connected_chain,
-            &addr.to_string(),
-            &state,
-            &positioned_sender,
-        )
-        .await?;
+        connected_chain
+            .on_connect_chain(&addr.to_string(), &state)
+            .await?;
 
         Ok(())
     }
@@ -301,7 +290,6 @@ where
         };
 
         let mut message_opt = Some(message);
-        let sender = crate::nostr_middleware::MessageSender::new(self.outbound_tx.clone(), 0);
 
         // Use the connected chain for processing
         let connected_chain = self
@@ -310,7 +298,7 @@ where
             .expect("Connected chain should be set");
 
         match connected_chain
-            .process_inbound_chain(&addr.to_string(), &mut message_opt, state, &sender)
+            .process_inbound_chain(&addr.to_string(), &mut message_opt, state)
             .await
         {
             Ok(_) => Ok(()),
@@ -334,12 +322,9 @@ where
         if let (Some(state), Some(addr)) = (&self.state, &self.addr) {
             // Use the connected chain for on_disconnect
             if let Some(connected_chain) = &self.connected_chain {
-                let _ = OutboundProcessor::on_disconnect_chain(
-                    connected_chain,
-                    &addr.to_string(),
-                    state,
-                )
-                .await;
+                let _ = connected_chain
+                    .on_disconnect_chain(&addr.to_string(), state)
+                    .await;
             }
         }
 

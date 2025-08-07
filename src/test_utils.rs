@@ -186,7 +186,6 @@ where
         _connection_id: &str,
         _message: &mut Option<ClientMessage<'static>>,
         _state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
-        _sender: &MessageSender,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
         async move { Ok(()) }
     }
@@ -195,7 +194,6 @@ where
         &self,
         _connection_id: &str,
         _state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
-        _sender: &MessageSender,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
         async move { Ok(()) }
     }

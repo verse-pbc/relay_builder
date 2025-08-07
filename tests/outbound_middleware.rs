@@ -134,7 +134,6 @@ impl<T> TestContext<T> {
                 &self.connection_id,
                 &mut self.message,
                 &self.state,
-                &self.sender,
                 from_position,
             )
             .await

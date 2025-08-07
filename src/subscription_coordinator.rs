@@ -721,7 +721,7 @@ mod tests {
 
         // Create a mock connection to receive events
         let (tx, rx) = flume::bounded(10);
-        let message_sender = MessageSender::new(tx);
+        let message_sender = MessageSender::new(tx, 0);
         let connection_id = "test_conn".to_string();
         registry.register_connection(
             connection_id.clone(),

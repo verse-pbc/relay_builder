@@ -73,7 +73,7 @@ pub use middlewares::{
 };
 
 // Re-export new nostr-specific middleware system
-pub use middleware_chain::{chain, Chain};
+pub use middleware_chain::chain;
 pub use nostr_handler::{IntoHandlerFactory, NostrHandlerFactory};
 pub use nostr_middleware::{MessageSender, NostrMiddleware};
 

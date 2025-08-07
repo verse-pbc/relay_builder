@@ -4,9 +4,7 @@ use nostr_sdk::prelude::*;
 use parking_lot::RwLock;
 use relay_builder::{
     middleware_chain::chain,
-    nostr_middleware::{
-        InboundContext, InboundProcessor, MessageSender, NostrMiddleware, OutboundContext,
-    },
+    nostr_middleware::{InboundContext, InboundProcessor, NostrMiddleware, OutboundContext},
     state::NostrConnectionState,
 };
 use std::sync::{
@@ -72,7 +70,6 @@ where
         _connection_id: &str,
         _message: &mut Option<ClientMessage<'static>>,
         _state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
-        _sender: &MessageSender,
     ) -> Result<(), anyhow::Error> {
         println!("{}: InboundProcessor::process_inbound called", self.name);
         Ok(())
@@ -82,7 +79,6 @@ where
         &self,
         _connection_id: &str,
         _state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
-        _sender: &MessageSender,
     ) -> Result<(), anyhow::Error> {
         println!("{}: InboundProcessor::on_connect called", self.name);
         Ok(())
@@ -111,14 +107,13 @@ async fn test_on_connect_propagation() {
 
     // Create test sender
     let (tx, _rx) = flume::unbounded();
-    let sender = MessageSender::new(tx.clone(), 0);
 
     // Build the connected chain from the blueprint
     use relay_builder::middleware_chain::BuildConnected;
     let connected_chain = chain.build_connected(tx);
 
     // Call on_connect through the connected chain
-    InboundProcessor::on_connect_chain(&connected_chain, "test_conn", &state, &sender)
+    InboundProcessor::on_connect_chain(&connected_chain, "test_conn", &state)
         .await
         .unwrap();
 

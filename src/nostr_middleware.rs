@@ -90,7 +90,7 @@ where
     /// Continue to the next middleware in the chain
     pub async fn next(self) -> Result<(), anyhow::Error> {
         self.next
-            .process_inbound_chain(self.connection_id, self.message, self.state, &self.sender)
+            .process_inbound_chain(self.connection_id, self.message, self.state)
             .await
     }
 }
@@ -189,14 +189,12 @@ pub trait InboundProcessor<T>: Send + Sync {
         connection_id: &str,
         message: &mut Option<ClientMessage<'static>>,
         state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
-        sender: &MessageSender,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send;
 
     fn on_connect_chain(
         &self,
         connection_id: &str,
         state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
-        sender: &MessageSender,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send;
 }
 
@@ -207,7 +205,6 @@ pub trait OutboundProcessor<T>: Send + Sync {
         connection_id: &str,
         message: &mut Option<RelayMessage<'static>>,
         state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
-        sender: &MessageSender,
         from_position: usize,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send;
 
