@@ -91,7 +91,7 @@ where
 /// Handle inbound errors by sending appropriate relay messages
 async fn handle_inbound_error(
     error: &Error,
-    sender: &crate::nostr_middleware::NostrMessageSender,
+    sender: &crate::nostr_middleware::MessageSender,
     client_message_id: ClientMessageId,
 ) -> Result<()> {
     use Error::*;

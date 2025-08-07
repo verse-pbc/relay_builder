@@ -6,9 +6,9 @@
 use nostr_sdk::prelude::*;
 use parking_lot::RwLock;
 use relay_builder::{
-    middleware_chain::chain,
+    middleware_chain::{chain, BuildConnected},
     middlewares::*,
-    nostr_middleware::{NostrMessageSender, NostrMiddleware, OutboundContext, OutboundProcessor},
+    nostr_middleware::{MessageSender, NostrMiddleware, OutboundContext, OutboundProcessor},
     state::NostrConnectionState,
 };
 use std::{
@@ -91,7 +91,7 @@ struct TestContext<T> {
     connection_id: String,
     message: Option<RelayMessage<'static>>,
     state: Arc<RwLock<NostrConnectionState<T>>>,
-    sender: NostrMessageSender,
+    sender: MessageSender,
     _raw_sender: flume::Sender<(RelayMessage<'static>, usize, Option<String>)>,
 }
 
@@ -101,7 +101,7 @@ impl<T> TestContext<T> {
         T: Default,
     {
         let (tx, _rx) = flume::bounded(10);
-        let sender = NostrMessageSender::new(tx.clone(), 0);
+        let sender = MessageSender::new(tx.clone(), 0);
         Self {
             connection_id: "test_conn".to_string(),
             message: Some(message),
@@ -130,7 +130,7 @@ impl<T> TestContext<T> {
         C: OutboundProcessor<T>,
     {
         chain
-            .process_outbound(
+            .process_outbound_chain(
                 &self.connection_id,
                 &mut self.message,
                 &self.state,
@@ -236,10 +236,14 @@ async fn test_simple_chain_from_inner() {
     let inner = TrackingMiddleware::new("inner");
 
     // Build chain: outer (pos 1) -> inner (pos 0)
-    let chain = chain::<()>()
+    let chain_blueprint = chain::<()>()
         .with(inner.clone()) // position 0
         .with(outer.clone()) // position 1
         .build();
+
+    // Build connected chain from blueprint
+    let (tx, _rx) = flume::unbounded();
+    let chain = chain_blueprint.build_connected(tx);
 
     let message = RelayMessage::notice("Test from inner");
     let mut test_ctx = TestContext::<()>::new(message);
@@ -266,11 +270,15 @@ async fn test_middleware_chain_ordering() {
     let inner = TrackingMiddleware::new("inner");
 
     // Build chain: outer (pos 2) -> middle (pos 1) -> inner (pos 0)
-    let chain = chain::<()>()
+    let chain_blueprint = chain::<()>()
         .with(inner.clone()) // position 0
         .with(middle.clone()) // position 1
         .with(outer.clone()) // position 2
         .build();
+
+    // Build connected chain from blueprint
+    let (tx, _rx) = flume::unbounded();
+    let chain = chain_blueprint.build_connected(tx);
 
     // Create a message sent from the middle middleware (position 1)
     let message = RelayMessage::notice("Test");
@@ -329,10 +337,14 @@ async fn test_message_modification_chain() {
     let second = ModifyingMiddleware::new(" [second]");
 
     // Build chain: first -> second
-    let chain = chain::<()>()
+    let chain_blueprint = chain::<()>()
         .with(second.clone()) // position 0
         .with(first.clone()) // position 1
         .build();
+
+    // Build connected chain from blueprint
+    let (tx, _rx) = flume::unbounded();
+    let chain = chain_blueprint.build_connected(tx);
 
     // Create a notice message
     let message = RelayMessage::notice("Original");

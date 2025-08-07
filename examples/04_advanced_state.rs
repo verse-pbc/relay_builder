@@ -118,7 +118,7 @@ impl EventProcessor<UserSession> for AdvancedStateProcessor {
         } = context.subdomain
         {
             match subdomain.as_str() {
-                "vip" => {
+                "vip" | "premium" => {
                     tracing::info!("VIP event from {}", event.pubkey);
                     // Could add special processing for VIP subdomain
                 }
@@ -145,7 +145,7 @@ async fn main() -> Result<()> {
     common::init_logging();
 
     // Create relay configuration with subdomain support
-    let relay_url = "ws://relay.example.com";
+    let relay_url = "ws://example.local:8080";
     let keys = Keys::generate();
     let config = RelayConfig::new(relay_url, "./data/advanced_state", keys)
         // Enable subdomain-based isolation
@@ -157,7 +157,7 @@ async fn main() -> Result<()> {
         name: "Advanced State Relay".to_string(),
         description: "Multi-tenant relay with session tracking".to_string(),
         pubkey: config.keys.public_key().to_string(),
-        contact: "admin@example.com".to_string(),
+        contact: "admin@example.local".to_string(),
         supported_nips: vec![1, 9, 11, 50],
         software: "relay_builder".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -235,13 +235,13 @@ async fn main() -> Result<()> {
     println!();
     println!("Testing multi-tenancy locally:");
     println!("1. Add to /etc/hosts:");
-    println!("   127.0.0.1 relay.example.com");
-    println!("   127.0.0.1 test.relay.example.com");
-    println!("   127.0.0.1 vip.relay.example.com");
+    println!("   127.0.0.1 example.local");
+    println!("   127.0.0.1 test.example.local");
+    println!("   127.0.0.1 vip.example.local");
     println!("2. Connect to different subdomains:");
-    println!("   - ws://relay.example.com:8080 (root)");
-    println!("   - ws://test.relay.example.com:8080 (test subdomain)");
-    println!("   - ws://vip.relay.example.com:8080 (premium subdomain)");
+    println!("   - ws://example.local:8080 (root)");
+    println!("   - ws://test.example.local:8080 (test subdomain)");
+    println!("   - ws://vip.example.local:8080 (premium subdomain)");
     println!();
     println!("Watch the logs to see session tracking and isolation!");
 

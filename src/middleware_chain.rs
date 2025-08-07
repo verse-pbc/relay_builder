@@ -4,11 +4,10 @@
 //! zero-cost abstractions while supporting index-based message routing.
 
 use crate::nostr_middleware::{
-    DisconnectContext, InboundContext, InboundProcessor, NostrMessageSender, NostrMiddleware,
+    DisconnectContext, InboundContext, InboundProcessor, MessageSender, NostrMiddleware,
     OutboundContext, OutboundProcessor,
 };
 use crate::state::NostrConnectionState;
-// use flume::{Sender}; // Not needed in this module
 use nostr_sdk::prelude::*;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -37,22 +36,22 @@ impl<T> InboundProcessor<T> for End<T>
 where
     T: Send + Sync + 'static,
 {
-    async fn process_inbound(
+    async fn process_inbound_chain(
         &self,
         _connection_id: &str,
         _message: &mut Option<ClientMessage<'static>>,
         _state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
-        _sender: &NostrMessageSender,
+        _sender: &MessageSender,
     ) -> Result<(), anyhow::Error> {
         // End of chain - no more processing
         Ok(())
     }
 
-    async fn on_connect(
+    async fn on_connect_chain(
         &self,
         _connection_id: &str,
         _state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
-        _sender: &NostrMessageSender,
+        _sender: &MessageSender,
     ) -> Result<(), anyhow::Error> {
         // End of chain - no more processing
         Ok(())
@@ -63,19 +62,19 @@ impl<T> OutboundProcessor<T> for End<T>
 where
     T: Send + Sync + 'static,
 {
-    async fn process_outbound(
+    async fn process_outbound_chain(
         &self,
         _connection_id: &str,
         _message: &mut Option<RelayMessage<'static>>,
         _state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
-        _sender: &NostrMessageSender,
+        _sender: &MessageSender,
         _from_position: usize,
     ) -> Result<(), anyhow::Error> {
         // End of chain - no more processing
         Ok(())
     }
 
-    async fn on_disconnect(
+    async fn on_disconnect_chain(
         &self,
         _connection_id: &str,
         _state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
@@ -95,9 +94,117 @@ where
 /// Static middleware chain with zero-cost abstractions
 #[derive(Clone)]
 pub struct Chain<M, Next> {
-    pub middleware: M,
+    pub middleware: Arc<M>,
     pub next: Next,
     pub position: usize,
+}
+
+/// Blueprint for building connected chains - contains no MessageSender
+#[derive(Clone)]
+pub struct ChainBlueprint<M, Next> {
+    pub middleware: Arc<M>,
+    pub next: Next,
+    pub position: usize,
+}
+
+/// Connected chain with MessageSender for each middleware
+#[derive(Clone)]
+pub struct ConnectedChain<M, Next> {
+    pub middleware: Arc<M>,
+    pub next: Next,
+    pub position: usize,
+    pub message_sender: MessageSender,
+}
+
+/// Trait for recursively building connected chains from blueprints
+pub trait BuildConnected {
+    type Output;
+    fn build_connected(
+        self,
+        sender_base: flume::Sender<(RelayMessage<'static>, usize, Option<String>)>,
+    ) -> Self::Output;
+}
+
+/// Implementation for ChainBlueprint to build ConnectedChain
+impl<M, Next> BuildConnected for ChainBlueprint<M, Next>
+where
+    Next: BuildConnected,
+{
+    type Output = ConnectedChain<M, Next::Output>;
+
+    fn build_connected(
+        self,
+        sender_base: flume::Sender<(RelayMessage<'static>, usize, Option<String>)>,
+    ) -> Self::Output {
+        ConnectedChain {
+            middleware: self.middleware,
+            next: self.next.build_connected(sender_base.clone()),
+            position: self.position,
+            message_sender: MessageSender::new(sender_base, self.position),
+        }
+    }
+}
+
+/// Base case: End doesn't change
+impl<T> BuildConnected for End<T> {
+    type Output = End<T>;
+
+    fn build_connected(
+        self,
+        _sender_base: flume::Sender<(RelayMessage<'static>, usize, Option<String>)>,
+    ) -> Self::Output {
+        self
+    }
+}
+
+/// Implementation for Either to support conditional middleware
+impl<L, R> BuildConnected for crate::util::Either<L, R>
+where
+    L: BuildConnected,
+    R: BuildConnected,
+{
+    type Output = crate::util::Either<L::Output, R::Output>;
+
+    fn build_connected(
+        self,
+        sender_base: flume::Sender<(RelayMessage<'static>, usize, Option<String>)>,
+    ) -> Self::Output {
+        match self {
+            crate::util::Either::Left(l) => {
+                crate::util::Either::Left(l.build_connected(sender_base))
+            }
+            crate::util::Either::Right(r) => {
+                crate::util::Either::Right(r.build_connected(sender_base))
+            }
+        }
+    }
+}
+
+/// Implementation for IdentityMiddleware - it doesn't need transformation
+impl BuildConnected for crate::util::IdentityMiddleware {
+    type Output = crate::util::IdentityMiddleware;
+
+    fn build_connected(
+        self,
+        _sender_base: flume::Sender<(RelayMessage<'static>, usize, Option<String>)>,
+    ) -> Self::Output {
+        self
+    }
+}
+
+/// Implementation for Arc<M> - just passes through since middleware is already Arc'd
+impl<M> BuildConnected for Arc<M>
+where
+    M: Send + Sync,
+{
+    type Output = Arc<M>;
+
+    fn build_connected(
+        self,
+        _sender_base: flume::Sender<(RelayMessage<'static>, usize, Option<String>)>,
+    ) -> Self::Output {
+        self
+    }
 }
 
 impl<M, Next, T> InboundProcessor<T> for Chain<M, Next>
@@ -106,15 +213,15 @@ where
     Next: InboundProcessor<T>,
     T: Send + Sync + Clone + 'static,
 {
-    async fn process_inbound(
+    async fn process_inbound_chain(
         &self,
         connection_id: &str,
         message: &mut Option<ClientMessage<'static>>,
         state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
-        sender: &NostrMessageSender,
+        sender: &MessageSender,
     ) -> Result<(), anyhow::Error> {
         // Create a new sender with this middleware's position
-        let positioned_sender = NostrMessageSender::new(sender.raw_sender().clone(), self.position);
+        let positioned_sender = MessageSender::new(sender.raw_sender().clone(), self.position);
 
         // Create context with next reference
         let ctx = InboundContext {
@@ -129,11 +236,11 @@ where
         self.middleware.process_inbound(ctx).await
     }
 
-    async fn on_connect(
+    async fn on_connect_chain(
         &self,
         connection_id: &str,
         state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
-        sender: &NostrMessageSender,
+        sender: &MessageSender,
     ) -> Result<(), anyhow::Error> {
         // on_connect flows like process_inbound: outer to inner
         // First call current middleware's on_connect
@@ -145,7 +252,9 @@ where
         self.middleware.on_connect(ctx).await?;
 
         // Then propagate to next (inner) middleware
-        self.next.on_connect(connection_id, state, sender).await
+        self.next
+            .on_connect_chain(connection_id, state, sender)
+            .await
     }
 }
 
@@ -155,19 +264,19 @@ where
     Next: OutboundProcessor<T>,
     T: Send + Sync + Clone + 'static,
 {
-    async fn process_outbound(
+    async fn process_outbound_chain(
         &self,
         connection_id: &str,
         message: &mut Option<RelayMessage<'static>>,
         state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
-        sender: &NostrMessageSender,
+        sender: &MessageSender,
         from_position: usize,
     ) -> Result<(), anyhow::Error> {
         if from_position <= self.position {
             // Message from this position or inner positions
             // Process through next first (inner middlewares)
             self.next
-                .process_outbound(connection_id, message, state, sender, from_position)
+                .process_outbound_chain(connection_id, message, state, sender, from_position)
                 .await?;
 
             // Then process through this middleware
@@ -181,18 +290,18 @@ where
         } else {
             // Message from outer middleware - skip this level
             self.next
-                .process_outbound(connection_id, message, state, sender, from_position)
+                .process_outbound_chain(connection_id, message, state, sender, from_position)
                 .await
         }
     }
 
-    async fn on_disconnect(
+    async fn on_disconnect_chain(
         &self,
         connection_id: &str,
         state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
     ) -> Result<(), anyhow::Error> {
         // Always process in reverse order: next first, then this
-        self.next.on_disconnect(connection_id, state).await?;
+        self.next.on_disconnect_chain(connection_id, state).await?;
 
         let ctx = DisconnectContext {
             connection_id,
@@ -202,14 +311,101 @@ where
     }
 }
 
-impl<M, Next, T> NostrMiddleware<T> for Chain<M, Next>
+/// InboundProcessor implementation for ConnectedChain - uses pre-created MessageSender
+impl<M, Next, T> InboundProcessor<T> for ConnectedChain<M, Next>
 where
     M: NostrMiddleware<T>,
-    Next: NostrMiddleware<T>,
+    Next: InboundProcessor<T>,
     T: Send + Sync + Clone + 'static,
 {
-    // Chain uses default implementations from NostrMiddleware
-    // The actual chain handling is done through InboundProcessor and OutboundProcessor
+    async fn process_inbound_chain(
+        &self,
+        connection_id: &str,
+        message: &mut Option<ClientMessage<'static>>,
+        state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        _sender: &MessageSender, // Ignored - we use our pre-created one
+    ) -> Result<(), anyhow::Error> {
+        // Use pre-created MessageSender - no allocation!
+        let ctx = InboundContext {
+            connection_id,
+            message,
+            state,
+            sender: self.message_sender.clone(), // Just Arc clone
+            next: &self.next,
+        };
+
+        // Process through current middleware
+        self.middleware.process_inbound(ctx).await
+    }
+
+    async fn on_connect_chain(
+        &self,
+        connection_id: &str,
+        state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        sender: &MessageSender,
+    ) -> Result<(), anyhow::Error> {
+        // Same as Chain implementation
+        let ctx = crate::nostr_middleware::ConnectionContext {
+            connection_id,
+            state,
+            sender: sender.clone(),
+        };
+        self.middleware.on_connect(ctx).await?;
+        self.next
+            .on_connect_chain(connection_id, state, sender)
+            .await
+    }
+}
+
+/// OutboundProcessor implementation for ConnectedChain
+impl<M, Next, T> OutboundProcessor<T> for ConnectedChain<M, Next>
+where
+    M: NostrMiddleware<T>,
+    Next: OutboundProcessor<T>,
+    T: Send + Sync + Clone + 'static,
+{
+    async fn process_outbound_chain(
+        &self,
+        connection_id: &str,
+        message: &mut Option<RelayMessage<'static>>,
+        state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        sender: &MessageSender,
+        from_position: usize,
+    ) -> Result<(), anyhow::Error> {
+        // Same logic as Chain
+        if from_position <= self.position {
+            self.next
+                .process_outbound_chain(connection_id, message, state, sender, from_position)
+                .await?;
+
+            let ctx = OutboundContext {
+                connection_id,
+                message,
+                state,
+                sender,
+            };
+            self.middleware.process_outbound(ctx).await
+        } else {
+            self.next
+                .process_outbound_chain(connection_id, message, state, sender, from_position)
+                .await
+        }
+    }
+
+    async fn on_disconnect_chain(
+        &self,
+        connection_id: &str,
+        state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+    ) -> Result<(), anyhow::Error> {
+        // Same as Chain
+        self.next.on_disconnect_chain(connection_id, state).await?;
+
+        let ctx = DisconnectContext {
+            connection_id,
+            state,
+        };
+        self.middleware.on_disconnect(ctx).await
+    }
 }
 
 /// Builder for creating static middleware chains with type inference
@@ -244,25 +440,24 @@ where
 
 /// Type alias for the essential middleware chain created by with_essentials()
 /// Note: Event verification is handled by EventIngester, not middleware
-pub type EssentialsChain<T, Current> = Chain<
+pub type EssentialsChain<T, Current> = ChainBlueprint<
     crate::middlewares::NostrLoggerMiddleware<T>,
-    Chain<crate::middlewares::ErrorHandlingMiddleware, Current>,
+    ChainBlueprint<crate::middlewares::ErrorHandlingMiddleware, Current>,
 >;
 
 impl<T, Current> NostrChainBuilder<T, Current>
 where
     T: Send + Sync + Clone + std::fmt::Debug + 'static,
-    Current: NostrMiddleware<T> + InboundProcessor<T>,
 {
-    /// Add a middleware to the chain
-    pub fn with<M>(self, middleware: M) -> NostrChainBuilder<T, Chain<M, Current>>
+    /// Add a middleware to the chain blueprint
+    pub fn with<M>(self, middleware: M) -> NostrChainBuilder<T, ChainBlueprint<M, Current>>
     where
         M: NostrMiddleware<T>,
     {
         let position = self.next_position;
         NostrChainBuilder {
-            chain: Chain {
-                middleware,
+            chain: ChainBlueprint {
+                middleware: Arc::new(middleware),
                 next: self.chain,
                 position,
             },

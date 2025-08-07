@@ -3,7 +3,7 @@
 use nostr_sdk::prelude::*;
 use relay_builder::{
     nostr_middleware::{
-        ConnectionContext, DisconnectContext, InboundContext, InboundProcessor, NostrMessageSender,
+        ConnectionContext, DisconnectContext, InboundContext, InboundProcessor, MessageSender,
         NostrMiddleware, OutboundContext,
     },
     state::NostrConnectionState,
@@ -94,9 +94,9 @@ fn create_test_state() -> Arc<parking_lot::RwLock<NostrConnectionState<()>>> {
     ))
 }
 
-fn create_test_sender() -> NostrMessageSender {
+fn create_test_sender() -> MessageSender {
     let (tx, _rx) = flume::unbounded();
-    NostrMessageSender::new(tx, 0)
+    MessageSender::new(tx, 0)
 }
 
 #[tokio::test]
@@ -209,7 +209,7 @@ async fn test_auth_middleware_through_either() {
 
     let state = create_test_state();
     let (tx, rx) = flume::unbounded::<(RelayMessage<'static>, usize, Option<String>)>();
-    let sender = NostrMessageSender::new(tx, 0);
+    let sender = MessageSender::new(tx, 0);
     let ctx = ConnectionContext {
         connection_id: "test_conn",
         state: &state,

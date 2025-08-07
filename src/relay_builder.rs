@@ -6,9 +6,10 @@ use crate::error::Error;
 use crate::event_processor::{DefaultRelayProcessor, EventProcessor};
 use crate::metrics::SubscriptionMetricsHandler;
 use crate::middleware_chain::chain;
+use crate::middleware_chain::{End, NostrChainBuilder};
 use crate::middlewares::{MetricsHandler, Nip42Middleware};
 use crate::nostr_handler::IntoHandlerFactory;
-use crate::nostr_middleware::NostrMiddleware;
+use crate::nostr_middleware::{InboundProcessor, OutboundProcessor};
 use crate::relay_middleware::RelayMiddleware;
 use nostr_sdk::prelude::*;
 use std::marker::PhantomData;
@@ -398,12 +399,9 @@ where
     ) -> Result<impl websocket_builder::HandlerFactory, Error>
     where
         T: Default,
-        F: FnOnce(
-            crate::middleware_chain::NostrChainBuilder<T, crate::middleware_chain::End<T>>,
-        ) -> crate::middleware_chain::NostrChainBuilder<T, C>,
-        C: NostrMiddleware<T>
-            + crate::nostr_middleware::InboundProcessor<T>
-            + crate::nostr_middleware::OutboundProcessor<T>,
+        F: FnOnce(NostrChainBuilder<T, End<T>>) -> NostrChainBuilder<T, C>,
+        C: crate::middleware_chain::BuildConnected + Send + Sync + 'static + Clone,
+        C::Output: InboundProcessor<T> + OutboundProcessor<T> + Send + Sync + 'static + Clone,
     {
         // Set the global subscription metrics handler if provided
         if let Some(handler) = self.subscription_metrics_handler.clone() {
@@ -438,6 +436,7 @@ where
                     self.config.max_subscriptions,
                     Some(task_tracker),
                     self.cancellation_token.clone(),
+                    self.config.max_readers,
                 )?;
                 (database, crypto_helper, event_ingester)
             }

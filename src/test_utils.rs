@@ -1,7 +1,5 @@
 use crate::database::RelayDatabase;
-use crate::nostr_middleware::{
-    ConnectionContext, InboundContext, NostrMessageSender, OutboundContext,
-};
+use crate::nostr_middleware::{ConnectionContext, InboundContext, MessageSender, OutboundContext};
 use crate::state::NostrConnectionState;
 use crate::subscription_coordinator::{ReplaceableEventsBuffer, SubscriptionCoordinator};
 use crate::subscription_registry::SubscriptionRegistry;
@@ -60,7 +58,7 @@ pub async fn create_test_state_with_subscription_service(
     flume::Receiver<(RelayMessage<'static>, usize, Option<String>)>,
 ) {
     let (tx, rx) = flume::bounded::<(RelayMessage<'static>, usize, Option<String>)>(10);
-    let sender = NostrMessageSender::new(tx, 0);
+    let sender = MessageSender::new(tx, 0);
 
     // Create subscription registry
     let registry = Arc::new(SubscriptionRegistry::new(None));
@@ -126,7 +124,7 @@ pub fn create_test_inbound_context<T: Send + Sync + Clone + 'static>(
         let (tx, _rx) = flume::bounded::<(RelayMessage<'static>, usize, Option<String>)>(1);
         tx
     });
-    let nostr_sender = NostrMessageSender::new(sender, index);
+    let nostr_sender = MessageSender::new(sender, index);
 
     TestInboundContext {
         connection_id,
@@ -142,7 +140,7 @@ pub struct TestInboundContext<T> {
     pub connection_id: String,
     pub message: Option<ClientMessage<'static>>,
     pub state: Arc<RwLock<NostrConnectionState<T>>>,
-    pub sender: NostrMessageSender,
+    pub sender: MessageSender,
     next_processor: TestNextProcessor<T>,
 }
 
@@ -183,21 +181,21 @@ impl<T> crate::nostr_middleware::InboundProcessor<T> for TestNextProcessor<T>
 where
     T: Send + Sync + 'static,
 {
-    fn process_inbound(
+    fn process_inbound_chain(
         &self,
         _connection_id: &str,
         _message: &mut Option<ClientMessage<'static>>,
         _state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
-        _sender: &NostrMessageSender,
+        _sender: &MessageSender,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
         async move { Ok(()) }
     }
 
-    fn on_connect(
+    fn on_connect_chain(
         &self,
         _connection_id: &str,
         _state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
-        _sender: &NostrMessageSender,
+        _sender: &MessageSender,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
         async move { Ok(()) }
     }
@@ -220,7 +218,7 @@ pub fn create_test_outbound_context<T: Send + Sync + Clone + 'static>(
         tx
     });
 
-    let nostr_sender = NostrMessageSender::new(raw_sender, position);
+    let nostr_sender = MessageSender::new(raw_sender, position);
 
     TestOutboundContext {
         connection_id,
@@ -236,7 +234,7 @@ pub struct TestOutboundContext<T> {
     pub connection_id: String,
     pub message: Option<RelayMessage<'static>>,
     pub state: Arc<RwLock<NostrConnectionState<T>>>,
-    pub sender: NostrMessageSender,
+    pub sender: MessageSender,
     pub from_position: usize,
 }
 
@@ -272,7 +270,7 @@ pub fn create_test_connection_context<T: Send + Sync + Clone + 'static>(
         let (tx, _rx) = flume::bounded::<(RelayMessage<'static>, usize, Option<String>)>(1);
         tx
     });
-    let nostr_sender = NostrMessageSender::new(sender, index);
+    let nostr_sender = MessageSender::new(sender, index);
 
     TestConnectionContext {
         connection_id,
@@ -285,7 +283,7 @@ pub fn create_test_connection_context<T: Send + Sync + Clone + 'static>(
 pub struct TestConnectionContext<T> {
     pub connection_id: String,
     pub state: Arc<RwLock<NostrConnectionState<T>>>,
-    pub sender: NostrMessageSender,
+    pub sender: MessageSender,
 }
 
 impl<T> TestConnectionContext<T>

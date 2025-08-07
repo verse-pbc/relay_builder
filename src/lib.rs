@@ -75,7 +75,7 @@ pub use middlewares::{
 // Re-export new nostr-specific middleware system
 pub use middleware_chain::{chain, Chain};
 pub use nostr_handler::{IntoHandlerFactory, NostrHandlerFactory};
-pub use nostr_middleware::{NostrMessageSender, NostrMiddleware};
+pub use nostr_middleware::{MessageSender, NostrMiddleware};
 
 // Re-export websocket_builder types to avoid version conflicts
 // pub use websocket_builder::MessageSender;  // Disabled - using NostrMessageSender instead
