@@ -262,11 +262,13 @@ fn test_performance_comparison() {
         "Indexed distribution: {num_events} events, {total_matches} total matches, {indexed_duration:?}"
     );
 
-    // Verify reasonable performance (should be well under 1ms per event)
+    // Verify reasonable performance
+    // In debug mode, allow up to 2ms per event; in release mode, expect under 1ms
     let avg_time_per_event = indexed_duration.as_micros() / num_events as u128;
+    let threshold = if cfg!(debug_assertions) { 2000 } else { 1000 };
     assert!(
-        avg_time_per_event < 1000,
-        "Average time per event {avg_time_per_event} microseconds is too high"
+        avg_time_per_event < threshold,
+        "Average time per event {avg_time_per_event} microseconds is too high (threshold: {threshold}μs)"
     );
 }
 
