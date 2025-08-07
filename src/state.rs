@@ -2,7 +2,7 @@
 
 use crate::database::RelayDatabase;
 use crate::error::Error;
-use crate::nostr_middleware::NostrMessageSender;
+use crate::nostr_middleware::MessageSender;
 use crate::subscription_coordinator::StoreCommand;
 use crate::subscription_coordinator::SubscriptionCoordinator;
 use crate::subscription_registry::SubscriptionRegistry;
@@ -14,10 +14,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error};
-
-// Temporary type alias for compatibility during migration
-// Temporary type alias for compatibility during migration
-type MessageSender = NostrMessageSender;
 
 const DEFAULT_RELAY_URL: &str = "wss://default.relay";
 

@@ -11,12 +11,12 @@ use std::sync::Arc;
 
 /// Message sender with position-based routing for proper outbound processing
 #[derive(Clone, Debug)]
-pub struct NostrMessageSender {
+pub struct MessageSender {
     sender: Sender<(RelayMessage<'static>, usize, Option<String>)>, // Message + originating middleware position + optional pre-serialized JSON
     position: usize,                                                // This middleware's position
 }
 
-impl NostrMessageSender {
+impl MessageSender {
     pub fn new(
         sender: Sender<(RelayMessage<'static>, usize, Option<String>)>,
         position: usize,
@@ -78,7 +78,7 @@ pub struct InboundContext<'a, T, Next> {
     /// Connection state
     pub state: &'a Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
     /// Message sender for sending responses with index tracking
-    pub sender: NostrMessageSender,
+    pub sender: MessageSender,
     /// Reference to the next processor in the chain (static dispatch)
     pub(crate) next: &'a Next,
 }
@@ -90,7 +90,7 @@ where
     /// Continue to the next middleware in the chain
     pub async fn next(self) -> Result<(), anyhow::Error> {
         self.next
-            .process_inbound(self.connection_id, self.message, self.state, &self.sender)
+            .process_inbound_chain(self.connection_id, self.message, self.state, &self.sender)
             .await
     }
 }
@@ -127,7 +127,7 @@ pub struct OutboundContext<'a, T> {
     /// Connection state
     pub state: &'a Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
     /// Message sender with position tracking
-    pub sender: &'a NostrMessageSender,
+    pub sender: &'a MessageSender,
 }
 
 /// Context for disconnect events (no sender - connection is closed)
@@ -153,7 +153,7 @@ where
     /// Connection state
     pub state: &'a Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
     /// Message sender for sending responses with index tracking
-    pub sender: NostrMessageSender,
+    pub sender: MessageSender,
 }
 
 // Helper methods for all ConnectionContext variants
@@ -184,34 +184,34 @@ where
 
 /// Trait for processing inbound messages (internal, static dispatch)
 pub trait InboundProcessor<T>: Send + Sync {
-    fn process_inbound(
+    fn process_inbound_chain(
         &self,
         connection_id: &str,
         message: &mut Option<ClientMessage<'static>>,
         state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
-        sender: &NostrMessageSender,
+        sender: &MessageSender,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send;
 
-    fn on_connect(
+    fn on_connect_chain(
         &self,
         connection_id: &str,
         state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
-        sender: &NostrMessageSender,
+        sender: &MessageSender,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send;
 }
 
 /// Trait for processing outbound messages (internal, static dispatch)
 pub trait OutboundProcessor<T>: Send + Sync {
-    fn process_outbound(
+    fn process_outbound_chain(
         &self,
         connection_id: &str,
         message: &mut Option<RelayMessage<'static>>,
         state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
-        sender: &NostrMessageSender,
+        sender: &MessageSender,
         from_position: usize,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send;
 
-    fn on_disconnect(
+    fn on_disconnect_chain(
         &self,
         connection_id: &str,
         state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,

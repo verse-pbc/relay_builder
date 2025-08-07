@@ -4,7 +4,7 @@
 
 use crate::middleware_chain::chain;
 use crate::middlewares::{ErrorHandlingMiddleware, NostrLoggerMiddleware};
-use crate::nostr_middleware::NostrMessageSender;
+use crate::nostr_middleware::MessageSender;
 use flume::{bounded, Receiver};
 use nostr_sdk::prelude::*;
 
@@ -35,7 +35,7 @@ mod tests {
     #[test]
     fn test_message_sender_creation() {
         let (tx, _rx): (_, Receiver<(RelayMessage, usize, Option<String>)>) = bounded(10);
-        let sender = NostrMessageSender::new(tx, 0);
+        let sender = MessageSender::new(tx, 0);
 
         // Test that we can create messages
         let notice = RelayMessage::notice("Test message");

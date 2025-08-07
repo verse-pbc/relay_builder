@@ -5,7 +5,7 @@ use parking_lot::RwLock;
 use relay_builder::{
     middleware_chain::chain,
     nostr_middleware::{
-        InboundContext, InboundProcessor, NostrMessageSender, NostrMiddleware, OutboundContext,
+        InboundContext, InboundProcessor, MessageSender, NostrMiddleware, OutboundContext,
     },
     state::NostrConnectionState,
 };
@@ -67,22 +67,22 @@ impl<T> InboundProcessor<T> for TrackingMiddleware
 where
     T: Send + Sync + 'static,
 {
-    async fn process_inbound(
+    async fn process_inbound_chain(
         &self,
         _connection_id: &str,
         _message: &mut Option<ClientMessage<'static>>,
         _state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
-        _sender: &NostrMessageSender,
+        _sender: &MessageSender,
     ) -> Result<(), anyhow::Error> {
         println!("{}: InboundProcessor::process_inbound called", self.name);
         Ok(())
     }
 
-    async fn on_connect(
+    async fn on_connect_chain(
         &self,
         _connection_id: &str,
         _state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
-        _sender: &NostrMessageSender,
+        _sender: &MessageSender,
     ) -> Result<(), anyhow::Error> {
         println!("{}: InboundProcessor::on_connect called", self.name);
         Ok(())
@@ -111,10 +111,14 @@ async fn test_on_connect_propagation() {
 
     // Create test sender
     let (tx, _rx) = flume::unbounded();
-    let sender = NostrMessageSender::new(tx, 0);
+    let sender = MessageSender::new(tx.clone(), 0);
 
-    // Call on_connect through the chain
-    InboundProcessor::on_connect(&chain, "test_conn", &state, &sender)
+    // Build the connected chain from the blueprint
+    use relay_builder::middleware_chain::BuildConnected;
+    let connected_chain = chain.build_connected(tx);
+
+    // Call on_connect through the connected chain
+    InboundProcessor::on_connect_chain(&connected_chain, "test_conn", &state, &sender)
         .await
         .unwrap();
 

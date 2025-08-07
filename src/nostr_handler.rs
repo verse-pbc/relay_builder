@@ -6,9 +6,7 @@
 use crate::config::ScopeConfig;
 use crate::event_ingester::{EventIngester, IngesterError};
 use crate::middleware_chain::NostrChainBuilder;
-use crate::nostr_middleware::{
-    InboundProcessor, NostrMessageSender, NostrMiddleware, OutboundProcessor,
-};
+use crate::nostr_middleware::{InboundProcessor, MessageSender, OutboundProcessor};
 use crate::state::NostrConnectionState;
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::stream::{self, SplitSink, StreamExt};
@@ -47,7 +45,8 @@ impl<T, Chain> NostrHandlerFactory<T, Chain> {
 impl<T, Chain> HandlerFactory for NostrHandlerFactory<T, Chain>
 where
     T: Clone + Send + Sync + std::fmt::Debug + Default + 'static,
-    Chain: NostrMiddleware<T> + InboundProcessor<T> + OutboundProcessor<T>,
+    Chain: crate::middleware_chain::BuildConnected + Clone + Send + Sync + 'static,
+    Chain::Output: InboundProcessor<T> + OutboundProcessor<T> + Clone + Send + Sync + 'static,
 {
     type Handler = NostrConnection<T, Chain>;
 
@@ -66,23 +65,32 @@ where
             None
         };
 
+        let (outbound_tx, outbound_rx) = flume::unbounded();
+
         NostrConnection {
-            chain: self.chain.clone(),
+            chain_blueprint: Some(self.chain.clone()),
+            connected_chain: None,
             event_ingester: self.event_ingester.clone(),
             subdomain: subdomain.unwrap_or_else(|| Arc::new(Scope::Default)),
             state: None,
             addr: None,
             inbound_task: None,
-            outbound_tx: None,
-            outbound_rx: None,
+            outbound_tx,
+            outbound_rx,
         }
     }
 }
 
 /// WebSocket connection handler for Nostr
-pub struct NostrConnection<T, Chain> {
-    /// The middleware chain
-    chain: Chain,
+pub struct NostrConnection<T, Chain>
+where
+    Chain: crate::middleware_chain::BuildConnected + Send + Sync,
+    Chain::Output: Send + Sync,
+{
+    /// The middleware chain blueprint (will be transformed to connected chain)
+    chain_blueprint: Option<Chain>,
+    /// The connected chain (created from blueprint on connect)
+    connected_chain: Option<Chain::Output>,
     /// Event ingester for JSON parsing and signature verification
     event_ingester: EventIngester,
     /// The subdomain scope for this connection
@@ -94,15 +102,16 @@ pub struct NostrConnection<T, Chain> {
     /// Handle to the inbound processing task
     inbound_task: Option<tokio::task::JoinHandle<()>>,
     /// Sender for outbound messages from middleware (with index tracking and optional pre-serialized JSON)
-    outbound_tx: Option<flume::Sender<(RelayMessage<'static>, usize, Option<String>)>>,
+    outbound_tx: flume::Sender<(RelayMessage<'static>, usize, Option<String>)>,
     /// Receiver for outbound messages from middleware
-    outbound_rx: Option<flume::Receiver<(RelayMessage<'static>, usize, Option<String>)>>,
+    outbound_rx: flume::Receiver<(RelayMessage<'static>, usize, Option<String>)>,
 }
 
 impl<T, Chain> WebSocketHandler for NostrConnection<T, Chain>
 where
     T: Clone + Send + Sync + std::fmt::Debug + Default + 'static,
-    Chain: NostrMiddleware<T> + InboundProcessor<T> + OutboundProcessor<T>,
+    Chain: crate::middleware_chain::BuildConnected + Clone + Send + Sync + 'static,
+    Chain::Output: InboundProcessor<T> + OutboundProcessor<T> + Clone + Send + Sync + 'static,
 {
     async fn on_connect(
         &mut self,
@@ -119,15 +128,23 @@ where
         ));
         self.state = Some(state.clone());
 
-        let (outbound_tx, outbound_rx) = flume::unbounded();
-        self.outbound_tx = Some(outbound_tx.clone());
-        self.outbound_rx = Some(outbound_rx.clone());
+        // Build the connected chain from the blueprint
+        let blueprint = self
+            .chain_blueprint
+            .take()
+            .expect("Chain blueprint already consumed");
+        let connected_chain = blueprint.build_connected(self.outbound_tx.clone());
+        self.connected_chain = Some(connected_chain.clone());
 
         // Clone what we need for the outbound task
-        let chain = self.chain.clone();
+        let chain = connected_chain.clone();
         let state_clone = state.clone();
         let addr_string = addr.to_string();
+        let outbound_rx = self.outbound_rx.clone();
+        let outbound_tx = self.outbound_tx.clone();
 
+        // Spawn the outbound processing task
+        // This must be done BEFORE calling on_connect_chain so messages can be sent
         tokio::spawn(async move {
             // Buffer size for ready chunks - adjust based on your needs
             let buffer_size = 10;
@@ -155,10 +172,10 @@ where
                         None
                     };
 
-                    let positioned_sender = NostrMessageSender::new(outbound_tx.clone(), 0);
+                    let positioned_sender = MessageSender::new(outbound_tx.clone(), 0);
 
                     let mut message_opt = Some(message);
-                    if let Err(e) = OutboundProcessor::process_outbound(
+                    if let Err(e) = OutboundProcessor::process_outbound_chain(
                         &chain,
                         &addr_string,
                         &mut message_opt,
@@ -213,15 +230,23 @@ where
             }
         });
 
-        // Call middleware on_connect through InboundProcessor
-        let Some(outbound_tx_for_connect) = &self.outbound_tx else {
-            return Err(anyhow::anyhow!("No outbound sender"));
-        };
-        let positioned_sender =
-            crate::nostr_middleware::NostrMessageSender::new(outbound_tx_for_connect.clone(), 0);
+        // Now that the outbound task is running, call on_connect on all middlewares
+        // They can safely send messages now
+        let positioned_sender = MessageSender::new(self.outbound_tx.clone(), 0);
 
-        InboundProcessor::on_connect(&self.chain, &addr.to_string(), &state, &positioned_sender)
-            .await?;
+        // Use the connected chain for on_connect
+        let connected_chain = self
+            .connected_chain
+            .as_ref()
+            .expect("Connected chain should be set");
+
+        InboundProcessor::on_connect_chain(
+            connected_chain,
+            &addr.to_string(),
+            &state,
+            &positioned_sender,
+        )
+        .await?;
 
         Ok(())
     }
@@ -233,10 +258,6 @@ where
 
         let Some(addr) = &self.addr else {
             return Err(anyhow::anyhow!("No remote address"));
-        };
-
-        let Some(outbound_tx) = &self.outbound_tx else {
-            return Err(anyhow::anyhow!("No outbound sender"));
         };
 
         // EventIngester handles JSON parsing + signature verification
@@ -251,7 +272,7 @@ where
                     IngesterError::JsonParseError(parse_err) => {
                         let error_msg =
                             RelayMessage::notice(format!("Invalid message format: {parse_err}"));
-                        let _ = outbound_tx.send((error_msg, 0, None));
+                        let _ = self.outbound_tx.send((error_msg, 0, None));
                     }
                     IngesterError::SignatureVerificationFailed(event_id) => {
                         let ok_msg = RelayMessage::ok(
@@ -259,15 +280,15 @@ where
                             false,
                             "invalid: event signature verification failed",
                         );
-                        let _ = outbound_tx.send((ok_msg, 0, None));
+                        let _ = self.outbound_tx.send((ok_msg, 0, None));
                     }
                     IngesterError::InvalidUtf8 => {
                         let error_msg = RelayMessage::notice("Invalid UTF-8 in message");
-                        let _ = outbound_tx.send((error_msg, 0, None));
+                        let _ = self.outbound_tx.send((error_msg, 0, None));
                     }
                     IngesterError::MessageTooLarge => {
                         let error_msg = RelayMessage::notice("Message size exceeds limit");
-                        let _ = outbound_tx.send((error_msg, 0, None));
+                        let _ = self.outbound_tx.send((error_msg, 0, None));
                     }
                     IngesterError::ChannelClosed => {
                         // Log and return error for channel issues
@@ -279,21 +300,18 @@ where
             }
         };
 
-        let Some(outbound_tx) = &self.outbound_tx else {
-            return Err(anyhow::anyhow!("No outbound sender"));
-        };
-
         let mut message_opt = Some(message);
-        let sender = crate::nostr_middleware::NostrMessageSender::new(outbound_tx.clone(), 0);
+        let sender = crate::nostr_middleware::MessageSender::new(self.outbound_tx.clone(), 0);
 
-        match InboundProcessor::process_inbound(
-            &self.chain,
-            &addr.to_string(),
-            &mut message_opt,
-            state,
-            &sender,
-        )
-        .await
+        // Use the connected chain for processing
+        let connected_chain = self
+            .connected_chain
+            .as_ref()
+            .expect("Connected chain should be set");
+
+        match connected_chain
+            .process_inbound_chain(&addr.to_string(), &mut message_opt, state, &sender)
+            .await
         {
             Ok(_) => Ok(()),
             Err(e) => {
@@ -302,7 +320,7 @@ where
 
                 if let Some(nostr_error) = e.downcast_ref::<crate::error::Error>() {
                     let notice = RelayMessage::notice(nostr_error.to_string());
-                    let _ = outbound_tx.send((notice, 0, None));
+                    let _ = self.outbound_tx.send((notice, 0, None));
                 }
 
                 Ok(())
@@ -314,8 +332,15 @@ where
         tracing::debug!("Connection disconnected: {:?}", reason);
 
         if let (Some(state), Some(addr)) = (&self.state, &self.addr) {
-            // Call on_disconnect through OutboundProcessor (no sender needed)
-            let _ = OutboundProcessor::on_disconnect(&self.chain, &addr.to_string(), state).await;
+            // Use the connected chain for on_disconnect
+            if let Some(connected_chain) = &self.connected_chain {
+                let _ = OutboundProcessor::on_disconnect_chain(
+                    connected_chain,
+                    &addr.to_string(),
+                    state,
+                )
+                .await;
+            }
         }
 
         // Cancel inbound task if running
@@ -338,7 +363,8 @@ pub trait IntoHandlerFactory<T, Chain> {
 impl<T, Chain> IntoHandlerFactory<T, Chain> for NostrChainBuilder<T, Chain>
 where
     T: Clone + Send + Sync + std::fmt::Debug + Default + 'static,
-    Chain: NostrMiddleware<T> + InboundProcessor<T> + OutboundProcessor<T>,
+    Chain: crate::middleware_chain::BuildConnected + Clone + Send + Sync + 'static,
+    Chain::Output: InboundProcessor<T> + OutboundProcessor<T> + Clone + Send + Sync + 'static,
 {
     fn into_handler_factory(
         self,

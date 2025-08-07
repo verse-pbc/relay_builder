@@ -87,7 +87,7 @@ where
         &self,
         event: Event,
         state: Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
-        message_sender: Option<crate::nostr_middleware::NostrMessageSender>,
+        message_sender: Option<crate::nostr_middleware::MessageSender>,
     ) -> Result<(), Error> {
         // Extract necessary state before async call
         let (authed_pubkey, subdomain) = {
@@ -259,7 +259,7 @@ where
         subscription_id: String,
         filter: Filter,
         initial_message: String,
-        sender: Option<crate::nostr_middleware::NostrMessageSender>,
+        sender: Option<crate::nostr_middleware::MessageSender>,
     ) -> Result<(), Error> {
         let subdomain = {
             let connection_state = state.read();
@@ -341,7 +341,7 @@ where
         state: Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
         subscription_id: String,
         message: String,
-        sender: Option<crate::nostr_middleware::NostrMessageSender>,
+        sender: Option<crate::nostr_middleware::MessageSender>,
     ) -> Result<(), Error> {
         let subscription_id_obj = SubscriptionId::new(subscription_id.clone());
 
@@ -619,7 +619,8 @@ where
                 // All other messages are not handled by default
                 _ => match &message {
                     ClientMessage::Auth(_) => {
-                        // if it was enabled, we would have handled it in the nip42 middleware
+                        // if it was enabled, we would have handled it in the
+                        // nip42 middleware and this point would not be reached
                         debug!(
                             "AUTH message received but authentication is not enabled on this relay, ignoring"
                         );
@@ -681,6 +682,22 @@ where
         }
     }
 
-    // on_disconnect method no longer exists in the new middleware API
-    // Cleanup is handled by dropping the connection state
+    fn on_disconnect(
+        &self,
+        ctx: crate::nostr_middleware::DisconnectContext<'_, T>,
+    ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
+        async move {
+            debug!("RelayMiddleware: on_disconnect for {}", ctx.connection_id);
+
+            // Perform explicit cleanup immediately when connection closes
+            // No need to read the lock - connection_id is already in the context
+            self.registry.cleanup_connection(ctx.connection_id);
+            debug!(
+                "RelayMiddleware: Cleaned up connection {}",
+                ctx.connection_id
+            );
+
+            Ok(())
+        }
+    }
 }
