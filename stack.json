@@ -1,9 +1,9 @@
 {
   "name": "relay-builder",
   "title": "Relay Builder",
-  "description": "A flexible Rust framework for building custom Nostr relays with middleware-based architecture",
+  "description": "A Rust framework for building custom Nostr relays with pluggable business logic and middleware support",
   "uri": "git+https://github.com/verse-pbc/relay_builder.git",
   "image": "https://raw.githubusercontent.com/verse-pbc/relay_builder/main/assets/banner-v2.png",
   "commands": ["cargo"],
-  "tech": ["rust", "nostr", "websocket", "tokio", "async", "lmdb", "axum"]
+  "tech": ["rust", "nostr", "websocket", "tokio", "async", "lmdb", "axum", "nostr-sdk", "scoped-heed"]
 }

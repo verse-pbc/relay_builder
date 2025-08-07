@@ -4,12 +4,12 @@ A framework for building custom Nostr relays with middleware support. Built on t
 
 ## Technology Stack
 
-- **Language**: Rust (edition 2021)
+- **Language**: Rust (edition 2024, requires 1.88.0)
 - **Async Runtime**: Tokio
-- **WebSocket**: Tungstenite via websocket_builder for middleware pipelines
-- **Database**: LMDB via a nostr-lmdb fork that provides multitenant support
-- **Web Framework**: Axum
-- **Nostr**: Custom fork of nostr-lmdb library for multitenancy and batched writes
+- **WebSocket**: websocket_builder (workspace dependency) for generic WebSocket transport
+- **Database**: LMDB via nostr-lmdb with scoped-heed for multi-tenant support
+- **Web Framework**: Axum (always included)
+- **Nostr**: nostr-sdk for protocol types and operations
 
 ## Project Structure
 
@@ -18,7 +18,10 @@ relay_builder/
 ├── src/
 │   ├── relay_builder.rs      # Main builder pattern implementation
 │   ├── event_processor.rs    # Core trait for business logic
-│   ├── relay_middleware.rs   # Relay middleware that bridges to WebSocket
+│   ├── relay_middleware.rs   # Relay middleware that bridges EventProcessor to NostrMiddleware
+│   ├── nostr_middleware.rs   # NostrMiddleware trait for protocol-level middleware
+│   ├── nostr_handler.rs      # WebSocket connection handler
+│   ├── middleware_chain.rs   # Static middleware chain with ChainBlueprint/ConnectedChain
 │   ├── middlewares/          # Built-in middleware implementations
 │   │   ├── error_handling.rs # Global error recovery
 │   │   ├── logger.rs         # Request/response logging
@@ -31,7 +34,9 @@ relay_builder/
 │   ├── subscription_coordinator.rs # Event storage and subscription management
 │   ├── subscription_registry.rs # Subscription tracking
 │   ├── subscription_index.rs # Event distribution optimization
-│   └── state.rs             # Connection state management
+│   ├── state.rs             # Connection state management
+│   └── util/                # Utility types
+│       └── either.rs        # Either type for conditional middleware
 ├── examples/
 │   ├── 01_minimal_relay.rs     # Basic relay
 │   ├── 02_event_processing.rs  # Custom business logic
@@ -126,16 +131,21 @@ pub struct EventContext<'a> {
 }
 ```
 
-### WebSocket Middleware
-The framework uses `websocket_builder`'s middleware system. Built-in middleware handle various NIPs and features. The relay automatically sets up cryptographic verification via `CryptoHelper`.
+### Middleware Architecture
+The framework uses two middleware levels:
+1. **NostrMiddleware**: Protocol-level middleware for Nostr messages (implement this for cross-cutting concerns)
+2. **EventProcessor**: High-level business logic interface (implement this for most use cases)
+
+Event signature verification is handled automatically by EventIngester, not via middleware.
 
 ## Built-in Features
 
 - **NIPs Support**: 09 (deletion), 40 (expiration), 42 (auth for EVENT and REQ), 70 (protected)
 - **Multi-tenant**: Subdomain isolation via Scope
 - **Database**: StoreCommand enum for async database operations
-- **Crypto**: CryptoHelper handles signature verification internally
+- **Crypto**: EventIngester handles signature verification automatically
 - **State Management**: Generic per-connection state with type safety
+- **Performance**: ChainBlueprint → ConnectedChain transformation pre-allocates MessageSenders
 
 ## Common Patterns
 
@@ -220,7 +230,10 @@ cargo bench
 
 ## Performance Tips
 
-- The `can_see_event` method is synchronous, it's a hot path so keep it efficient if possible but of course, depends on your use case.
+- The `can_see_event` method is synchronous, it's a hot path so keep it efficient
+- Middleware chains use static dispatch for zero-cost abstractions
+- MessageSenders are pre-allocated per connection to avoid allocations in message processing
+- Arc-wrapped middlewares enable cheap cloning when building chains
 
 ## Production Deployment
 
@@ -241,10 +254,10 @@ Common patterns:
 ## Dependencies
 
 Core dependencies from Cargo.toml:
-- `websocket_builder` the abstraction that provides the middleware system
-- `nostr-sdk`, `nostr`, `nostr-database`, `nostr-lmdb` from verse-pbc/nostr fork
+- `websocket_builder` (workspace dependency) - Generic WebSocket transport layer
+- `nostr-sdk`, `nostr`, `nostr-database`, `nostr-lmdb` - Nostr protocol support
+- `scoped-heed` - Multi-tenant LMDB support
 - `tokio` with full features
-- `async-trait = "0.1.82"`
 - `axum` for web server integration
 
 ## Example Applications
