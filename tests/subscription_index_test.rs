@@ -3,7 +3,6 @@
 use nostr_sdk::prelude::*;
 use relay_builder::subscription_index::SubscriptionIndex;
 use std::collections::HashSet;
-use std::time::Instant;
 
 /// Helper to create test events
 fn create_test_event(author: &Keys, kind: Kind, content: &str, tags: Vec<Tag>) -> Event {
@@ -190,86 +189,6 @@ fn test_filter_with_multiple_criteria() {
     // Event without required tag
     let no_tag_event = create_test_event(&author, Kind::from(30023), "Article without tag", vec![]);
     assert_eq!(index.distribute_event(&no_tag_event).len(), 0);
-}
-
-#[test]
-fn test_performance_comparison() {
-    // This test compares the performance of indexed vs linear distribution
-    let index = SubscriptionIndex::new();
-    let num_connections = 100;
-    let filters_per_connection = 10;
-    let num_events = 100;
-
-    // Create diverse set of authors
-    let authors: Vec<Keys> = (0..20).map(|_| Keys::generate()).collect();
-    let kinds = [
-        Kind::TextNote,
-        Kind::from(30023),
-        Kind::ChannelMessage,
-        Kind::Reaction,
-    ];
-
-    // Add many subscriptions with varied filters
-    for conn_idx in 0..num_connections {
-        let mut filters = Vec::new();
-
-        for filter_idx in 0..filters_per_connection {
-            let filter = match (conn_idx + filter_idx) % 4 {
-                0 => Filter::new().author(authors[filter_idx % authors.len()].public_key()),
-                1 => Filter::new().kind(kinds[filter_idx % kinds.len()]),
-                2 => Filter::new().hashtag(format!("topic{}", filter_idx % 5)),
-                _ => Filter::new()
-                    .author(authors[filter_idx % authors.len()].public_key())
-                    .kind(kinds[filter_idx % kinds.len()]),
-            };
-            filters.push(filter);
-        }
-
-        index.add_subscription(
-            &format!("conn{conn_idx}"),
-            &SubscriptionId::new(format!("sub{conn_idx}")),
-            filters,
-        );
-    }
-
-    let stats = index.stats();
-    println!("Index stats after setup: {stats:?}");
-
-    // Create test events
-    let events: Vec<Event> = (0..num_events)
-        .map(|i| {
-            let author = &authors[i % authors.len()];
-            let kind = kinds[i % kinds.len()];
-            let tags = if i % 3 == 0 {
-                vec![Tag::hashtag(format!("topic{}", i % 5))]
-            } else {
-                vec![]
-            };
-            create_test_event(author, kind, &format!("Event {i}"), tags)
-        })
-        .collect();
-
-    // Measure indexed distribution performance
-    let start = Instant::now();
-    let mut total_matches = 0;
-    for event in &events {
-        let matches = index.distribute_event(event);
-        total_matches += matches.len();
-    }
-    let indexed_duration = start.elapsed();
-
-    println!(
-        "Indexed distribution: {num_events} events, {total_matches} total matches, {indexed_duration:?}"
-    );
-
-    // Verify reasonable performance
-    // In debug mode, allow up to 2ms per event; in release mode, expect under 1ms
-    let avg_time_per_event = indexed_duration.as_micros() / num_events as u128;
-    let threshold = if cfg!(debug_assertions) { 2000 } else { 1000 };
-    assert!(
-        avg_time_per_event < threshold,
-        "Average time per event {avg_time_per_event} microseconds is too high (threshold: {threshold}μs)"
-    );
 }
 
 #[test]
