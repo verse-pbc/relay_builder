@@ -8,10 +8,13 @@ use axum::{
     Router,
 };
 use nostr_sdk::prelude::*;
-use relay_builder::RelayInfo;
+use relay_builder::{RelayInfo, WebSocketConfig};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use websocket_builder::{handle_upgrade, HandlerFactory, WebSocketUpgrade};
+use std::time::Duration;
+use websocket_builder::{
+    handle_upgrade_with_config, ConnectionConfig, HandlerFactory, WebSocketUpgrade,
+};
 
 /// Initialize tracing subscriber for examples
 pub fn init_logging() {
@@ -33,18 +36,47 @@ pub fn create_root_handler<F>(
 where
     F: HandlerFactory + Send + Sync + 'static,
 {
+    create_root_handler_with_config(handler_factory, relay_info, WebSocketConfig::default())
+}
+
+/// Create the root handler with WebSocket configuration
+pub fn create_root_handler_with_config<F>(
+    handler_factory: Arc<F>,
+    relay_info: RelayInfo,
+    ws_config: WebSocketConfig,
+) -> impl Fn(
+    Option<WebSocketUpgrade>,
+    axum::extract::ConnectInfo<SocketAddr>,
+    axum::http::HeaderMap,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send>>
+       + Clone
+       + Send
+       + 'static
+where
+    F: HandlerFactory + Send + Sync + 'static,
+{
+    // Convert WebSocketConfig to websocket_builder's ConnectionConfig
+    let connection_config = ConnectionConfig {
+        max_connections: ws_config.max_connections,
+        max_connection_duration: ws_config.max_connection_duration.map(Duration::from_secs),
+        idle_timeout: ws_config.idle_timeout.map(Duration::from_secs),
+    };
+
     move |ws: Option<WebSocketUpgrade>,
           axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
           headers: axum::http::HeaderMap| {
         let handler_factory = handler_factory.clone();
         let relay_info = relay_info.clone();
+        let connection_config = connection_config.clone();
 
         Box::pin(async move {
             match ws {
                 Some(ws) => {
-                    // Handle WebSocket upgrade
+                    // Handle WebSocket upgrade with config
                     let handler = handler_factory.create(&headers);
-                    handle_upgrade(ws, addr, handler).await.into_response()
+                    handle_upgrade_with_config(ws, addr, handler, connection_config)
+                        .await
+                        .into_response()
                 }
                 None => {
                     // Check for NIP-11 JSON request

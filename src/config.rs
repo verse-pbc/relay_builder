@@ -66,8 +66,10 @@ impl ScopeConfig {
 pub struct WebSocketConfig {
     /// Maximum number of concurrent connections
     pub max_connections: Option<usize>,
-    /// Maximum connection time in seconds
-    pub max_connection_time: Option<u64>,
+    /// Maximum connection duration in seconds
+    pub max_connection_duration: Option<u64>,
+    /// Idle timeout in seconds - disconnects after period of inactivity
+    pub idle_timeout: Option<u64>,
 }
 
 /// Database configuration - either a path or an existing database instance
@@ -246,9 +248,15 @@ impl RelayConfig {
         self
     }
 
-    /// Set the maximum connection time in seconds
-    pub fn with_max_connection_time(mut self, seconds: u64) -> Self {
-        self.websocket_config.max_connection_time = Some(seconds);
+    /// Set the maximum connection duration in seconds
+    pub fn with_max_connection_duration(mut self, seconds: u64) -> Self {
+        self.websocket_config.max_connection_duration = Some(seconds);
+        self
+    }
+
+    /// Set the idle timeout in seconds
+    pub fn with_idle_timeout(mut self, seconds: u64) -> Self {
+        self.websocket_config.idle_timeout = Some(seconds);
         self
     }
 

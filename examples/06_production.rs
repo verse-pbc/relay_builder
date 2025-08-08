@@ -23,9 +23,12 @@ use relay_builder::{RelayBuilder, RelayConfig, RelayInfo, WebSocketConfig};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
-use websocket_builder::{handle_upgrade, HandlerFactory, WebSocketUpgrade};
+use websocket_builder::{
+    handle_upgrade_with_config, ConnectionConfig, HandlerFactory, WebSocketUpgrade,
+};
 
 /// Health check endpoint
 async fn health(State(counter): State<Arc<AtomicUsize>>) -> String {
@@ -47,10 +50,12 @@ async fn main() -> Result<()> {
     config = config.with_subscription_limits(100, 1000); // max 100 subs, 1000 events per query
 
     // WebSocket configuration
-    config = config.with_websocket_config(WebSocketConfig {
+    let ws_config = WebSocketConfig {
         max_connections: Some(1000),
-        max_connection_time: Some(3600), // 1 hour
-    });
+        max_connection_duration: Some(3600), // 1 hour hard limit
+        idle_timeout: Some(300),             // 5 minutes idle timeout
+    };
+    config = config.with_websocket_config(ws_config.clone());
 
     // Relay information
     let relay_info = RelayInfo {
@@ -82,6 +87,13 @@ async fn main() -> Result<()> {
             .await?,
     );
 
+    // Convert WebSocketConfig to ConnectionConfig for websocket_builder
+    let connection_config = ConnectionConfig {
+        max_connections: ws_config.max_connections,
+        max_connection_duration: ws_config.max_connection_duration.map(Duration::from_secs),
+        idle_timeout: ws_config.idle_timeout.map(Duration::from_secs),
+    };
+
     // Create a handler that supports WebSocket, NIP-11, and health check
     let relay_info_clone = relay_info.clone();
     let connection_counter_clone = connection_counter.clone();
@@ -92,13 +104,14 @@ async fn main() -> Result<()> {
                            headers: axum::http::HeaderMap| {
         let handler_factory = handler_factory.clone();
         let relay_info = relay_info_clone.clone();
+        let connection_config = connection_config.clone();
 
         async move {
             match ws {
                 Some(ws) => {
-                    // Handle WebSocket upgrade
+                    // Handle WebSocket upgrade with timeout configuration
                     let handler = handler_factory.create(&headers);
-                    handle_upgrade(ws, addr, handler).await
+                    handle_upgrade_with_config(ws, addr, handler, connection_config).await
                 }
                 None => {
                     // Check for NIP-11 JSON request
@@ -136,7 +149,7 @@ async fn main() -> Result<()> {
     println!("  ✅ Connection counting");
     println!("  ✅ Health endpoint");
     println!("  ✅ Subscription limits (100 subs, 1000 events/query)");
-    println!("  ✅ Connection limits (1000 max, 1hr timeout)");
+    println!("  ✅ Connection limits (1000 max, 1hr duration, 5min idle)");
     println!();
     println!("Reference: See groups_relay for advanced patterns like:");
     println!("  - PrometheusSubscriptionMetricsHandler");

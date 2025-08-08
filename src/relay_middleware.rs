@@ -488,7 +488,10 @@ where
                     {
                         Ok(()) => {}
                         Err(e) => {
-                            error!("Subscription error: {}", e);
+                            // Don't log Restricted errors here since they're already logged in state.rs
+                            if !matches!(e, Error::Restricted { .. }) {
+                                error!("Subscription error: {}", e);
+                            }
                             // Propagate the error up the chain so ErrorHandlingMiddleware can format it properly
                             return Err(e.into());
                         }
@@ -511,7 +514,10 @@ where
                     {
                         Ok(()) => {}
                         Err(e) => {
-                            error!("Subscription error: {}", e);
+                            // Don't log Restricted errors here since they're already logged in state.rs
+                            if !matches!(e, Error::Restricted { .. }) {
+                                error!("Subscription error: {}", e);
+                            }
                             // Propagate the error up the chain so ErrorHandlingMiddleware can format it properly
                             return Err(e.into());
                         }
