@@ -489,20 +489,44 @@ where
         let chain_with_relay = user_chain.with(relay_middleware);
 
         // Build the final chain with conditionally applied defaults using Either
+        use crate::middlewares::MetricsMiddleware;
         use crate::util::{Either, IdentityMiddleware};
 
         let final_chain = if self.without_defaults {
-            // Without defaults - use Either::Right (identity/no-op) for auth, error handling, and logger
-            chain_with_relay
+            // Without defaults - use Either::Right (identity/no-op) for metrics, auth, error handling, and logger
+            let chain_with_metrics = if self.enable_metrics {
+                if let Some(handler) = self.metrics_handler.clone() {
+                    chain_with_relay
+                        .with(Either::Left(MetricsMiddleware::with_arc_handler(handler)))
+                } else {
+                    chain_with_relay.with(Either::Right(IdentityMiddleware))
+                }
+            } else {
+                chain_with_relay.with(Either::Right(IdentityMiddleware))
+            };
+
+            chain_with_metrics
                 .with(Either::Right(IdentityMiddleware))
                 .with(Either::Right(IdentityMiddleware))
                 .with(Either::Right(IdentityMiddleware))
         } else {
-            // With defaults - add auth middleware if enabled
-            let chain_with_auth = if self.config.enable_auth {
-                chain_with_relay.with(Either::Left(Nip42Middleware::with_url(relay_url)))
+            // With defaults - add metrics middleware if enabled
+            let chain_with_metrics = if self.enable_metrics {
+                if let Some(handler) = self.metrics_handler.clone() {
+                    chain_with_relay
+                        .with(Either::Left(MetricsMiddleware::with_arc_handler(handler)))
+                } else {
+                    chain_with_relay.with(Either::Right(IdentityMiddleware))
+                }
             } else {
                 chain_with_relay.with(Either::Right(IdentityMiddleware))
+            };
+
+            // Then add auth middleware if enabled
+            let chain_with_auth = if self.config.enable_auth {
+                chain_with_metrics.with(Either::Left(Nip42Middleware::with_url(relay_url)))
+            } else {
+                chain_with_metrics.with(Either::Right(IdentityMiddleware))
             };
 
             // Then add error handling and logger as outermost layers

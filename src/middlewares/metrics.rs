@@ -91,6 +91,18 @@ impl<T> NostrMiddleware<T> for MetricsMiddleware<T>
 where
     T: Send + Sync + Clone + 'static,
 {
+    fn on_connect(
+        &self,
+        _ctx: crate::nostr_middleware::ConnectionContext<'_, T>,
+    ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
+        async move {
+            if let Some(handler) = &self.handler {
+                handler.increment_active_connections();
+            }
+            Ok(())
+        }
+    }
+
     fn process_inbound<Next>(
         &self,
         ctx: InboundContext<'_, T, Next>,
