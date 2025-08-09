@@ -37,8 +37,13 @@ pub async fn run_diagnostics(registry: Arc<SubscriptionRegistry>, interval_minut
     let mut interval = interval(Duration::from_secs(interval_minutes * 60));
     let mut previous = PreviousMeasurements::default();
 
-    // Skip the first immediate tick
-    interval.tick().await;
+    // Show initial diagnostics immediately
+    info!(
+        "Starting diagnostics with {}-minute interval",
+        interval_minutes
+    );
+    let diagnostics = registry.get_diagnostics();
+    log_health_check(&diagnostics, &mut previous);
 
     loop {
         interval.tick().await;

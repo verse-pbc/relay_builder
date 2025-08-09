@@ -85,6 +85,7 @@ where
             inbound_task: None,
             outbound_tx,
             outbound_rx,
+            connection_span: None,
         }
     }
 }
@@ -113,6 +114,8 @@ where
     outbound_tx: flume::Sender<(RelayMessage<'static>, usize, Option<String>)>,
     /// Receiver for outbound messages from middleware
     outbound_rx: flume::Receiver<(RelayMessage<'static>, usize, Option<String>)>,
+    /// Span for tracing this connection
+    connection_span: Option<tracing::Span>,
 }
 
 impl<T, Chain> WebSocketHandler for NostrConnection<T, Chain>
@@ -127,6 +130,21 @@ where
         sink: SplitSink<WebSocket, Message>,
     ) -> Result<()> {
         self.addr = Some(addr);
+
+        // Create a connection ID for tracking
+        let connection_id = uuid::Uuid::new_v4().to_string();
+
+        // Create span for this connection
+        let span = tracing::info_span!(
+            "websocket_connection",
+            connection_id = %connection_id,
+            ip = %addr,
+            subdomain = ?self.subdomain
+        );
+        let _enter = span.enter();
+
+        // Store the span for use in other methods
+        self.connection_span = Some(span.clone());
 
         let relay_url = RelayUrl::parse(&format!("ws://{addr}"))
             .unwrap_or_else(|_| RelayUrl::parse("ws://localhost").expect("Valid fallback URL"));
@@ -151,7 +169,9 @@ where
         let outbound_rx = self.outbound_rx.clone();
 
         // Spawn the outbound processing task
+        let outbound_span = span.clone();
         tokio::spawn(async move {
+            let _enter = outbound_span.enter();
             // Buffer size for ready chunks - adjust based on your needs
             let buffer_size = 10;
             let mut sink = sink;
@@ -226,7 +246,14 @@ where
 
                 for json in json_strings {
                     if let Err(e) = sink.send(Message::Text(json.into())).await {
-                        tracing::error!("Failed to send message: {}", e);
+                        // Use debug level for WebSocket errors after close/timeout
+                        if e.to_string().contains("Sending after closing")
+                            || e.to_string().contains("WebSocket protocol error")
+                        {
+                            tracing::debug!("WebSocket closed: {}", e);
+                        } else {
+                            tracing::error!("Failed to send message: {}", e);
+                        }
                         return; // Exit on error
                     }
                 }
@@ -249,6 +276,9 @@ where
     }
 
     async fn on_message(&mut self, text: Utf8Bytes) -> Result<()> {
+        // Enter the connection span for this message
+        let _guard = self.connection_span.as_ref().map(|s| s.enter());
+
         let Some(state) = &self.state else {
             return Err(anyhow::anyhow!("No connection state"));
         };
@@ -325,6 +355,9 @@ where
     }
 
     async fn on_disconnect(&mut self, reason: DisconnectReason) {
+        // Enter the connection span for disconnect
+        let _guard = self.connection_span.as_ref().map(|s| s.enter());
+
         tracing::debug!("Connection disconnected: {:?}", reason);
 
         if let (Some(state), Some(addr)) = (&self.state, &self.addr) {

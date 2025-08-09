@@ -549,7 +549,8 @@ where
         // Spawn diagnostics task if enabled
         if self.config.enable_diagnostics {
             tokio::spawn(async move {
-                crate::diagnostics::run_diagnostics(subscription_registry, 30).await;
+                // Use 1 minute interval for now (was 30 minutes)
+                crate::diagnostics::run_diagnostics(subscription_registry, 1).await;
             });
         }
 
