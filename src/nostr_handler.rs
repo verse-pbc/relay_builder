@@ -132,7 +132,9 @@ where
         self.addr = Some(addr);
 
         // Create span for this connection using IP:port as connection ID
+        // Use parent: None to ensure this is a root span and doesn't accumulate
         let span = tracing::info_span!(
+            parent: None,
             "websocket_connection",
             ip = %addr,
             subdomain = ?self.subdomain
