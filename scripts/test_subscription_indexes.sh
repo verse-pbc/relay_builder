@@ -8,6 +8,24 @@ echo "Testing subscription indexes with relay: $RELAY_URL"
 echo "Creating 100 instances of 5 different filter types (500 connections total)..."
 echo ""
 
+# Function to cleanup all nak processes on exit
+cleanup() {
+    echo ""
+    echo "Cleaning up..."
+    pkill -f 'nak req' 2>/dev/null
+    sleep 1
+    remaining=$(pgrep -f "nak req" | wc -l)
+    if [ "$remaining" -gt 0 ]; then
+        echo "Force killing remaining $remaining nak processes..."
+        pkill -9 -f 'nak req' 2>/dev/null
+    fi
+    echo "Cleanup complete"
+    exit 0
+}
+
+# Trap various signals to ensure cleanup happens
+trap cleanup EXIT INT TERM
+
 # Function to create connections in background
 create_connections() {
     local filter_type=$1
@@ -59,15 +77,9 @@ echo ""
 echo "To stop all connections, run:"
 echo "  pkill -f 'nak req'"
 echo ""
-echo "Press Ctrl+C to exit (connections will continue in background)"
-echo "Or press Enter to kill all connections and exit"
+echo "Press Ctrl+C or Enter to stop all connections and exit"
 
 # Wait for user input
 read -r
 
-# Kill all nak connections
-echo "Killing all nak connections..."
-pkill -f 'nak req'
-sleep 1
-echo "Remaining nak processes: $(pgrep -f "nak req" | wc -l)"
-echo "Done!"
+# Cleanup will be called automatically by the trap
