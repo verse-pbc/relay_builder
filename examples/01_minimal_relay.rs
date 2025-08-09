@@ -39,7 +39,8 @@ async fn main() -> Result<()> {
         // Enable subdomain-based isolation
         // Use 2 for *.example.local (2 parts in base domain)
         // Use 3 for *.relay.example.com (3 parts in base domain)
-        .with_subdomains(2); // Enables subdomain isolation
+        .with_subdomains(2) // Enables subdomain isolation
+        .with_diagnostics(); // Enable health check logging
 
     // Create relay info for NIP-11
     let relay_info = common::create_relay_info(
