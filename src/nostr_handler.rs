@@ -27,16 +27,24 @@ pub struct NostrHandlerFactory<T, Chain> {
     event_ingester: EventIngester,
     /// Scope configuration for subdomain extraction
     scope_config: ScopeConfig,
+    /// Size for the outbound message channel
+    channel_size: usize,
     /// Phantom data for the custom state type
     _phantom: std::marker::PhantomData<T>,
 }
 
 impl<T, Chain> NostrHandlerFactory<T, Chain> {
-    pub fn new(chain: Chain, event_ingester: EventIngester, scope_config: ScopeConfig) -> Self {
+    pub fn new(
+        chain: Chain,
+        event_ingester: EventIngester,
+        scope_config: ScopeConfig,
+        channel_size: usize,
+    ) -> Self {
         Self {
             chain,
             event_ingester,
             scope_config,
+            channel_size,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -65,7 +73,7 @@ where
             None
         };
 
-        let (outbound_tx, outbound_rx) = flume::unbounded();
+        let (outbound_tx, outbound_rx) = flume::bounded(self.channel_size);
 
         NostrConnection {
             chain_blueprint: Some(self.chain.clone()),
@@ -342,6 +350,7 @@ pub trait IntoHandlerFactory<T, Chain> {
         self,
         event_ingester: EventIngester,
         scope_config: ScopeConfig,
+        channel_size: usize,
     ) -> NostrHandlerFactory<T, Chain>;
 }
 
@@ -355,8 +364,9 @@ where
         self,
         event_ingester: EventIngester,
         scope_config: ScopeConfig,
+        channel_size: usize,
     ) -> NostrHandlerFactory<T, Chain> {
-        NostrHandlerFactory::new(self.build(), event_ingester, scope_config)
+        NostrHandlerFactory::new(self.build(), event_ingester, scope_config, channel_size)
     }
 }
 

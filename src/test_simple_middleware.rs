@@ -26,7 +26,10 @@ mod tests {
         let keys = std::sync::Arc::new(nostr_sdk::Keys::generate());
         let event_ingester = crate::event_ingester::EventIngester::new(keys);
 
-        let _factory =
-            chain.into_handler_factory(event_ingester, crate::config::ScopeConfig::Disabled);
+        let _factory = chain.into_handler_factory(
+            event_ingester,
+            crate::config::ScopeConfig::Disabled,
+            10_000, // Default channel size for tests
+        );
     }
 }

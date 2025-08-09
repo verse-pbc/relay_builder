@@ -539,8 +539,20 @@ where
                 ))
         };
 
-        let handler_factory =
-            final_chain.into_handler_factory(event_ingester, self.config.scope_config.clone());
+        let channel_size = self.config.calculate_channel_size();
+        let handler_factory = final_chain.into_handler_factory(
+            event_ingester,
+            self.config.scope_config.clone(),
+            channel_size,
+        );
+
+        // Spawn diagnostics task if enabled
+        if self.config.enable_diagnostics {
+            tokio::spawn(async move {
+                crate::diagnostics::run_diagnostics(subscription_registry, 30).await;
+            });
+        }
+
         Ok(handler_factory)
     }
 }

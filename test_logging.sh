@@ -1,0 +1,12 @@
+#\!/bin/bash
+echo "Testing improved channel error logging..."
+echo ""
+echo "When channel is full (slow client):"
+echo "  WARN: Channel full - client too slow to consume messages"
+echo ""
+echo "When channel is disconnected (client closed connection):"
+echo "  DEBUG: Channel disconnected - connection closed"
+echo ""
+echo "This helps diagnose whether clients are being disconnected due to:"
+echo "  1. Being too slow (channel full) - performance issue"
+echo "  2. Normal disconnection (channel disconnected) - expected behavior"
