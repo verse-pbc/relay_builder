@@ -134,7 +134,7 @@ where
         // Create span for this connection using IP:port as connection ID
         let span = tracing::info_span!(
             "websocket_connection",
-            connection = %addr,
+            ip = %addr,
             subdomain = ?self.subdomain
         );
         let _enter = span.enter();
