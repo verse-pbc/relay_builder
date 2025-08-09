@@ -15,6 +15,14 @@
 //!   nak req --stream ws://test.example.local:8080
 //! Events sent to one subdomain will only be visible to that subdomain's subscribers.
 
+// Use jemalloc for better performance (when available)
+#[cfg(all(not(target_env = "musl"), feature = "jemalloc"))]
+use tikv_jemallocator::Jemalloc;
+
+#[cfg(all(not(target_env = "musl"), feature = "jemalloc"))]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+
 mod common;
 
 use anyhow::Result;
@@ -39,7 +47,8 @@ async fn main() -> Result<()> {
         // Enable subdomain-based isolation
         // Use 2 for *.example.local (2 parts in base domain)
         // Use 3 for *.relay.example.com (3 parts in base domain)
-        .with_subdomains(2); // Enables subdomain isolation
+        .with_subdomains(2) // Enables subdomain isolation
+        .with_diagnostics(); // Enable health check logging
 
     // Create relay info for NIP-11
     let relay_info = common::create_relay_info(
@@ -58,6 +67,6 @@ async fn main() -> Result<()> {
     // Create HTTP server
     let app = Router::new().route("/", get(root_handler));
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
+    let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
     common::run_relay_server(app, addr, "Minimal relay").await
 }

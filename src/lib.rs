@@ -20,6 +20,7 @@
 pub mod config;
 pub mod crypto_helper;
 pub mod database;
+pub mod diagnostics;
 pub mod error;
 pub mod event_ingester;
 pub mod event_processor;

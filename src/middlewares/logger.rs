@@ -6,6 +6,7 @@ use crate::nostr_middleware::{
 use anyhow::Result;
 use nostr_lmdb::Scope;
 use nostr_sdk::prelude::*;
+use std::sync::Arc;
 use tracing::{debug, info_span};
 
 /// Middleware that logs all incoming and outgoing messages
@@ -30,16 +31,13 @@ impl<T> LoggerMiddleware<T> {
     /// Extract subdomain from connection state
     fn extract_subdomain(
         state: &parking_lot::RwLock<crate::state::NostrConnectionState<T>>,
-    ) -> Option<String> {
+    ) -> Arc<Scope> {
         let state_guard = state.read();
-        match state_guard.subdomain.as_ref() {
-            Scope::Named { name, .. } => Some(name.to_string()),
-            Scope::Default => None,
-        }
+        Arc::clone(&state_guard.subdomain)
     }
 
     /// Create a span with connection context
-    fn create_connection_span(connection_id: &str, subdomain: Option<&String>) -> tracing::Span {
+    fn create_connection_span(connection_id: &str, subdomain: &Scope) -> tracing::Span {
         info_span!(
             parent: None,
             "websocket_connection",
@@ -65,8 +63,7 @@ where
             let subdomain = Self::extract_subdomain(ctx.state);
 
             // Create a span with connection ID and subdomain to ensure logs always have context
-            let connection_span =
-                Self::create_connection_span(ctx.connection_id, subdomain.as_ref());
+            let connection_span = Self::create_connection_span(ctx.connection_id, &subdomain);
             let _guard = connection_span.enter();
 
             match ctx.message.as_ref() {
@@ -121,8 +118,7 @@ where
             let subdomain = Self::extract_subdomain(ctx.state);
 
             // Create a span with connection ID and subdomain to ensure logs always have context
-            let connection_span =
-                Self::create_connection_span(ctx.connection_id, subdomain.as_ref());
+            let connection_span = Self::create_connection_span(ctx.connection_id, &subdomain);
             let _guard = connection_span.enter();
 
             if let Some(msg_ref) = ctx.message.as_ref() {
@@ -180,8 +176,7 @@ where
             let subdomain = Self::extract_subdomain(ctx.state);
 
             // Create a span with connection ID and subdomain to ensure logs always have context
-            let connection_span =
-                Self::create_connection_span(ctx.connection_id, subdomain.as_ref());
+            let connection_span = Self::create_connection_span(ctx.connection_id, &subdomain);
             let _guard = connection_span.enter();
 
             debug!("Disconnected from relay");

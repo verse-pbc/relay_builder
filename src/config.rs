@@ -122,6 +122,8 @@ pub struct RelayConfig {
     pub max_limit: usize,
     /// Maximum number of LMDB readers (default: 126)
     pub max_readers: Option<u32>,
+    /// Enable diagnostic logging (every 30 minutes)
+    pub enable_diagnostics: bool,
 }
 
 impl RelayConfig {
@@ -142,6 +144,7 @@ impl RelayConfig {
             max_subscriptions: 50,
             max_limit: 5000,
             max_readers: None,
+            enable_diagnostics: false,
         }
     }
 
@@ -282,6 +285,12 @@ impl RelayConfig {
     /// Set the maximum number of LMDB readers
     pub fn with_max_readers(mut self, max_readers: u32) -> Self {
         self.max_readers = Some(max_readers);
+        self
+    }
+
+    /// Enable diagnostic logging (health checks every 30 minutes)
+    pub fn with_diagnostics(mut self) -> Self {
+        self.enable_diagnostics = true;
         self
     }
 

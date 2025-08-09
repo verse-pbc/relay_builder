@@ -57,7 +57,10 @@ mod test_channel_overflow {
 
         // The error should occur because send_bypass uses try_send
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Failed to send event"));
+        // The error message should indicate channel is full (since we're overflowing it)
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("Channel full") || error_msg.contains("Failed to send event"),
+                "Error message should indicate channel full or failed send: {}", error_msg);
     }
 
     /// Test simulating slow WebSocket consumer

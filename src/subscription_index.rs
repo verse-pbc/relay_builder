@@ -540,6 +540,13 @@ impl SubscriptionIndex {
 
     /// Get statistics about the index
     pub fn stats(&self) -> IndexStats {
+        // Count tracked events (filters that have seen at least one event)
+        let tracked_events = self
+            .all_filters
+            .iter()
+            .filter(|entry| entry.value().last_seen_event_id.read().is_some())
+            .count();
+
         IndexStats {
             total_filters: self.all_filters.len(),
             total_subscriptions: self.filter_groups.len(),
@@ -547,6 +554,7 @@ impl SubscriptionIndex {
             kinds_indexed: self.kinds.read().len(),
             event_ids_indexed: self.event_ids.read().len(),
             tags_indexed: self.tags.read().values().map(|m| m.len()).sum(),
+            tracked_events,
         }
     }
 }
@@ -560,6 +568,7 @@ pub struct IndexStats {
     pub kinds_indexed: usize,
     pub event_ids_indexed: usize,
     pub tags_indexed: usize,
+    pub tracked_events: usize,
 }
 
 #[cfg(test)]

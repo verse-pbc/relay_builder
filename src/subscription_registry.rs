@@ -16,7 +16,29 @@ use nostr_sdk::prelude::*;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, trace, warn};
+
+/// Diagnostic information for a single scope
+#[derive(Debug, Clone)]
+pub struct ScopeDiagnostics {
+    pub scope: Scope,
+    pub connection_count: usize,
+    pub subscription_count: usize,
+    pub filter_count: usize,
+    pub tracked_events: usize,
+    pub authors_indexed: usize,
+    pub kinds_indexed: usize,
+    pub event_ids_indexed: usize,
+    pub tags_indexed: usize,
+}
+
+/// Overall registry diagnostics
+#[derive(Debug, Clone)]
+pub struct RegistryDiagnostics {
+    pub total_connections: usize,
+    pub scope_diagnostics: Vec<ScopeDiagnostics>,
+    pub empty_scopes: Vec<Scope>,
+}
 
 /// Trait for distributing events to subscribers
 pub trait EventDistributor: Send + Sync {
@@ -224,7 +246,7 @@ impl SubscriptionRegistry {
     /// Clean up a connection and all its subscriptions
     /// This is used both by Drop handler and when removing dead connections
     pub fn cleanup_connection(&self, connection_id: &str) {
-        info!("Cleaning up connection {}", connection_id);
+        debug!("Cleaning up connection {}", connection_id);
 
         // Get subscription IDs and scope before removing the connection
         let cleanup_info = if let Some(connection) = self.connections.get(connection_id) {
@@ -233,7 +255,7 @@ impl SubscriptionRegistry {
             let ids: Vec<SubscriptionId> = subscriptions.keys().cloned().collect();
             let count = ids.len();
             drop(subscriptions);
-            info!(
+            debug!(
                 "Connection {} has {} subscriptions to clean up",
                 connection_id, count
             );
@@ -261,7 +283,7 @@ impl SubscriptionRegistry {
             if let Some(handler) = &self.metrics_handler {
                 if count > 0 {
                     handler.decrement_active_subscriptions(count);
-                    info!(
+                    debug!(
                         "Successfully decremented {} subscriptions for cleaned up connection {}",
                         count, connection_id
                     );
@@ -272,6 +294,65 @@ impl SubscriptionRegistry {
 }
 
 impl SubscriptionRegistry {
+    /// Collect diagnostic information about the registry
+    pub fn get_diagnostics(&self) -> RegistryDiagnostics {
+        let mut scope_diagnostics = Vec::new();
+
+        // Collect per-scope information
+        for index_entry in self.indexes.iter() {
+            let scope = index_entry.key().clone();
+            let index = index_entry.value();
+            let index_stats = index.stats();
+
+            // Count connections for this scope
+            let connection_count = self
+                .connections
+                .iter()
+                .filter(|conn| conn.subdomain.as_ref() == &scope)
+                .count();
+
+            // Count total subscriptions for this scope
+            let subscription_count = self
+                .connections
+                .iter()
+                .filter(|conn| conn.subdomain.as_ref() == &scope)
+                .map(|conn| conn.subscriptions.read().len())
+                .sum();
+
+            scope_diagnostics.push(ScopeDiagnostics {
+                scope: scope.clone(),
+                connection_count,
+                subscription_count,
+                filter_count: index_stats.total_filters,
+                tracked_events: index_stats.tracked_events,
+                authors_indexed: index_stats.authors_indexed,
+                kinds_indexed: index_stats.kinds_indexed,
+                event_ids_indexed: index_stats.event_ids_indexed,
+                tags_indexed: index_stats.tags_indexed,
+            });
+        }
+
+        // Check for empty scopes (has index but no connections)
+        let empty_scopes: Vec<Scope> = self
+            .indexes
+            .iter()
+            .filter(|entry| {
+                let scope = entry.key();
+                !self
+                    .connections
+                    .iter()
+                    .any(|conn| conn.subdomain.as_ref() == scope)
+            })
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        RegistryDiagnostics {
+            total_connections: self.connections.len(),
+            scope_diagnostics,
+            empty_scopes,
+        }
+    }
+
     /// Indexed event distribution using strfry optimization
     fn distribute_event_indexed(&self, event: &Arc<Event>, scope: &Scope) {
         trace!(
@@ -344,8 +425,21 @@ impl SubscriptionRegistry {
             };
 
             if let Err(e) = send_result {
-                // Connection is dead, mark for removal
-                warn!("Failed to send to connection {}: {:?}", conn_id, e);
+                // Check the type of error to log appropriately
+                let error_str = e.to_string();
+                if error_str.contains("Channel full") {
+                    warn!(
+                        "Channel full for connection {} - client too slow, marking for removal",
+                        conn_id
+                    );
+                } else if error_str.contains("Channel disconnected") {
+                    debug!(
+                        "Channel disconnected for connection {} - connection already closed",
+                        conn_id
+                    );
+                } else {
+                    warn!("Failed to send to connection {}: {}", conn_id, e);
+                }
                 dead_connections.push(conn_id);
             } else {
                 trace!("Sent event to subscription on connection {}", conn_id);

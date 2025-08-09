@@ -1,24 +1,33 @@
-# Build stage - compile for Linux
-FROM rust:1.82-alpine AS builder
-RUN apk add --no-cache musl-dev openssl-dev pkgconfig
-WORKDIR /app
+# Build stage - compile for Linux with all optimizations
+# Use Debian for jemalloc compatibility on ARM64
+FROM rust:1.88-bookworm AS builder
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
 
-# Copy only necessary files for building
-COPY Cargo.toml Cargo.lock ./
-COPY src ./src
-COPY examples ./examples
-COPY ../websocket_builder ../websocket_builder
+# Copy the source code from the monorepo structure
+# This Dockerfile should be built from the relay_repos directory with:
+# docker build -f relay_builder/Dockerfile.benchmark -t relay-benchmark .
+COPY relay_builder/ ./relay_builder/
+COPY websocket_builder/ ./websocket_builder/
 
-# Build with optimizations for Linux
-RUN RUSTFLAGS="-C target-cpu=native -C opt-level=3 -C codegen-units=1"     cargo build --release --example 01_minimal_relay --features axum
+# Build with optimizations for native architecture WITH jemalloc
+WORKDIR /build/relay_builder
+RUN RUSTFLAGS="-C target-cpu=native -C opt-level=3 -C codegen-units=1" \
+    cargo build --release --example 01_minimal_relay \
+    --features axum,jemalloc
 
-# Runtime stage
-FROM alpine:3.18
-RUN apk add --no-cache libgcc
+# Runtime stage - use debian slim with glibc for jemalloc support
+# Use native platform to avoid emulation
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
 # Copy the Linux binary from builder
-COPY --from=builder /app/target/release/examples/01_minimal_relay /app/minimal_relay
+COPY --from=builder /build/relay_builder/target/release/examples/01_minimal_relay /app/minimal_relay
 RUN mkdir -p /app/relay-data
 
 EXPOSE 8080

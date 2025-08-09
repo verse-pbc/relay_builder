@@ -29,7 +29,16 @@ impl MessageSender {
         // Tag message with our position so outbound processing knows where it came from
         self.sender
             .try_send((message, self.position, None))
-            .map_err(|e| anyhow::anyhow!("Failed to send message: {:?}", e))
+            .map_err(|e| match e {
+                flume::TrySendError::Full(_) => {
+                    tracing::warn!("Channel full - client too slow to consume messages");
+                    anyhow::anyhow!("Channel full - client too slow")
+                }
+                flume::TrySendError::Disconnected(_) => {
+                    tracing::debug!("Channel disconnected - connection closed");
+                    anyhow::anyhow!("Channel disconnected")
+                }
+            })
     }
 
     /// Send a message bypassing this middleware's outbound processing
@@ -43,7 +52,16 @@ impl MessageSender {
         };
         self.sender
             .try_send((message, bypass_position, None))
-            .map_err(|e| anyhow::anyhow!("Failed to send message: {:?}", e))
+            .map_err(|e| match e {
+                flume::TrySendError::Full(_) => {
+                    tracing::warn!("Channel full - client too slow to consume messages (bypass)");
+                    anyhow::anyhow!("Channel full - client too slow")
+                }
+                flume::TrySendError::Disconnected(_) => {
+                    tracing::debug!("Channel disconnected - connection closed (bypass)");
+                    anyhow::anyhow!("Channel disconnected")
+                }
+            })
     }
 
     /// Send a message with pre-serialized JSON for RelayMessage::Event
@@ -55,7 +73,18 @@ impl MessageSender {
     ) -> Result<(), anyhow::Error> {
         self.sender
             .try_send((message, self.position, Some(json)))
-            .map_err(|e| anyhow::anyhow!("Failed to send message: {:?}", e))
+            .map_err(|e| match e {
+                flume::TrySendError::Full(_) => {
+                    tracing::warn!(
+                        "Channel full - client too slow to consume messages (with JSON)"
+                    );
+                    anyhow::anyhow!("Channel full - client too slow")
+                }
+                flume::TrySendError::Disconnected(_) => {
+                    tracing::debug!("Channel disconnected - connection closed (with JSON)");
+                    anyhow::anyhow!("Channel disconnected")
+                }
+            })
     }
 
     /// Get the raw sender (for advanced use cases)

@@ -12,8 +12,9 @@ readme = "README.md"
 exclude = ["assets/", "*.json", ".github/"]
 
 [features]
-default = []
+default = ["jemalloc"]
 axum = []  # Feature flag exists for compatibility but axum is always included
+jemalloc = ["dep:tikv-jemallocator"]
 
 [dependencies]
 websocket_builder = { git = "https://github.com/verse-pbc/websocket_builder" }
@@ -48,8 +49,8 @@ hex = "0.4.3"
 heed = { version = "0.20", default-features = false, features = ["read-txn-no-tls"] }
 twox-hash = "1.6"
 thiserror = "2.0"
-
-# Dependencies for the built-in server
+tikv-jemallocator = { version = "0.6", optional = true }
+url = "2.5"
 axum = { version = "0.8", features = ["ws", "http1"] }
 axum-server = { version = "0.6" }
 tower-http = { version = "0.6.2", features = ["trace", "cors", "fs"] }

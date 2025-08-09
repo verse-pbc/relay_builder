@@ -27,16 +27,24 @@ pub struct NostrHandlerFactory<T, Chain> {
     event_ingester: EventIngester,
     /// Scope configuration for subdomain extraction
     scope_config: ScopeConfig,
+    /// Size for the outbound message channel
+    channel_size: usize,
     /// Phantom data for the custom state type
     _phantom: std::marker::PhantomData<T>,
 }
 
 impl<T, Chain> NostrHandlerFactory<T, Chain> {
-    pub fn new(chain: Chain, event_ingester: EventIngester, scope_config: ScopeConfig) -> Self {
+    pub fn new(
+        chain: Chain,
+        event_ingester: EventIngester,
+        scope_config: ScopeConfig,
+        channel_size: usize,
+    ) -> Self {
         Self {
             chain,
             event_ingester,
             scope_config,
+            channel_size,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -65,7 +73,7 @@ where
             None
         };
 
-        let (outbound_tx, outbound_rx) = flume::unbounded();
+        let (outbound_tx, outbound_rx) = flume::bounded(self.channel_size);
 
         NostrConnection {
             chain_blueprint: Some(self.chain.clone()),
@@ -75,8 +83,10 @@ where
             state: None,
             addr: None,
             inbound_task: None,
+            outbound_task: None,
             outbound_tx,
             outbound_rx,
+            connection_span: None,
         }
     }
 }
@@ -101,10 +111,14 @@ where
     addr: Option<SocketAddr>,
     /// Handle to the inbound processing task
     inbound_task: Option<tokio::task::JoinHandle<()>>,
+    /// Handle to the outbound processing task
+    outbound_task: Option<tokio::task::JoinHandle<()>>,
     /// Sender for outbound messages from middleware (with index tracking and optional pre-serialized JSON)
     outbound_tx: flume::Sender<(RelayMessage<'static>, usize, Option<String>)>,
     /// Receiver for outbound messages from middleware
     outbound_rx: flume::Receiver<(RelayMessage<'static>, usize, Option<String>)>,
+    /// Span for tracing this connection
+    connection_span: Option<tracing::Span>,
 }
 
 impl<T, Chain> WebSocketHandler for NostrConnection<T, Chain>
@@ -119,6 +133,19 @@ where
         sink: SplitSink<WebSocket, Message>,
     ) -> Result<()> {
         self.addr = Some(addr);
+
+        // Create span for this connection using IP:port as connection ID
+        // Use parent: None to ensure this is a root span and doesn't accumulate
+        let span = tracing::info_span!(
+            parent: None,
+            "websocket_connection",
+            ip = %addr,
+            subdomain = ?self.subdomain
+        );
+        let _enter = span.enter();
+
+        // Store the span for use in other methods
+        self.connection_span = Some(span.clone());
 
         let relay_url = RelayUrl::parse(&format!("ws://{addr}"))
             .unwrap_or_else(|_| RelayUrl::parse("ws://localhost").expect("Valid fallback URL"));
@@ -143,7 +170,11 @@ where
         let outbound_rx = self.outbound_rx.clone();
 
         // Spawn the outbound processing task
-        tokio::spawn(async move {
+        let outbound_span = span.clone();
+        let debug_addr = addr.to_string();
+        let outbound_task = tokio::spawn(async move {
+            let _enter = outbound_span.enter();
+            tracing::debug!("Outbound task started for {}", debug_addr);
             // Buffer size for ready chunks - adjust based on your needs
             let buffer_size = 10;
             let mut sink = sink;
@@ -218,12 +249,23 @@ where
 
                 for json in json_strings {
                     if let Err(e) = sink.send(Message::Text(json.into())).await {
-                        tracing::error!("Failed to send message: {}", e);
+                        // Use debug level for WebSocket errors after close/timeout
+                        if e.to_string().contains("Sending after closing")
+                            || e.to_string().contains("WebSocket protocol error")
+                        {
+                            tracing::debug!("WebSocket closed: {}", e);
+                        } else {
+                            tracing::error!("Failed to send message: {}", e);
+                        }
                         return; // Exit on error
                     }
                 }
             }
+            tracing::debug!("Outbound task exiting for {}", debug_addr);
         });
+
+        // Store the task handle so we can abort it on disconnect
+        self.outbound_task = Some(outbound_task);
 
         // Now that the outbound task is running, call on_connect on all middlewares
         // They can safely send messages now
@@ -241,6 +283,9 @@ where
     }
 
     async fn on_message(&mut self, text: Utf8Bytes) -> Result<()> {
+        // Enter the connection span for this message
+        let _guard = self.connection_span.as_ref().map(|s| s.enter());
+
         let Some(state) = &self.state else {
             return Err(anyhow::anyhow!("No connection state"));
         };
@@ -317,6 +362,9 @@ where
     }
 
     async fn on_disconnect(&mut self, reason: DisconnectReason) {
+        // Enter the connection span for disconnect
+        let _guard = self.connection_span.as_ref().map(|s| s.enter());
+
         tracing::debug!("Connection disconnected: {:?}", reason);
 
         if let (Some(state), Some(addr)) = (&self.state, &self.addr) {
@@ -332,6 +380,12 @@ where
         if let Some(task) = self.inbound_task.take() {
             task.abort();
         }
+
+        // Cancel outbound task if running
+        if let Some(task) = self.outbound_task.take() {
+            task.abort();
+            tracing::debug!("Aborted outbound task on disconnect");
+        }
     }
 }
 
@@ -342,6 +396,7 @@ pub trait IntoHandlerFactory<T, Chain> {
         self,
         event_ingester: EventIngester,
         scope_config: ScopeConfig,
+        channel_size: usize,
     ) -> NostrHandlerFactory<T, Chain>;
 }
 
@@ -355,8 +410,9 @@ where
         self,
         event_ingester: EventIngester,
         scope_config: ScopeConfig,
+        channel_size: usize,
     ) -> NostrHandlerFactory<T, Chain> {
-        NostrHandlerFactory::new(self.build(), event_ingester, scope_config)
+        NostrHandlerFactory::new(self.build(), event_ingester, scope_config, channel_size)
     }
 }
 

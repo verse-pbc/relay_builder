@@ -10,7 +10,6 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::Duration;
 use tracing::{debug, error};
-use url::Url;
 
 /// Configuration for NIP-42 authentication
 #[derive(Debug, Clone)]
@@ -55,7 +54,7 @@ impl<T> Nip42Middleware<T> {
 
     // Extract the host from a URL
     fn extract_host_from_url(&self, url_str: &str) -> Option<String> {
-        match Url::parse(url_str) {
+        match url::Url::parse(url_str) {
             Ok(url) => url.host_str().map(|s| s.to_string()),
             Err(_) => None,
         }
