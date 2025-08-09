@@ -131,14 +131,10 @@ where
     ) -> Result<()> {
         self.addr = Some(addr);
 
-        // Create a connection ID for tracking
-        let connection_id = uuid::Uuid::new_v4().to_string();
-
-        // Create span for this connection
+        // Create span for this connection using IP:port as connection ID
         let span = tracing::info_span!(
             "websocket_connection",
-            connection_id = %connection_id,
-            ip = %addr,
+            connection = %addr,
             subdomain = ?self.subdomain
         );
         let _enter = span.enter();
