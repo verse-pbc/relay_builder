@@ -83,6 +83,7 @@ where
             state: None,
             addr: None,
             inbound_task: None,
+            outbound_task: None,
             outbound_tx,
             outbound_rx,
             connection_span: None,
@@ -110,6 +111,8 @@ where
     addr: Option<SocketAddr>,
     /// Handle to the inbound processing task
     inbound_task: Option<tokio::task::JoinHandle<()>>,
+    /// Handle to the outbound processing task
+    outbound_task: Option<tokio::task::JoinHandle<()>>,
     /// Sender for outbound messages from middleware (with index tracking and optional pre-serialized JSON)
     outbound_tx: flume::Sender<(RelayMessage<'static>, usize, Option<String>)>,
     /// Receiver for outbound messages from middleware
@@ -168,8 +171,10 @@ where
 
         // Spawn the outbound processing task
         let outbound_span = span.clone();
-        tokio::spawn(async move {
+        let debug_addr = addr.to_string();
+        let outbound_task = tokio::spawn(async move {
             let _enter = outbound_span.enter();
+            tracing::debug!("Outbound task started for {}", debug_addr);
             // Buffer size for ready chunks - adjust based on your needs
             let buffer_size = 10;
             let mut sink = sink;
@@ -256,7 +261,11 @@ where
                     }
                 }
             }
+            tracing::debug!("Outbound task exiting for {}", debug_addr);
         });
+
+        // Store the task handle so we can abort it on disconnect
+        self.outbound_task = Some(outbound_task);
 
         // Now that the outbound task is running, call on_connect on all middlewares
         // They can safely send messages now
@@ -370,6 +379,12 @@ where
         // Cancel inbound task if running
         if let Some(task) = self.inbound_task.take() {
             task.abort();
+        }
+
+        // Cancel outbound task if running
+        if let Some(task) = self.outbound_task.take() {
+            task.abort();
+            tracing::debug!("Aborted outbound task on disconnect");
         }
     }
 }
