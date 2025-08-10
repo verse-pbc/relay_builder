@@ -16,7 +16,7 @@ use nostr_sdk::prelude::*;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, trace, warn};
 
 /// Diagnostic information for a single scope
 #[derive(Debug, Clone)]
@@ -246,7 +246,7 @@ impl SubscriptionRegistry {
     /// Clean up a connection and all its subscriptions
     /// This is used both by Drop handler and when removing dead connections
     pub fn cleanup_connection(&self, connection_id: &str) {
-        info!("Cleaning up connection {}", connection_id);
+        debug!("Cleaning up connection {}", connection_id);
 
         // Get subscription IDs and scope before removing the connection
         let cleanup_info = if let Some(connection) = self.connections.get(connection_id) {
@@ -255,7 +255,7 @@ impl SubscriptionRegistry {
             let ids: Vec<SubscriptionId> = subscriptions.keys().cloned().collect();
             let count = ids.len();
             drop(subscriptions);
-            info!(
+            debug!(
                 "Connection {} has {} subscriptions to clean up",
                 connection_id, count
             );
@@ -283,7 +283,7 @@ impl SubscriptionRegistry {
             if let Some(handler) = &self.metrics_handler {
                 if count > 0 {
                     handler.decrement_active_subscriptions(count);
-                    info!(
+                    debug!(
                         "Successfully decremented {} subscriptions for cleaned up connection {}",
                         count, connection_id
                     );
