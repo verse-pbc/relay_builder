@@ -13,7 +13,6 @@ use futures_util::stream::{self, SplitSink, StreamExt};
 use futures_util::SinkExt;
 use nostr_lmdb::Scope;
 use nostr_sdk::prelude::*;
-use rayon::prelude::*;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use websocket_builder::{DisconnectReason, HandlerFactory, Utf8Bytes, WebSocketHandler};
@@ -238,16 +237,10 @@ where
                     }
                 }
 
-                // Serialize messages in parallel using rayon (only if not pre-serialized)
-                let json_strings: Vec<String> = processed_messages
-                    .into_par_iter()
-                    .map(|(message, pre_serialized)| {
-                        // Use pre-serialized JSON if available, otherwise serialize
-                        pre_serialized.unwrap_or_else(|| message.as_json())
-                    })
-                    .collect();
-
-                for json in json_strings {
+                // Serialize messages inline (no longer using rayon for better cache locality)
+                for (message, pre_serialized) in processed_messages {
+                    // Use pre-serialized JSON if available, otherwise serialize inline
+                    let json = pre_serialized.unwrap_or_else(|| message.as_json());
                     if let Err(e) = sink.send(Message::Text(json.into())).await {
                         // Use debug level for WebSocket errors after close/timeout
                         if e.to_string().contains("Sending after closing")
@@ -320,11 +313,6 @@ where
                     IngesterError::MessageTooLarge => {
                         let error_msg = RelayMessage::notice("Message size exceeds limit");
                         let _ = self.outbound_tx.send((error_msg, 0, None));
-                    }
-                    IngesterError::ChannelClosed => {
-                        // Log and return error for channel issues
-                        tracing::error!("EventIngester channel closed");
-                        return Err(anyhow::anyhow!("EventIngester channel closed"));
                     }
                 }
                 return Ok(());

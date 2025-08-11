@@ -1,15 +1,13 @@
-//! Event ingester for combined JSON parsing and signature verification
+//! Event ingester for inline JSON parsing and signature verification
 //!
-//! This module provides a high-performance ingester that combines JSON parsing
-//! and signature verification in a single thread pool, moving CPU-bound work
-//! off the I/O threads for better performance.
+//! This module provides an event ingester that performs JSON parsing
+//! and signature verification directly in the connection thread for
+//! better cache locality and reduced context switching.
 
 use nostr_sdk::prelude::*;
-use rayon::prelude::*;
 use std::borrow::Cow;
 use std::sync::Arc;
-use tokio::sync::oneshot;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 /// Error types specific to the ingester
 #[derive(Debug, thiserror::Error)]
@@ -25,25 +23,14 @@ pub enum IngesterError {
 
     #[error("Message size exceeds limit")]
     MessageTooLarge,
-
-    #[error("Ingester channel closed")]
-    ChannelClosed,
 }
 
-/// Request to process a message
-struct ProcessRequest {
-    text: String,
-    response: oneshot::Sender<std::result::Result<ClientMessage<'static>, IngesterError>>,
-}
-
-/// Event ingester that combines JSON parsing and signature verification
+/// Event ingester that performs inline JSON parsing and signature verification
 #[derive(Clone)]
 pub struct EventIngester {
     /// Keys for signing events (not used for verification, kept for compatibility)
     #[allow(dead_code)]
     keys: Arc<Keys>,
-    /// Channel for sending processing requests
-    process_sender: flume::Sender<ProcessRequest>,
 }
 
 impl std::fmt::Debug for EventIngester {
@@ -54,66 +41,33 @@ impl std::fmt::Debug for EventIngester {
 
 impl EventIngester {
     pub fn new(keys: Arc<Keys>) -> Self {
-        // Create processing channel with reasonable capacity
-        let (process_sender, process_receiver) = flume::bounded::<ProcessRequest>(10000);
-        // Spawn the processing thread
-        std::thread::spawn(move || {
-            Self::run_processor(&process_receiver);
-        });
-
-        Self {
-            keys,
-            process_sender,
-        }
+        Self { keys }
     }
 
-    /// Process a message (parse JSON and verify signature if it's an EVENT)
+    /// Process a message inline (parse JSON and verify signature if it's an EVENT)
+    /// This now runs directly in the connection thread for better performance
     pub async fn process_message(
         &self,
         text: String,
     ) -> std::result::Result<ClientMessage<'static>, IngesterError> {
-        // Create oneshot channel for response
-        let (tx, rx) = oneshot::channel();
-
-        // Send processing request
-        self.process_sender
-            .send(ProcessRequest { text, response: tx })
-            .map_err(|_| IngesterError::ChannelClosed)?;
-
-        // Wait for response asynchronously - clean and efficient!
-        rx.await.map_err(|_| IngesterError::ChannelClosed)?
-    }
-
-    /// Run the processor thread that handles parsing and verification
-    fn run_processor(receiver: &flume::Receiver<ProcessRequest>) {
-        #[cfg(debug_assertions)]
-        debug!("Event ingester processor started");
-
-        // Initialize rayon thread pool for CPU-bound work
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(num_cpus::get())
-            .thread_name(|idx| format!("ingester-{idx}"))
-            .build()
-            .expect("Failed to create rayon thread pool");
-
-        // Process messages one at a time to ensure fair distribution
-        pool.install(|| {
-            receiver.into_iter().par_bridge().for_each(|request| {
-                let ProcessRequest { text, response } = request;
-
-                // Process the message
-                let result = Self::process_single_message(&text);
-
-                // Send the result back (ignore send errors if receiver dropped)
-                let _ = response.send(result);
-            });
-        });
-
-        #[cfg(debug_assertions)]
-        debug!("Event ingester processor stopped");
+        // Check if we're in a multi-threaded runtime context
+        // block_in_place only works in multi-threaded runtime
+        if tokio::runtime::Handle::try_current()
+            .map(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+            .unwrap_or(false)
+        {
+            // Use tokio::task::block_in_place for CPU-intensive work in multi-threaded runtime
+            // This allows the tokio runtime to move other tasks to different threads
+            // while we do the CPU-intensive parsing and verification
+            tokio::task::block_in_place(move || Self::process_single_message(&text))
+        } else {
+            // In single-threaded runtime (like tests), just run directly
+            Ok(Self::process_single_message(&text)?)
+        }
     }
 
     /// Process a single message: parse JSON and verify signature if EVENT
+    /// This runs synchronously in the current thread
     fn process_single_message(
         text: &str,
     ) -> std::result::Result<ClientMessage<'static>, IngesterError> {
@@ -126,7 +80,6 @@ impl EventIngester {
         let msg = match ClientMessage::from_json(text) {
             Ok(msg) => msg,
             Err(e) => {
-                // We already have the text as &str, no need for UTF-8 conversion
                 warn!("Failed to parse client message: {}, error: {}", text, e);
                 return Err(IngesterError::JsonParseError(e.to_string()));
             }
