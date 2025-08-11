@@ -32,8 +32,12 @@ use relay_builder::{RelayBuilder, RelayConfig};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // Use the optimized runtime with CPU affinity
+    common::run_with_optimized_runtime(common::ServerConfig::default(), run_server)
+}
+
+async fn run_server() -> Result<()> {
     common::init_logging();
 
     // Create relay configuration
@@ -43,11 +47,17 @@ async fn main() -> Result<()> {
     //let relay_url = "ws://localhost:8080"; // Use this for no subdomain support
     let db_path = "./minimal_relay_db";
     let relay_keys = Keys::generate();
+
+    // Configure with CPU affinity for the database writer
+    let cpu_count = num_cpus::get();
+    let writer_cpu = cpu_count.saturating_sub(1);
+
     let config = RelayConfig::new(relay_url, db_path, relay_keys)
         // Enable subdomain-based isolation
         // Use 2 for *.example.local (2 parts in base domain)
         // Use 3 for *.relay.example.com (3 parts in base domain)
         .with_subdomains(2) // Enables subdomain isolation
+        .with_ingester_cpu_affinity(writer_cpu) // Pin database writer to dedicated CPU
         .with_diagnostics(); // Enable health check logging
 
     // Create relay info for NIP-11
@@ -68,5 +78,8 @@ async fn main() -> Result<()> {
     let app = Router::new().route("/", get(root_handler));
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
-    common::run_relay_server(app, addr, "Minimal relay").await
+
+    // Use the optimized server with SO_REUSEPORT and CPU affinity
+    common::run_relay_server_optimized(app, addr, "Minimal relay", common::ServerConfig::default())
+        .await
 }
