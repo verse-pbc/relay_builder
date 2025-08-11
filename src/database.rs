@@ -19,7 +19,7 @@ impl RelayDatabase {
     /// # Arguments
     /// * `db_path_param` - Path where the database should be stored
     pub fn new(db_path_param: impl AsRef<std::path::Path>) -> Result<Self, Error> {
-        Self::with_max_readers(db_path_param, None)
+        Self::with_config(db_path_param, None, None)
     }
 
     /// Create a new relay database with specified max_readers
@@ -30,6 +30,20 @@ impl RelayDatabase {
     pub fn with_max_readers(
         db_path_param: impl AsRef<std::path::Path>,
         max_readers: Option<u32>,
+    ) -> Result<Self, Error> {
+        Self::with_config(db_path_param, max_readers, None)
+    }
+
+    /// Create a new relay database with full configuration
+    ///
+    /// # Arguments
+    /// * `db_path_param` - Path where the database should be stored
+    /// * `max_readers` - Maximum number of LMDB readers (None uses default of 126)
+    /// * `ingester_thread_config` - Optional configuration to run on the ingester thread (e.g., CPU pinning)
+    pub fn with_config(
+        db_path_param: impl AsRef<std::path::Path>,
+        max_readers: Option<u32>,
+        ingester_thread_config: Option<Box<dyn FnOnce() + Send>>,
     ) -> Result<Self, Error> {
         let db_path = db_path_param.as_ref().to_path_buf();
 
@@ -61,6 +75,9 @@ impl RelayDatabase {
         if let Some(readers) = max_readers {
             builder = builder.max_readers(readers);
         }
+        if let Some(config) = ingester_thread_config {
+            builder = builder.with_ingester_thread_config(config);
+        }
 
         let lmdb_instance = builder.build().map_err(|e| {
             Error::database(format!(
@@ -72,7 +89,7 @@ impl RelayDatabase {
         Ok(Self { lmdb })
     }
 
-    /// Save an event directly
+    /// Save an event directly (borrows the event)
     pub async fn save_event(&self, event: &Event, scope: &Scope) -> Result<()> {
         debug!(
             "Saving event {} to scope: {:?} (scope_name: {:?})",
@@ -98,6 +115,30 @@ impl RelayDatabase {
             scope,
             scope.name()
         );
+        Ok(())
+    }
+
+    /// Save an event directly (takes ownership to avoid cloning)
+    pub async fn save_event_owned(&self, event: Event, scope: &Scope) -> Result<()> {
+        debug!(
+            "Saving event {} to scope: {:?} (scope_name: {:?})",
+            event.id,
+            scope,
+            scope.name()
+        );
+
+        let env = Arc::clone(&self.lmdb);
+        let scoped_view = env.scoped(scope).map_err(|e| {
+            error!("Error getting scoped view: {:?}", e);
+            Error::database(format!("Failed to get scoped view: {e}"))
+        })?;
+
+        scoped_view.save_event_owned(event).await.map_err(|e| {
+            error!("Error saving event for scope {:?}: {:?}", scope, e);
+            Box::new(e) as Box<dyn std::error::Error>
+        })?;
+
+        debug!("Event saved successfully to scope: {:?}", scope);
         Ok(())
     }
 
