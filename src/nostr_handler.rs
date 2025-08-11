@@ -295,11 +295,7 @@ where
         };
 
         // EventIngester handles JSON parsing + signature verification
-        let message = match self
-            .event_ingester
-            .process_message(text.as_bytes().to_vec())
-            .await
-        {
+        let message = match self.event_ingester.process_message(text).await {
             Ok(msg) => msg,
             Err(e) => {
                 match e {

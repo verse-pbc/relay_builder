@@ -16,12 +16,12 @@ fn bench_event_ingestion(c: &mut Criterion) {
             let ingester = EventIngester::new(Arc::clone(&keys));
 
             // Pre-generate events
-            let events: Vec<Vec<u8>> = (0..msg_count)
+            let events: Vec<String> = (0..msg_count)
                 .map(|i| {
                     let event = EventBuilder::text_note(format!("Test message {i}"))
                         .sign_with_keys(&keys)
                         .unwrap();
-                    format!(r#"["EVENT", {}]"#, event.as_json()).into_bytes()
+                    format!(r#"["EVENT", {}]"#, event.as_json())
                 })
                 .collect();
 
@@ -29,8 +29,8 @@ fn bench_event_ingestion(c: &mut Criterion) {
             b.iter(|| {
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 rt.block_on(async {
-                    for event_bytes in &events {
-                        let result = ingester.process_message(event_bytes.clone()).await;
+                    for event_str in &events {
+                        let result = ingester.process_message(event_str.clone()).await;
                         let _ = black_box(result);
                     }
                 });
@@ -53,7 +53,7 @@ fn bench_parallel_ingestion(c: &mut Criterion) {
 
             // Pre-generate events for each client
             let events_per_client = 100;
-            let all_events: Vec<Vec<Vec<u8>>> = (0..concurrency)
+            let all_events: Vec<Vec<String>> = (0..concurrency)
                 .map(|client_id| {
                     (0..events_per_client)
                         .map(|msg_id| {
@@ -62,7 +62,7 @@ fn bench_parallel_ingestion(c: &mut Criterion) {
                             ))
                             .sign_with_keys(&keys)
                             .unwrap();
-                            format!(r#"["EVENT", {}]"#, event.as_json()).into_bytes()
+                            format!(r#"["EVENT", {}]"#, event.as_json())
                         })
                         .collect()
                 })
@@ -79,8 +79,8 @@ fn bench_parallel_ingestion(c: &mut Criterion) {
                         let events = client_events.clone();
 
                         let handle = tokio::spawn(async move {
-                            for event_bytes in events {
-                                let result = ingester_clone.process_message(event_bytes).await;
+                            for event_str in events {
+                                let result = ingester_clone.process_message(event_str).await;
                                 let _ = black_box(result);
                             }
                         });

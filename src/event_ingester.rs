@@ -32,7 +32,7 @@ pub enum IngesterError {
 
 /// Request to process a message
 struct ProcessRequest {
-    bytes: Vec<u8>,
+    text: String,
     response: oneshot::Sender<std::result::Result<ClientMessage<'static>, IngesterError>>,
 }
 
@@ -70,17 +70,14 @@ impl EventIngester {
     /// Process a message (parse JSON and verify signature if it's an EVENT)
     pub async fn process_message(
         &self,
-        bytes: Vec<u8>,
+        text: String,
     ) -> std::result::Result<ClientMessage<'static>, IngesterError> {
         // Create oneshot channel for response
         let (tx, rx) = oneshot::channel();
 
         // Send processing request
         self.process_sender
-            .send(ProcessRequest {
-                bytes,
-                response: tx,
-            })
+            .send(ProcessRequest { text, response: tx })
             .map_err(|_| IngesterError::ChannelClosed)?;
 
         // Wait for response asynchronously - clean and efficient!
@@ -102,10 +99,10 @@ impl EventIngester {
         // Process messages one at a time to ensure fair distribution
         pool.install(|| {
             receiver.into_iter().par_bridge().for_each(|request| {
-                let ProcessRequest { bytes, response } = request;
+                let ProcessRequest { text, response } = request;
 
                 // Process the message
-                let result = Self::process_single_message(&bytes);
+                let result = Self::process_single_message(&text);
 
                 // Send the result back (ignore send errors if receiver dropped)
                 let _ = response.send(result);
@@ -118,27 +115,19 @@ impl EventIngester {
 
     /// Process a single message: parse JSON and verify signature if EVENT
     fn process_single_message(
-        bytes: &[u8],
+        text: &str,
     ) -> std::result::Result<ClientMessage<'static>, IngesterError> {
         // Check for empty message
-        if bytes.is_empty() {
+        if text.is_empty() {
             return Err(IngesterError::JsonParseError("Empty message".to_string()));
         }
 
-        // Parse JSON
-        let msg = match ClientMessage::from_json(bytes) {
+        // Parse JSON - ClientMessage::from_json accepts both &str and &[u8]
+        let msg = match ClientMessage::from_json(text) {
             Ok(msg) => msg,
             Err(e) => {
-                // Try to extract the message for better error reporting
-                let message = match std::str::from_utf8(bytes) {
-                    Ok(s) => s,
-                    Err(_) => {
-                        warn!("Invalid UTF-8 in client message");
-                        return Err(IngesterError::InvalidUtf8);
-                    }
-                };
-
-                warn!("Failed to parse client message: {}, error: {}", message, e);
+                // We already have the text as &str, no need for UTF-8 conversion
+                warn!("Failed to parse client message: {}, error: {}", text, e);
                 return Err(IngesterError::JsonParseError(e.to_string()));
             }
         };
@@ -222,7 +211,7 @@ mod tests {
         let event_json = format!(r#"["EVENT", {}]"#, event.as_json());
 
         // Process the message
-        let result = ingester.process_message(event_json.into_bytes()).await;
+        let result = ingester.process_message(event_json).await;
         assert!(result.is_ok());
 
         if let Ok(ClientMessage::Event(parsed_event)) = result {
@@ -250,7 +239,7 @@ mod tests {
         let event_json = format!(r#"["EVENT", {json}]"#);
 
         // Process the message
-        let result = ingester.process_message(event_json.into_bytes()).await;
+        let result = ingester.process_message(event_json).await;
         assert!(result.is_err());
 
         if let Err(IngesterError::SignatureVerificationFailed(_)) = result {
@@ -268,7 +257,7 @@ mod tests {
         let req_json = r#"["REQ", "sub1", {"kinds": [1], "limit": 10}]"#;
 
         // Process the message
-        let result = ingester.process_message(req_json.as_bytes().to_vec()).await;
+        let result = ingester.process_message(req_json.to_string()).await;
         assert!(result.is_ok());
 
         if let Ok(ClientMessage::Req {
@@ -292,9 +281,7 @@ mod tests {
         let invalid_json = "not valid json";
 
         // Process the message
-        let result = ingester
-            .process_message(invalid_json.as_bytes().to_vec())
-            .await;
+        let result = ingester.process_message(invalid_json.to_string()).await;
         assert!(result.is_err());
 
         if let Err(IngesterError::JsonParseError(_)) = result {
@@ -321,9 +308,7 @@ mod tests {
                     .unwrap();
                 let event_json = format!(r#"["EVENT", {}]"#, event.as_json());
 
-                ingester_clone
-                    .process_message(event_json.into_bytes())
-                    .await
+                ingester_clone.process_message(event_json).await
             }));
         }
 
@@ -346,7 +331,7 @@ mod tests {
         let event_json = format!(r#"["EVENT", {}]"#, event.as_json());
 
         // Process the message from async context (this tests block_in_place)
-        let result = ingester.process_message(event_json.into_bytes()).await;
+        let result = ingester.process_message(event_json).await;
         assert!(result.is_ok());
 
         if let Ok(ClientMessage::Event(parsed_event)) = result {
