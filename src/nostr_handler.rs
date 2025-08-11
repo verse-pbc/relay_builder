@@ -295,19 +295,8 @@ where
         };
 
         // EventIngester handles JSON parsing + signature verification
-        // Convert Utf8Bytes to String for EventIngester
-        // In verse-pbc version, Utf8Bytes has as_bytes() method which returns &[u8]
-        // We need to convert to String to avoid the extra Vec<u8> allocation
-        let text_string = match std::str::from_utf8(text.as_bytes()) {
-            Ok(s) => s.to_string(),
-            Err(_) => {
-                let error_msg = RelayMessage::notice("Invalid UTF-8 in message");
-                let _ = self.outbound_tx.send((error_msg, 0, None));
-                return Ok(());
-            }
-        };
-        
-        let message = match self.event_ingester.process_message(text_string).await {
+        // Utf8Bytes already contains validated UTF-8 text, just convert to String
+        let message = match self.event_ingester.process_message(text.to_string()).await {
             Ok(msg) => msg,
             Err(e) => {
                 match e {
