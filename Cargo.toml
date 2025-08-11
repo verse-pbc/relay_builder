@@ -44,6 +44,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
 parking_lot = "0.12"
 rayon = "1.10"
 num_cpus = "1.16"
+libc = "0.2"
 negentropy = { version = "0.5", features = ["std"] }
 hex = "0.4.3"
 heed = { version = "0.20", default-features = false, features = ["read-txn-no-tls"] }
