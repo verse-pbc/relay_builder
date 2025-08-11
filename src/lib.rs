@@ -18,6 +18,7 @@
 #![allow(clippy::enum_variant_names, clippy::needless_borrow)]
 
 pub mod config;
+pub mod cpu_affinity;
 pub mod crypto_helper;
 pub mod database;
 pub mod diagnostics;

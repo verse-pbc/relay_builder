@@ -437,6 +437,7 @@ where
                     Some(task_tracker),
                     self.cancellation_token.clone(),
                     self.config.max_readers,
+                    self.config.ingester_cpu_affinity,
                 )?;
                 (database, crypto_helper, event_ingester)
             }

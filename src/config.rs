@@ -124,6 +124,8 @@ pub struct RelayConfig {
     pub max_readers: Option<u32>,
     /// Enable diagnostic logging (every 30 minutes)
     pub enable_diagnostics: bool,
+    /// CPU affinity for the database ingester thread
+    pub ingester_cpu_affinity: Option<usize>,
 }
 
 impl RelayConfig {
@@ -145,6 +147,7 @@ impl RelayConfig {
             max_limit: 5000,
             max_readers: None,
             enable_diagnostics: false,
+            ingester_cpu_affinity: None,
         }
     }
 
@@ -161,18 +164,19 @@ impl RelayConfig {
     /// Create database instance from configuration with optional TaskTracker
     pub fn create_database_with_tracker(
         &self,
-        _task_tracker: Option<tokio_util::task::TaskTracker>,
-        _cancellation_token: Option<tokio_util::sync::CancellationToken>,
+        task_tracker: Option<tokio_util::task::TaskTracker>,
+        cancellation_token: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<Arc<RelayDatabase>, Error> {
         match &self.database {
-            Some(DatabaseConfig::Path(path)) => {
-                let database = RelayDatabase::new(path)?;
-                Ok(Arc::new(database))
-            }
-            Some(DatabaseConfig::Instance(db)) => {
-                // Return the existing database instance
-                Ok(db.clone())
-            }
+            Some(database_config) => Self::create_database_from_config(
+                database_config.clone(),
+                &self.websocket_config,
+                self.max_subscriptions,
+                task_tracker,
+                cancellation_token,
+                self.max_readers,
+                self.ingester_cpu_affinity,
+            ),
             None => Err(Error::internal(
                 "Database configuration is required".to_string(),
             )),
@@ -187,10 +191,20 @@ impl RelayConfig {
         _task_tracker: Option<tokio_util::task::TaskTracker>,
         _cancellation_token: Option<tokio_util::sync::CancellationToken>,
         max_readers: Option<u32>,
+        ingester_cpu_affinity: Option<usize>,
     ) -> Result<Arc<RelayDatabase>, Error> {
         match database_config {
             DatabaseConfig::Path(path) => {
-                let database = RelayDatabase::with_max_readers(&path, max_readers)?;
+                // Create thread config if CPU affinity is set
+                let thread_config = ingester_cpu_affinity.map(|cpu| {
+                    Box::new(move || {
+                        if let Err(e) = crate::cpu_affinity::pin_current_thread_to(cpu) {
+                            tracing::error!("Failed to pin ingester thread to CPU {}: {}", cpu, e);
+                        }
+                    }) as Box<dyn FnOnce() + Send>
+                });
+
+                let database = RelayDatabase::with_config(&path, max_readers, thread_config)?;
                 Ok(Arc::new(database))
             }
             DatabaseConfig::Instance(db) => {
@@ -260,6 +274,12 @@ impl RelayConfig {
     /// Set the idle timeout in seconds
     pub fn with_idle_timeout(mut self, seconds: u64) -> Self {
         self.websocket_config.idle_timeout = Some(seconds);
+        self
+    }
+
+    /// Set the CPU affinity for the database ingester thread
+    pub fn with_ingester_cpu_affinity(mut self, cpu: usize) -> Self {
+        self.ingester_cpu_affinity = Some(cpu);
         self
     }
 
