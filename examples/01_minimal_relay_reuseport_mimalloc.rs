@@ -1,16 +1,33 @@
-//! Minimal Nostr relay - SO_REUSEPORT version
+//! Minimal Nostr relay - SO_REUSEPORT + mimalloc version
 //!
-//! This uses SO_REUSEPORT with multiple listeners and CPU affinity
+//! This uses SO_REUSEPORT with multiple listeners, CPU affinity, and mimalloc allocator
 //!
-//! Run with: cargo run --example 01_minimal_relay_reuseport --features axum
+//! Run with: cargo run --example 01_minimal_relay_reuseport_mimalloc --features axum,mimalloc
 
-// Use jemalloc for better performance (when available)
-#[cfg(all(not(target_env = "musl"), feature = "jemalloc"))]
-use tikv_jemallocator::Jemalloc;
+// Use mimalloc for better multi-threaded performance
+// Note: This will override jemalloc if both features are enabled
+#[cfg(all(
+    not(target_env = "musl"),
+    feature = "mimalloc",
+    not(feature = "jemalloc")
+))]
+use mimalloc::MiMalloc;
 
-#[cfg(all(not(target_env = "musl"), feature = "jemalloc"))]
+#[cfg(all(
+    not(target_env = "musl"),
+    feature = "mimalloc",
+    not(feature = "jemalloc")
+))]
 #[global_allocator]
-static GLOBAL: Jemalloc = Jemalloc;
+static GLOBAL: MiMalloc = MiMalloc;
+
+// Fallback to jemalloc if both are enabled (since it's the default)
+#[cfg(all(not(target_env = "musl"), feature = "jemalloc", feature = "mimalloc"))]
+use mimalloc::MiMalloc;
+
+#[cfg(all(not(target_env = "musl"), feature = "jemalloc", feature = "mimalloc"))]
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 mod common;
 
@@ -46,8 +63,8 @@ async fn run_server() -> Result<()> {
 
     // Create relay info for NIP-11
     let relay_info = common::create_relay_info(
-        "Minimal Relay (SO_REUSEPORT)",
-        "A minimal Nostr relay using SO_REUSEPORT and CPU affinity",
+        "Minimal Relay (SO_REUSEPORT + mimalloc)",
+        "A minimal Nostr relay using SO_REUSEPORT, CPU affinity, and mimalloc",
         config.keys.public_key(),
         vec![1, 9, 50],
     );
@@ -67,7 +84,7 @@ async fn run_server() -> Result<()> {
     common::run_relay_server_optimized(
         app,
         addr,
-        "Minimal relay (SO_REUSEPORT)",
+        "Minimal relay (SO_REUSEPORT + mimalloc)",
         common::ServerConfig::default(),
     )
     .await

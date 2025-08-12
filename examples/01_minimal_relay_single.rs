@@ -27,7 +27,8 @@ async fn main() -> Result<()> {
 
     // Create relay configuration
     let relay_url = "ws://example.local:8080";
-    let db_path = "./minimal_relay_db";
+    let db_path =
+        std::env::var("RELAY_DATA_DIR").unwrap_or_else(|_| "./minimal_relay_db".to_string());
     let relay_keys = Keys::generate();
     let config = RelayConfig::new(relay_url, db_path, relay_keys)
         .with_subdomains(2) // Enables subdomain isolation

@@ -45,7 +45,8 @@ async fn run_server() -> Result<()> {
     // Then test.example.local and other.example.local will have isolated data
     let relay_url = "ws://example.local:8080";
     //let relay_url = "ws://localhost:8080"; // Use this for no subdomain support
-    let db_path = "./minimal_relay_db";
+    let db_path =
+        std::env::var("RELAY_DATA_DIR").unwrap_or_else(|_| "./minimal_relay_db".to_string());
     let relay_keys = Keys::generate();
 
     // Configure with CPU affinity for the database writer
