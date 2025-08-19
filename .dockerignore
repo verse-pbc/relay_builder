@@ -9,7 +9,6 @@ data/
 minimal_relay_db/
 docs/
 tests/
-benches/
 scripts/
 node_modules/
 .DS_Store

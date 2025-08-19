@@ -1,14 +1,15 @@
 # Build stage
-FROM rust:1.75-bookworm as builder
+FROM rust:1.80-bookworm as builder
 
 WORKDIR /app
 
 # Copy manifests
 COPY Cargo.toml Cargo.lock ./
 
-# Copy source code
+# Copy source code and benchmarks (needed for Cargo.toml references)
 COPY src ./src
 COPY examples ./examples
+COPY benches ./benches
 
 # Build the minimal relay example
 RUN cargo build --release --example 01_minimal_relay --features axum
