@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  relay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    environment:
+      - RELAY_DATA_DIR=/data
+      - RUST_LOG=info
+    restart: unless-stopped
