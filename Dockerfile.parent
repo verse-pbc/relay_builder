@@ -1,23 +1,17 @@
-# NOTE: This Dockerfile requires websocket_builder to be available.
-# Use docker-build.sh script or Dockerfile.parent instead.
+# This Dockerfile should be run from the parent directory (relay_repos)
+# Build command: docker build -f relay_builder/Dockerfile.parent -t relay-builder .
 
 # Build stage
 FROM rust:1.80-bookworm as builder
 
 WORKDIR /app
 
-# Copy manifests
-COPY Cargo.toml Cargo.lock ./
-
-# Copy websocket_builder dependency
-COPY websocket_builder ../websocket_builder/
-
-# Copy source code and benchmarks
-COPY src ./src
-COPY examples ./examples  
-COPY benches ./benches
+# Copy both projects
+COPY websocket_builder ./websocket_builder
+COPY relay_builder ./relay_builder
 
 # Build the minimal relay example
+WORKDIR /app/relay_builder
 RUN cargo build --release --example 01_minimal_relay --features axum
 
 # Runtime stage
@@ -29,7 +23,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the binary from builder
-COPY --from=builder /app/target/release/examples/01_minimal_relay /usr/local/bin/relay
+COPY --from=builder /app/relay_builder/target/release/examples/01_minimal_relay /usr/local/bin/relay
 
 # Create data directory
 RUN mkdir -p /data
