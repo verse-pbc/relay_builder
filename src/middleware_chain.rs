@@ -4,10 +4,10 @@
 //! zero-cost abstractions while supporting index-based message routing.
 
 use crate::nostr_middleware::{
-    DisconnectContext, InboundContext, InboundProcessor, MessageSender, NostrMiddleware,
-    OutboundContext, OutboundProcessor,
+    ConnectionContext, DisconnectContext, InboundContext, InboundProcessor, MessageSender,
+    NostrMiddleware, OutboundContext, OutboundProcessor,
 };
-use crate::state::NostrConnectionState;
+use crate::state::{ConnectionMetadata, NostrConnectionState};
 use nostr_sdk::prelude::*;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -41,6 +41,7 @@ where
         _connection_id: &str,
         _message: &mut Option<ClientMessage<'static>>,
         _state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        _metadata: &Arc<ConnectionMetadata>,
     ) -> Result<(), anyhow::Error> {
         // End of chain - no more processing
         Ok(())
@@ -50,6 +51,7 @@ where
         &self,
         _connection_id: &str,
         _state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        _metadata: &Arc<ConnectionMetadata>,
     ) -> Result<(), anyhow::Error> {
         // End of chain - no more processing
         Ok(())
@@ -65,6 +67,7 @@ where
         _connection_id: &str,
         _message: &mut Option<RelayMessage<'static>>,
         _state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        _metadata: &Arc<ConnectionMetadata>,
         _from_position: usize,
     ) -> Result<(), anyhow::Error> {
         // End of chain - no more processing
@@ -75,6 +78,7 @@ where
         &self,
         _connection_id: &str,
         _state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        _metadata: &Arc<ConnectionMetadata>,
     ) -> Result<(), anyhow::Error> {
         // End of chain - no more processing
         Ok(())
@@ -208,12 +212,14 @@ where
         connection_id: &str,
         message: &mut Option<ClientMessage<'static>>,
         state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        metadata: &Arc<ConnectionMetadata>,
     ) -> Result<(), anyhow::Error> {
         // Use pre-created MessageSender - no allocation!
         let ctx = InboundContext {
             connection_id,
             message,
             state,
+            metadata,
             sender: self.message_sender.clone(), // Just Arc clone
             next: &self.next,
         };
@@ -226,14 +232,18 @@ where
         &self,
         connection_id: &str,
         state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        metadata: &Arc<ConnectionMetadata>,
     ) -> Result<(), anyhow::Error> {
-        let ctx = crate::nostr_middleware::ConnectionContext {
+        let ctx = ConnectionContext {
             connection_id,
             state,
+            metadata,
             sender: self.message_sender.clone(),
         };
         self.middleware.on_connect(ctx).await?;
-        self.next.on_connect_chain(connection_id, state).await
+        self.next
+            .on_connect_chain(connection_id, state, metadata)
+            .await
     }
 }
 
@@ -249,23 +259,25 @@ where
         connection_id: &str,
         message: &mut Option<RelayMessage<'static>>,
         state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        metadata: &Arc<ConnectionMetadata>,
         from_position: usize,
     ) -> Result<(), anyhow::Error> {
         if from_position <= self.position {
             self.next
-                .process_outbound_chain(connection_id, message, state, from_position)
+                .process_outbound_chain(connection_id, message, state, metadata, from_position)
                 .await?;
 
             let ctx = OutboundContext {
                 connection_id,
                 message,
                 state,
+                metadata,
                 sender: &self.message_sender,
             };
             self.middleware.process_outbound(ctx).await
         } else {
             self.next
-                .process_outbound_chain(connection_id, message, state, from_position)
+                .process_outbound_chain(connection_id, message, state, metadata, from_position)
                 .await
         }
     }
@@ -274,13 +286,17 @@ where
         &self,
         connection_id: &str,
         state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        metadata: &Arc<ConnectionMetadata>,
     ) -> Result<(), anyhow::Error> {
         // Same as Chain
-        self.next.on_disconnect_chain(connection_id, state).await?;
+        self.next
+            .on_disconnect_chain(connection_id, state, metadata)
+            .await?;
 
         let ctx = DisconnectContext {
             connection_id,
             state,
+            metadata,
         };
         self.middleware.on_disconnect(ctx).await
     }

@@ -2,11 +2,13 @@
 
 use crate::database::RelayDatabase;
 use crate::error::Error;
+use crate::event_processor::EventContext;
 use crate::nostr_middleware::MessageSender;
 use crate::subscription_coordinator::StoreCommand;
 use crate::subscription_coordinator::SubscriptionCoordinator;
 use crate::subscription_registry::SubscriptionRegistry;
 use anyhow::Result;
+use arc_swap::ArcSwap;
 use negentropy::{Negentropy, NegentropyStorageVector};
 use nostr_lmdb::Scope;
 use nostr_sdk::prelude::*;
@@ -15,16 +17,50 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 
-const DEFAULT_RELAY_URL: &str = "wss://default.relay";
+/// Immutable connection metadata that doesn't need lock protection
+#[derive(Debug, Clone)]
+pub struct ConnectionMetadata {
+    /// The relay URL this connection is for
+    pub relay_url: RelayUrl,
+    /// The subdomain scope for this connection
+    pub subdomain: Arc<Scope>,
+    /// Connection cancellation token
+    pub connection_token: CancellationToken,
+    /// Pre-built event context for lock-free access
+    pub event_context: Arc<ArcSwap<EventContext>>,
+}
+
+impl ConnectionMetadata {
+    pub fn new(_relay_url: RelayUrl, _subdomain: Arc<Scope>) -> Self {
+        panic!("ConnectionMetadata::new needs relay_pubkey - use new_with_context instead")
+    }
+
+    pub fn new_with_context(
+        relay_url: RelayUrl,
+        subdomain: Arc<Scope>,
+        relay_pubkey: PublicKey,
+    ) -> Self {
+        let initial_context = EventContext {
+            authed_pubkey: None,
+            subdomain: Arc::clone(&subdomain),
+            relay_pubkey,
+        };
+
+        Self {
+            relay_url,
+            subdomain,
+            connection_token: CancellationToken::new(),
+            event_context: Arc::new(ArcSwap::from_pointee(initial_context)),
+        }
+    }
+}
 
 /// Type alias for the default NostrConnectionState without custom state
 pub type DefaultNostrConnectionState = NostrConnectionState<()>;
 
-/// Connection state for a WebSocket client
+/// Connection state for a WebSocket client (mutable fields only)
 #[derive(Debug)]
 pub struct NostrConnectionState<T = ()> {
-    /// The relay URL this connection is for
-    pub relay_url: RelayUrl,
     /// Challenge for NIP-42 authentication
     pub challenge: Option<String>,
     /// Authenticated public key (if authenticated via NIP-42)
@@ -37,14 +73,10 @@ pub struct NostrConnectionState<T = ()> {
     subscription_quota_usage: std::collections::HashSet<SubscriptionId>,
     /// Active negentropy subscriptions
     negentropy_subscriptions: HashMap<SubscriptionId, Negentropy<'static, NegentropyStorageVector>>,
-    /// Connection cancellation token
-    pub connection_token: CancellationToken,
     /// Registry for looking up subscriptions (used to set up subscription coordinator)
     pub(crate) registry: Option<Arc<SubscriptionRegistry>>,
-    /// The subdomain scope for this connection
-    pub subdomain: Arc<Scope>,
     /// Custom state that can be managed by middleware
-    pub custom_state: T,
+    pub custom_state: Arc<parking_lot::RwLock<T>>,
 }
 
 impl<T> Default for NostrConnectionState<T>
@@ -53,17 +85,14 @@ where
 {
     fn default() -> Self {
         Self {
-            relay_url: RelayUrl::parse(DEFAULT_RELAY_URL).expect("Default URL should be valid"),
             challenge: None,
             authed_pubkey: None,
             subscription_coordinator: None,
             max_subscriptions: None,
             subscription_quota_usage: std::collections::HashSet::new(),
             negentropy_subscriptions: HashMap::new(),
-            connection_token: CancellationToken::new(),
             registry: None,
-            subdomain: Arc::new(Scope::Default),
-            custom_state: T::default(),
+            custom_state: Arc::new(parking_lot::RwLock::new(T::default())),
         }
     }
 }
@@ -72,35 +101,16 @@ impl<T> NostrConnectionState<T>
 where
     T: Default,
 {
-    pub fn new(relay_url: RelayUrl) -> Result<Self> {
+    pub fn new() -> Result<Self> {
         Ok(Self {
-            relay_url,
             challenge: None,
             authed_pubkey: None,
             subscription_coordinator: None,
             max_subscriptions: None,
             subscription_quota_usage: std::collections::HashSet::new(),
             negentropy_subscriptions: HashMap::new(),
-            connection_token: CancellationToken::new(),
             registry: None,
-            subdomain: Arc::new(Scope::Default),
-            custom_state: T::default(),
-        })
-    }
-
-    pub fn with_subdomain(relay_url: RelayUrl, subdomain: Arc<Scope>) -> Result<Self> {
-        Ok(Self {
-            relay_url,
-            challenge: None,
-            authed_pubkey: None,
-            subscription_coordinator: None,
-            max_subscriptions: None,
-            subscription_quota_usage: std::collections::HashSet::new(),
-            negentropy_subscriptions: HashMap::new(),
-            connection_token: CancellationToken::new(),
-            registry: None,
-            subdomain,
-            custom_state: T::default(),
+            custom_state: Arc::new(parking_lot::RwLock::new(T::default())),
         })
     }
 }
@@ -111,44 +121,44 @@ where
 {
     fn clone(&self) -> Self {
         Self {
-            relay_url: self.relay_url.clone(),
             challenge: self.challenge.clone(),
             authed_pubkey: self.authed_pubkey,
             subscription_coordinator: self.subscription_coordinator.clone(),
             max_subscriptions: self.max_subscriptions,
             subscription_quota_usage: self.subscription_quota_usage.clone(),
             negentropy_subscriptions: HashMap::new(), // Can't clone Negentropy, so start with empty
-            connection_token: self.connection_token.clone(),
             registry: self.registry.clone(),
-            subdomain: self.subdomain.clone(),
             custom_state: self.custom_state.clone(),
         }
     }
 }
 
 impl<T> NostrConnectionState<T> {
-    pub fn with_custom(relay_url: &str, custom_state: T) -> Result<Self, Error> {
-        let relay_url =
-            RelayUrl::parse(relay_url).map_err(|e| Error::internal(format!("Invalid URL: {e}")))?;
-
+    pub fn with_custom(custom_state: T) -> Result<Self, Error> {
         Ok(Self {
-            relay_url,
             challenge: None,
             authed_pubkey: None,
             subscription_coordinator: None,
             max_subscriptions: None,
             subscription_quota_usage: std::collections::HashSet::new(),
             negentropy_subscriptions: HashMap::new(),
-            connection_token: CancellationToken::new(),
             registry: None,
-            subdomain: Arc::new(Scope::Default),
-            custom_state,
+            custom_state: Arc::new(parking_lot::RwLock::new(custom_state)),
         })
     }
 
-    pub fn set_authenticated(&mut self, pubkey: PublicKey) {
+    pub fn set_authenticated(&mut self, pubkey: PublicKey, metadata: &ConnectionMetadata) {
         self.authed_pubkey = Some(pubkey);
         self.challenge = None; // Clear challenge after successful auth
+
+        // Update the event context with the authenticated pubkey
+        let current = metadata.event_context.load();
+        let new_context = EventContext {
+            authed_pubkey: Some(pubkey),
+            subdomain: Arc::clone(&current.subdomain),
+            relay_pubkey: current.relay_pubkey,
+        };
+        metadata.event_context.store(Arc::new(new_context));
     }
 
     pub fn is_authenticated(&self) -> bool {
@@ -156,6 +166,7 @@ impl<T> NostrConnectionState<T> {
     }
 
     /// Setup the connection with database and registry
+    #[allow(clippy::too_many_arguments)]
     pub fn setup_connection(
         &mut self,
         database: Arc<RelayDatabase>,
@@ -163,6 +174,7 @@ impl<T> NostrConnectionState<T> {
         connection_id: String,
         sender: MessageSender,
         crypto_helper: crate::crypto_helper::CryptoHelper,
+        subdomain: Arc<Scope>,
         max_limit: Option<usize>,
         replaceable_event_queue: flume::Sender<(UnsignedEvent, Scope)>,
     ) -> Result<(), Error> {
@@ -177,7 +189,7 @@ impl<T> NostrConnectionState<T> {
             connection_id,
             sender,
             self.authed_pubkey,
-            self.subdomain.clone(),
+            subdomain,
             metrics_handler,
             max_limit.unwrap_or(1000), // Default to 1000 if not specified
             replaceable_event_queue,
@@ -367,8 +379,7 @@ mod tests {
 
     #[test]
     fn test_subscription_quota_replacement() {
-        let mut state =
-            NostrConnectionState::<()>::new(RelayUrl::parse("ws://test").unwrap()).unwrap();
+        let mut state = NostrConnectionState::<()>::new().unwrap();
         state.set_max_subscriptions(Some(2));
 
         let sub1 = SubscriptionId::new("sub1");
@@ -398,8 +409,7 @@ mod tests {
 
     #[test]
     fn test_subscription_quota_no_limit() {
-        let mut state =
-            NostrConnectionState::<()>::new(RelayUrl::parse("ws://test").unwrap()).unwrap();
+        let mut state = NostrConnectionState::<()>::new().unwrap();
         // No limit set (None)
 
         // Should be able to add many subscriptions without hitting a limit
@@ -412,8 +422,7 @@ mod tests {
 
     #[test]
     fn test_subscription_quota_replacement_same_id() {
-        let mut state =
-            NostrConnectionState::<()>::new(RelayUrl::parse("ws://test").unwrap()).unwrap();
+        let mut state = NostrConnectionState::<()>::new().unwrap();
         state.set_max_subscriptions(Some(1));
 
         let sub_id = SubscriptionId::new("nak"); // Common subscription ID used by nak client

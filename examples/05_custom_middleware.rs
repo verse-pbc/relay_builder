@@ -95,10 +95,10 @@ impl EventProcessor for SimpleProcessor {
         &self,
         event: Event,
         _custom_state: Arc<parking_lot::RwLock<()>>,
-        context: EventContext<'_>,
+        context: &EventContext,
     ) -> Result<Vec<StoreCommand>, relay_builder::Error> {
         tracing::debug!("Processing event {} from {}", event.id, event.pubkey);
-        Ok(vec![(event, context.subdomain.clone()).into()])
+        Ok(vec![(event, (*context.subdomain).clone()).into()])
     }
 }
 

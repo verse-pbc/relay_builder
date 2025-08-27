@@ -5,6 +5,7 @@ use crate::subscription_coordinator::{ReplaceableEventsBuffer, SubscriptionCoord
 use crate::subscription_registry::SubscriptionRegistry;
 use flume::{self};
 use nostr_sdk::prelude::*;
+use nostr_sdk::Keys;
 use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::Instant;
@@ -42,9 +43,7 @@ pub async fn create_test_event(keys: &Keys, kind: u16, tags: Vec<Tag>) -> nostr_
 }
 
 pub fn create_test_state(pubkey: Option<nostr_sdk::PublicKey>) -> NostrConnectionState {
-    let mut state =
-        NostrConnectionState::new(RelayUrl::parse("ws://test.relay").expect("Valid URL"))
-            .expect("Failed to create test state");
+    let mut state = NostrConnectionState::new().expect("Failed to create test state");
     state.authed_pubkey = pubkey;
     state.max_subscriptions = Some(100); // Set a reasonable test limit
     state
@@ -93,9 +92,7 @@ pub async fn create_test_state_with_subscription_service(
         replaceable_event_queue,
     );
 
-    let mut state =
-        NostrConnectionState::new(RelayUrl::parse("ws://test.relay").expect("Valid URL"))
-            .expect("Failed to create test state");
+    let mut state = NostrConnectionState::new().expect("Failed to create test state");
     state.authed_pubkey = pubkey;
     state.max_subscriptions = Some(100); // Set a reasonable test limit
 
@@ -117,6 +114,27 @@ pub fn create_test_inbound_context<T: Send + Sync + Clone + 'static>(
     _middlewares: Vec<()>, // Unused in new system, kept for API compatibility
     index: usize,
 ) -> TestInboundContext<T> {
+    create_test_inbound_context_with_subdomain(
+        connection_id,
+        message,
+        sender,
+        state,
+        _middlewares,
+        index,
+        Arc::new(nostr_lmdb::Scope::Default),
+    )
+}
+
+/// Helper for creating test contexts with a specific subdomain
+pub fn create_test_inbound_context_with_subdomain<T: Send + Sync + Clone + 'static>(
+    connection_id: String,
+    message: Option<ClientMessage<'static>>,
+    sender: Option<flume::Sender<(RelayMessage<'static>, usize, Option<String>)>>,
+    state: NostrConnectionState<T>,
+    _middlewares: Vec<()>, // Unused in new system, kept for API compatibility
+    index: usize,
+    subdomain: Arc<nostr_lmdb::Scope>,
+) -> TestInboundContext<T> {
     let state_arc = Arc::new(RwLock::new(state));
 
     // Create sender or use a dummy one
@@ -126,10 +144,19 @@ pub fn create_test_inbound_context<T: Send + Sync + Clone + 'static>(
     });
     let nostr_sender = MessageSender::new(sender, index);
 
+    // Create test metadata with the specified subdomain
+    let relay_pubkey = Keys::generate().public_key();
+    let metadata = Arc::new(crate::state::ConnectionMetadata::new_with_context(
+        RelayUrl::parse("ws://test.relay").expect("Valid URL"),
+        subdomain,
+        relay_pubkey,
+    ));
+
     TestInboundContext {
         connection_id,
         message,
         state: state_arc,
+        metadata,
         sender: nostr_sender,
         next_processor: TestNextProcessor::new(),
     }
@@ -140,6 +167,7 @@ pub struct TestInboundContext<T> {
     pub connection_id: String,
     pub message: Option<ClientMessage<'static>>,
     pub state: Arc<RwLock<NostrConnectionState<T>>>,
+    pub metadata: Arc<crate::state::ConnectionMetadata>,
     pub sender: MessageSender,
     next_processor: TestNextProcessor<T>,
 }
@@ -152,6 +180,7 @@ impl<T> TestInboundContext<T> {
             connection_id: &self.connection_id,
             message: &mut self.message,
             state: &self.state,
+            metadata: &self.metadata,
             sender: self.sender.clone(),
             next: &self.next_processor,
         }
@@ -186,6 +215,7 @@ where
         _connection_id: &str,
         _message: &mut Option<ClientMessage<'static>>,
         _state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        _metadata: &Arc<crate::state::ConnectionMetadata>,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
         async move { Ok(()) }
     }
@@ -194,6 +224,7 @@ where
         &self,
         _connection_id: &str,
         _state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        _metadata: &Arc<crate::state::ConnectionMetadata>,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
         async move { Ok(()) }
     }
@@ -218,10 +249,19 @@ pub fn create_test_outbound_context<T: Send + Sync + Clone + 'static>(
 
     let nostr_sender = MessageSender::new(raw_sender, position);
 
+    // Create test metadata
+    let relay_pubkey = Keys::generate().public_key();
+    let metadata = Arc::new(crate::state::ConnectionMetadata::new_with_context(
+        RelayUrl::parse("ws://test.relay").expect("Valid URL"),
+        Arc::new(nostr_lmdb::Scope::Default),
+        relay_pubkey,
+    ));
+
     TestOutboundContext {
         connection_id,
         message: Some(message),
         state: state_arc,
+        metadata,
         sender: nostr_sender,
         from_position: position,
     }
@@ -232,6 +272,7 @@ pub struct TestOutboundContext<T> {
     pub connection_id: String,
     pub message: Option<RelayMessage<'static>>,
     pub state: Arc<RwLock<NostrConnectionState<T>>>,
+    pub metadata: Arc<crate::state::ConnectionMetadata>,
     pub sender: MessageSender,
     pub from_position: usize,
 }
@@ -243,6 +284,7 @@ impl<T> TestOutboundContext<T> {
             connection_id: &self.connection_id,
             message: &mut self.message,
             state: &self.state,
+            metadata: &self.metadata,
             sender: &self.sender,
         }
     }
@@ -270,9 +312,18 @@ pub fn create_test_connection_context<T: Send + Sync + Clone + 'static>(
     });
     let nostr_sender = MessageSender::new(sender, index);
 
+    // Create test metadata
+    let relay_pubkey = Keys::generate().public_key();
+    let metadata = Arc::new(crate::state::ConnectionMetadata::new_with_context(
+        RelayUrl::parse("ws://test.relay").expect("Valid URL"),
+        Arc::new(nostr_lmdb::Scope::Default),
+        relay_pubkey,
+    ));
+
     TestConnectionContext {
         connection_id,
         state: state_arc,
+        metadata,
         sender: nostr_sender,
     }
 }
@@ -281,6 +332,7 @@ pub fn create_test_connection_context<T: Send + Sync + Clone + 'static>(
 pub struct TestConnectionContext<T> {
     pub connection_id: String,
     pub state: Arc<RwLock<NostrConnectionState<T>>>,
+    pub metadata: Arc<crate::state::ConnectionMetadata>,
     pub sender: MessageSender,
 }
 
@@ -293,6 +345,7 @@ where
         ConnectionContext {
             connection_id: &self.connection_id,
             state: &self.state,
+            metadata: &self.metadata,
             sender: self.sender.clone(),
         }
     }

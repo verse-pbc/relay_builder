@@ -6,7 +6,7 @@ use relay_builder::{
         ConnectionContext, DisconnectContext, InboundContext, InboundProcessor, MessageSender,
         NostrMiddleware, OutboundContext,
     },
-    state::NostrConnectionState,
+    state::{ConnectionMetadata, NostrConnectionState},
     util::{Either, IdentityMiddleware},
 };
 use std::sync::{
@@ -88,9 +88,17 @@ where
 }
 
 fn create_test_state() -> Arc<parking_lot::RwLock<NostrConnectionState<()>>> {
-    let relay_url = RelayUrl::parse("ws://test.relay").unwrap();
     Arc::new(parking_lot::RwLock::new(
-        NostrConnectionState::<()>::new(relay_url).unwrap(),
+        NostrConnectionState::<()>::new().unwrap(),
+    ))
+}
+
+fn create_test_metadata() -> Arc<ConnectionMetadata> {
+    let relay_pubkey = nostr_sdk::Keys::generate().public_key();
+    Arc::new(ConnectionMetadata::new_with_context(
+        RelayUrl::parse("ws://test.relay").unwrap(),
+        Arc::new(nostr_lmdb::Scope::Default),
+        relay_pubkey,
     ))
 }
 
@@ -106,9 +114,11 @@ async fn test_either_left_delegates_on_connect() {
 
     let state = create_test_state();
     let sender = create_test_sender();
+    let metadata = create_test_metadata();
     let ctx = ConnectionContext {
         connection_id: "test_conn",
         state: &state,
+        metadata: &metadata,
         sender,
     };
 
@@ -129,9 +139,11 @@ async fn test_either_right_delegates_on_connect() {
 
     let state = create_test_state();
     let sender = create_test_sender();
+    let metadata = create_test_metadata();
     let ctx = ConnectionContext {
         connection_id: "test_conn",
         state: &state,
+        metadata: &metadata,
         sender,
     };
 
@@ -162,10 +174,12 @@ async fn test_either_left_delegates_process_outbound() {
     let state = create_test_state();
     let sender = create_test_sender();
     let mut message = None;
+    let metadata = create_test_metadata();
     let ctx = OutboundContext {
         connection_id: "test_conn",
         message: &mut message,
         state: &state,
+        metadata: &metadata,
         sender: &sender,
     };
 
@@ -185,9 +199,11 @@ async fn test_either_left_delegates_on_disconnect() {
     let either: Either<TrackingMiddleware, IdentityMiddleware> = Either::Left(tracking.clone());
 
     let state = create_test_state();
+    let metadata = create_test_metadata();
     let ctx = DisconnectContext {
         connection_id: "test_conn",
         state: &state,
+        metadata: &metadata,
     };
 
     // Call on_disconnect through Either::Left
@@ -210,9 +226,11 @@ async fn test_auth_middleware_through_either() {
     let state = create_test_state();
     let (tx, rx) = flume::unbounded::<(RelayMessage<'static>, usize, Option<String>)>();
     let sender = MessageSender::new(tx, 0);
+    let metadata = create_test_metadata();
     let ctx = ConnectionContext {
         connection_id: "test_conn",
         state: &state,
+        metadata: &metadata,
         sender,
     };
 

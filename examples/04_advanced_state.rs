@@ -44,14 +44,14 @@ impl EventProcessor<UserSession> for AdvancedStateProcessor {
         &self,
         event: Event,
         custom_state: Arc<parking_lot::RwLock<UserSession>>,
-        context: EventContext<'_>,
+        context: &EventContext,
     ) -> RelayResult<Vec<StoreCommand>> {
         let mut state = custom_state.write();
 
         // Initialize session if first event
         if state.first_event_time.is_none() {
             state.first_event_time = Some(std::time::Instant::now());
-            state.subdomain_info = match context.subdomain {
+            state.subdomain_info = match context.subdomain.as_ref() {
                 nostr_lmdb::Scope::Named { name, .. } => Some(name.clone()),
                 nostr_lmdb::Scope::Default => None,
             };
@@ -67,7 +67,7 @@ impl EventProcessor<UserSession> for AdvancedStateProcessor {
         state.messages_sent += 1;
 
         // Different limits based on subdomain
-        let message_limit = match context.subdomain {
+        let message_limit = match context.subdomain.as_ref() {
             nostr_lmdb::Scope::Named { name, .. } if self.premium_subdomains.contains(name) => {
                 // Premium subdomains get higher limits
                 500
@@ -115,7 +115,7 @@ impl EventProcessor<UserSession> for AdvancedStateProcessor {
         // Special handling for certain subdomains
         if let nostr_lmdb::Scope::Named {
             name: subdomain, ..
-        } = context.subdomain
+        } = context.subdomain.as_ref()
         {
             match subdomain.as_str() {
                 "vip" | "premium" => {
@@ -135,7 +135,7 @@ impl EventProcessor<UserSession> for AdvancedStateProcessor {
         }
 
         // Accept the event - it will be automatically isolated by subdomain
-        Ok(vec![(event, context.subdomain.clone()).into()])
+        Ok(vec![(event, (*context.subdomain).clone()).into()])
     }
 }
 

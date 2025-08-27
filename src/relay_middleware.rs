@@ -6,7 +6,7 @@
 
 use crate::database::RelayDatabase;
 use crate::error::Error;
-use crate::event_processor::{EventContext, EventProcessor};
+use crate::event_processor::EventProcessor;
 use crate::nostr_middleware::{InboundContext, InboundProcessor, NostrMiddleware, OutboundContext};
 use crate::state::NostrConnectionState;
 use crate::subscription_coordinator::StoreCommand;
@@ -36,11 +36,11 @@ where
     T: Send + Sync + 'static,
 {
     processor: Arc<P>,
+    #[allow(dead_code)]
     relay_pubkey: PublicKey,
     database: Arc<RelayDatabase>,
     registry: Arc<SubscriptionRegistry>,
     max_limit: usize,
-    relay_url: RelayUrl,
     crypto_helper: crate::crypto_helper::CryptoHelper,
     max_subscriptions: Option<usize>,
     replaceable_event_queue: flume::Sender<(UnsignedEvent, Scope)>,
@@ -59,7 +59,7 @@ where
         database: Arc<RelayDatabase>,
         registry: Arc<SubscriptionRegistry>,
         max_limit: usize,
-        relay_url: RelayUrl,
+        _relay_url: RelayUrl, // Keep for API compatibility but unused
         crypto_helper: crate::crypto_helper::CryptoHelper,
         max_subscriptions: Option<usize>,
         replaceable_event_queue: flume::Sender<(UnsignedEvent, Scope)>,
@@ -70,7 +70,6 @@ where
             database,
             registry,
             max_limit,
-            relay_url,
             crypto_helper,
             max_subscriptions,
             replaceable_event_queue,
@@ -87,32 +86,20 @@ where
         &self,
         event: Event,
         state: Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        metadata: &crate::state::ConnectionMetadata,
         message_sender: Option<crate::nostr_middleware::MessageSender>,
     ) -> Result<(), Error> {
-        // Extract necessary state before async call
-        let (authed_pubkey, subdomain) = {
+        // Extract custom state and load current context
+        let custom_state = {
             let connection_state = state.read();
-            (
-                connection_state.authed_pubkey,
-                Arc::clone(&connection_state.subdomain), // Clone the Arc pointer
-            )
+            Arc::clone(&connection_state.custom_state)
         };
 
-        // Create custom state wrapper
-        let custom_state_wrapper = Arc::new(parking_lot::RwLock::new({
-            let connection_state = state.read();
-            connection_state.custom_state.clone()
-        }));
-
-        let context = EventContext {
-            authed_pubkey: authed_pubkey.as_ref(),
-            subdomain: &subdomain,
-            relay_pubkey: &self.relay_pubkey,
-        };
+        let context = metadata.event_context.load();
 
         let mut commands = self
             .processor
-            .handle_event(event, custom_state_wrapper, context)
+            .handle_event(event, custom_state, &context)
             .await?;
 
         let subscription_coordinator = {
@@ -168,65 +155,47 @@ where
     async fn handle_subscription(
         &self,
         state: Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        metadata: &crate::state::ConnectionMetadata,
         subscription_id: String,
         filters: Vec<Filter>,
     ) -> Result<(), Error> {
         let subscription_id_obj = SubscriptionId::new(subscription_id.clone());
 
-        // First verify filters, then check subscription quota
+        // Read phase - extract custom state and load context
+        let custom_state = {
+            let connection_state = state.read();
+            Arc::clone(&connection_state.custom_state)
+        };
+
+        let context = metadata.event_context.load();
+
+        // Verify filters WITHOUT holding any lock on connection state
+        self.processor
+            .verify_filters(&filters, Arc::clone(&custom_state), &context)?;
+
+        // Write phase - minimal critical section for quota only
         {
             let mut connection_state = state.write();
-
-            // Create context for filter verification
-            let context = EventContext {
-                authed_pubkey: connection_state.authed_pubkey.as_ref(),
-                subdomain: &connection_state.subdomain,
-                relay_pubkey: &self.relay_pubkey,
-            };
-
-            // Create custom state wrapper
-            let custom_state_wrapper = Arc::new(parking_lot::RwLock::new(
-                connection_state.custom_state.clone(),
-            ));
-
-            // Verify filters FIRST (before reserving quota)
-            self.processor
-                .verify_filters(&filters, custom_state_wrapper, context)?;
-
-            // NOW reserve quota slot (will handle replacements correctly)
             connection_state.reserve_quota_slot(&subscription_id_obj)?;
         }
 
-        // Extract necessary state with read lock
-        let (subdomain, authed_pubkey, custom_state) = {
-            let connection_state = state.read();
-            let subdomain = Arc::clone(&connection_state.subdomain);
-            let authed_pubkey = connection_state.authed_pubkey;
-            let custom_state = connection_state.custom_state.clone();
-            (subdomain, authed_pubkey, custom_state)
-        };
-
-        // Clone for the filter function
+        // Clone processor and metadata for the filter closure
         let processor = Arc::clone(&self.processor);
-        let relay_pubkey = self.relay_pubkey;
+        let event_context = Arc::clone(&metadata.event_context);
 
-        // Create filter function with cloned state - no async needed
-        let filter_fn =
-            move |event: &Event, scope: &nostr_lmdb::Scope, auth_pk: Option<&PublicKey>| -> bool {
-                // Create context on stack - zero heap allocations
-                let context = EventContext {
-                    authed_pubkey: auth_pk,
-                    subdomain: scope,
-                    relay_pubkey: &relay_pubkey,
-                };
+        // Create filter function that loads latest context and reuses the Arc
+        let filter_fn = move |event: &Event,
+                              _scope: &nostr_lmdb::Scope,
+                              _auth_pk: Option<&PublicKey>|
+              -> bool {
+            // Load the latest context (wait-free read via ArcSwap)
+            let ctx = event_context.load();
 
-                // Create custom state wrapper for each call
-                let custom_state_wrapper = Arc::new(parking_lot::RwLock::new(custom_state.clone()));
-
-                processor
-                    .can_see_event(event, custom_state_wrapper, context)
-                    .unwrap_or(false)
-            };
+            // Reuse the same Arc<RwLock<T>> - just clone the Arc (cheap)!
+            processor
+                .can_see_event(event, Arc::clone(&custom_state), &ctx)
+                .unwrap_or(false)
+        };
 
         // Get subscription coordinator and process
         let subscription_coordinator = {
@@ -241,8 +210,8 @@ where
             .handle_req(
                 SubscriptionId::new(subscription_id),
                 filters,
-                authed_pubkey,
-                &subdomain,
+                context.authed_pubkey,
+                &metadata.subdomain,
                 filter_fn,
             )
             .await?;
@@ -255,16 +224,12 @@ where
     async fn handle_neg_open(
         &self,
         state: Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        metadata: &crate::state::ConnectionMetadata,
         subscription_id: String,
         filter: Filter,
         initial_message: String,
         sender: Option<crate::nostr_middleware::MessageSender>,
     ) -> Result<(), Error> {
-        let subdomain = {
-            let connection_state = state.read();
-            Arc::clone(&connection_state.subdomain)
-        };
-
         debug!(
             "Handling NEG-OPEN for subscription {} with filter: {:?}",
             subscription_id, filter
@@ -273,7 +238,7 @@ where
         // Query database for negentropy items
         let items = self
             .database
-            .negentropy_items(filter, &subdomain)
+            .negentropy_items(filter, &metadata.subdomain)
             .await?
             .into_iter()
             .collect::<Vec<_>>();
@@ -415,7 +380,6 @@ where
             // Initialize state fields
             {
                 let mut state_guard = ctx.state.write();
-                state_guard.relay_url = self.relay_url.clone();
                 state_guard.registry = Some(self.registry.clone());
                 state_guard.max_subscriptions = self.max_subscriptions;
             }
@@ -430,6 +394,7 @@ where
                         ctx.connection_id.to_string(),
                         ctx.sender.clone(),
                         self.crypto_helper.clone(),
+                        ctx.metadata.subdomain.clone(),
                         Some(self.max_limit),
                         self.replaceable_event_queue.clone(),
                     )
@@ -459,6 +424,7 @@ where
                         .handle_event(
                             boxed_event.into_owned(),
                             ctx.state.clone(),
+                            ctx.metadata,
                             Some(ctx.sender.clone()),
                         )
                         .await
@@ -481,6 +447,7 @@ where
                     match self
                         .handle_subscription(
                             ctx.state.clone(),
+                            ctx.metadata,
                             subscription_id.to_string(),
                             vec![filter.into_owned()],
                         )
@@ -507,6 +474,7 @@ where
                     match self
                         .handle_subscription(
                             ctx.state.clone(),
+                            ctx.metadata,
                             subscription_id.to_string(),
                             filters,
                         )
@@ -553,6 +521,7 @@ where
                     match self
                         .handle_neg_open(
                             ctx.state.clone(),
+                            ctx.metadata,
                             subscription_id.to_string(),
                             filter.into_owned(),
                             initial_message.into_owned(),
@@ -659,22 +628,18 @@ where
             // For broadcast events, check visibility before sending
             if let RelayMessage::Event { event, .. } = &message {
                 let should_filter = {
-                    let state = ctx.state.read();
-                    let subdomain = Arc::clone(&state.subdomain);
-                    let authed_pubkey = state.authed_pubkey;
-                    let custom_state = state.custom_state.clone();
-                    let context = EventContext {
-                        authed_pubkey: authed_pubkey.as_ref(),
-                        subdomain: &subdomain,
-                        relay_pubkey: &self.relay_pubkey,
+                    let custom_state = {
+                        let state = ctx.state.read();
+                        Arc::clone(&state.custom_state)
                     };
 
-                    // Create custom state wrapper
-                    let custom_state_wrapper = Arc::new(parking_lot::RwLock::new(custom_state));
+                    // Load the latest context (wait-free)
+                    let context = ctx.metadata.event_context.load();
 
+                    // Reuse the Arc - no new allocation!
                     !self
                         .processor
-                        .can_see_event(event, custom_state_wrapper, context)?
+                        .can_see_event(event, custom_state, &context)?
                 };
 
                 if should_filter {

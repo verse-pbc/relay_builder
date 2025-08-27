@@ -29,10 +29,10 @@ impl EventProcessor for TestEventProcessor {
         &self,
         event: Event,
         _custom_state: Arc<parking_lot::RwLock<()>>,
-        context: EventContext<'_>,
+        context: &EventContext,
     ) -> Result<Vec<StoreCommand>, relay_builder::Error> {
         self.events_processed.lock().push(event.clone());
-        Ok(vec![(event, context.subdomain.clone()).into()])
+        Ok(vec![(event, (*context.subdomain).clone()).into()])
     }
 }
 

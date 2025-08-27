@@ -14,15 +14,15 @@ use std::sync::Arc;
 /// Minimal context for event visibility checks
 ///
 /// Contains only the essential data needed for most visibility decisions.
-/// Designed to be created on the stack with zero heap allocations.
-#[derive(Debug, Clone, Copy)]
-pub struct EventContext<'a> {
+/// Now uses owned data for lock-free access via ArcSwap.
+#[derive(Debug, Clone)]
+pub struct EventContext {
     /// Authenticated public key of the connection (if any)
-    pub authed_pubkey: Option<&'a PublicKey>,
+    pub authed_pubkey: Option<PublicKey>,
     /// The subdomain/scope this connection is operating in
-    pub subdomain: &'a Scope,
+    pub subdomain: Arc<Scope>,
     /// The relay's public key
-    pub relay_pubkey: &'a PublicKey,
+    pub relay_pubkey: PublicKey,
 }
 
 /// Core trait defining relay business logic with optimized performance.
@@ -61,7 +61,7 @@ pub struct EventContext<'a> {
 ///         &self,
 ///         _event: &Event,
 ///         custom_state: Arc<parking_lot::RwLock<RateLimitState>>,
-///         _context: EventContext<'_>,
+///         _context: &EventContext,
 ///     ) -> Result<bool, relay_builder::Error> {
 ///         // For read-only access, use read lock
 ///         let state = custom_state.read();
@@ -72,7 +72,7 @@ pub struct EventContext<'a> {
 ///         &self,
 ///         event: Event,
 ///         custom_state: Arc<parking_lot::RwLock<RateLimitState>>,
-///         context: EventContext<'_>,
+///         context: &EventContext,
 ///     ) -> impl Future<Output = Result<Vec<StoreCommand>, relay_builder::Error>> + Send {
 ///         async move {
 ///         // Get a write lock since we need to modify the rate limit state
@@ -87,7 +87,7 @@ pub struct EventContext<'a> {
 ///
 ///         Ok(vec![StoreCommand::SaveSignedEvent(
 ///             Box::new(event),
-///             context.subdomain.clone(),
+///             (*context.subdomain).clone(),
 ///             None,
 ///         )])
 ///         }
@@ -118,7 +118,7 @@ where
         &self,
         event: &Event,
         custom_state: Arc<parking_lot::RwLock<T>>,
-        context: EventContext<'_>,
+        context: &EventContext,
     ) -> Result<bool> {
         // Default implementation: allow all events (public relay behavior)
         let _ = (event, custom_state, context);
@@ -141,7 +141,7 @@ where
         &self,
         filters: &[Filter],
         custom_state: Arc<parking_lot::RwLock<T>>,
-        context: EventContext<'_>,
+        context: &EventContext,
     ) -> Result<()> {
         // Default implementation: allow all filters
         let _ = (filters, custom_state, context);
@@ -165,12 +165,13 @@ where
         &self,
         event: Event,
         custom_state: Arc<parking_lot::RwLock<T>>,
-        context: EventContext<'_>,
+        context: &EventContext,
     ) -> impl Future<Output = Result<Vec<StoreCommand>>> + Send {
         async move {
             // Default implementation: store all valid events
             let _ = custom_state; // Unused in default implementation
-            Ok(vec![(event, context.subdomain.clone()).into()])
+                                  // Need to dereference Arc<Scope> to get Scope
+            Ok(vec![(event, (*context.subdomain).clone()).into()])
         }
     }
 }

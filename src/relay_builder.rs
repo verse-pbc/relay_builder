@@ -82,7 +82,7 @@ impl std::fmt::Debug for HtmlOption {
 /// #         &self,
 /// #         event: nostr_sdk::Event,
 /// #         custom_state: std::sync::Arc<parking_lot::RwLock<MyState>>,
-/// #         context: EventContext<'_>,
+/// #         context: &EventContext,
 /// #     ) -> impl std::future::Future<Output = Result<Vec<relay_builder::StoreCommand>, relay_builder::Error>> + Send {
 /// #         async move { Ok(vec![]) }
 /// #     }
@@ -545,6 +545,7 @@ where
             event_ingester,
             self.config.scope_config.clone(),
             channel_size,
+            self.config.keys.public_key(),
         );
 
         // Spawn diagnostics task if enabled

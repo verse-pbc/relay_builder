@@ -28,12 +28,9 @@ impl<T> LoggerMiddleware<T> {
         }
     }
 
-    /// Extract subdomain from connection state
-    fn extract_subdomain(
-        state: &parking_lot::RwLock<crate::state::NostrConnectionState<T>>,
-    ) -> Arc<Scope> {
-        let state_guard = state.read();
-        Arc::clone(&state_guard.subdomain)
+    /// Extract subdomain from connection metadata
+    fn extract_subdomain(metadata: &crate::state::ConnectionMetadata) -> Arc<Scope> {
+        Arc::clone(&metadata.subdomain)
     }
 
     /// Create a span with connection context
@@ -59,8 +56,8 @@ where
         Next: InboundProcessor<T>,
     {
         async move {
-            // Extract subdomain from connection state
-            let subdomain = Self::extract_subdomain(ctx.state);
+            // Extract subdomain from connection metadata
+            let subdomain = Self::extract_subdomain(ctx.metadata);
 
             // Create a span with connection ID and subdomain to ensure logs always have context
             let connection_span = Self::create_connection_span(ctx.connection_id, &subdomain);
@@ -114,8 +111,8 @@ where
         ctx: OutboundContext<'_, T>,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
         async move {
-            // Extract subdomain from connection state
-            let subdomain = Self::extract_subdomain(ctx.state);
+            // Extract subdomain from connection metadata
+            let subdomain = Self::extract_subdomain(ctx.metadata);
 
             // Create a span with connection ID and subdomain to ensure logs always have context
             let connection_span = Self::create_connection_span(ctx.connection_id, &subdomain);
@@ -172,8 +169,8 @@ where
         ctx: DisconnectContext<'_, T>,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
         async move {
-            // Extract subdomain from connection state
-            let subdomain = Self::extract_subdomain(ctx.state);
+            // Extract subdomain from connection metadata
+            let subdomain = Self::extract_subdomain(ctx.metadata);
 
             // Create a span with connection ID and subdomain to ensure logs always have context
             let connection_span = Self::create_connection_span(ctx.connection_id, &subdomain);

@@ -5,7 +5,7 @@ use parking_lot::RwLock;
 use relay_builder::{
     middleware_chain::chain,
     nostr_middleware::{InboundContext, InboundProcessor, NostrMiddleware, OutboundContext},
-    state::NostrConnectionState,
+    state::{ConnectionMetadata, NostrConnectionState},
 };
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -70,6 +70,7 @@ where
         _connection_id: &str,
         _message: &mut Option<ClientMessage<'static>>,
         _state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        _metadata: &Arc<ConnectionMetadata>,
     ) -> Result<(), anyhow::Error> {
         println!("{}: InboundProcessor::process_inbound called", self.name);
         Ok(())
@@ -79,6 +80,7 @@ where
         &self,
         _connection_id: &str,
         _state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        _metadata: &Arc<ConnectionMetadata>,
     ) -> Result<(), anyhow::Error> {
         println!("{}: InboundProcessor::on_connect called", self.name);
         Ok(())
@@ -100,9 +102,14 @@ async fn test_on_connect_propagation() {
         .build();
 
     // Create test state
-    let relay_url = RelayUrl::parse("ws://test.relay").unwrap();
-    let state = Arc::new(RwLock::new(
-        NostrConnectionState::<()>::new(relay_url).unwrap(),
+    let state = Arc::new(RwLock::new(NostrConnectionState::<()>::new().unwrap()));
+
+    // Create test metadata
+    let relay_pubkey = nostr_sdk::Keys::generate().public_key();
+    let metadata = Arc::new(ConnectionMetadata::new_with_context(
+        RelayUrl::parse("ws://test.relay").unwrap(),
+        Arc::new(nostr_lmdb::Scope::Default),
+        relay_pubkey,
     ));
 
     // Create test sender
@@ -113,7 +120,7 @@ async fn test_on_connect_propagation() {
     let connected_chain = chain.build_connected(tx);
 
     // Call on_connect through the connected chain
-    InboundProcessor::on_connect_chain(&connected_chain, "test_conn", &state)
+    InboundProcessor::on_connect_chain(&connected_chain, "test_conn", &state, &metadata)
         .await
         .unwrap();
 

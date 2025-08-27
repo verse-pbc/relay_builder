@@ -30,7 +30,7 @@ impl EventProcessor for ProtocolProcessor {
         &self,
         event: Event,
         _custom_state: Arc<parking_lot::RwLock<()>>,
-        context: EventContext<'_>,
+        context: &EventContext,
     ) -> RelayResult<Vec<StoreCommand>> {
         // NIP-42: Check authentication for posting
         if self.require_auth_to_post && context.authed_pubkey.is_none() {
@@ -88,7 +88,7 @@ impl EventProcessor for ProtocolProcessor {
         }
 
         // Store the event
-        Ok(vec![(event, context.subdomain.clone()).into()])
+        Ok(vec![(event, (*context.subdomain).clone()).into()])
     }
 }
 

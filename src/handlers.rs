@@ -3,7 +3,6 @@
 //! This module provides pre-built handlers that can be used with various web frameworks.
 //! Currently supports Axum, with other frameworks planned.
 
-use crate::NostrConnectionState;
 use axum::{
     extract::ConnectInfo,
     http::HeaderMap,
@@ -364,22 +363,8 @@ where
 
         info!("New WebSocket connection from {}", real_ip);
 
-        // Create state with subdomain information
-        let mut state = NostrConnectionState::<T>::default();
-
-        // Set subdomain based on host header and scope config
-        if let Some(host_str) = &host {
-            if let crate::config::ScopeConfig::Subdomain { base_domain_parts } = &self.scope_config
-            {
-                if let Some(subdomain_name) =
-                    crate::subdomain::extract_subdomain(host_str, *base_domain_parts)
-                {
-                    if let Ok(scope) = nostr_lmdb::Scope::named(&subdomain_name) {
-                        state.subdomain = Arc::new(scope);
-                    }
-                }
-            }
-        }
+        // Note: This endpoint doesn't support WebSocket upgrades - it's type-erased
+        // The state creation was removed as it's not used
 
         // The handler is type-erased due to the new compile-time middleware API
         // This is a known limitation - WebSocket connections cannot be handled through

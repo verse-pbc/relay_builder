@@ -9,7 +9,7 @@ use relay_builder::{
     middleware_chain::{chain, BuildConnected},
     middlewares::*,
     nostr_middleware::{MessageSender, NostrMiddleware, OutboundContext, OutboundProcessor},
-    state::NostrConnectionState,
+    state::{ConnectionMetadata, NostrConnectionState},
 };
 use std::{
     sync::{
@@ -91,6 +91,7 @@ struct TestContext<T> {
     connection_id: String,
     message: Option<RelayMessage<'static>>,
     state: Arc<RwLock<NostrConnectionState<T>>>,
+    metadata: Arc<ConnectionMetadata>,
     sender: MessageSender,
     _raw_sender: flume::Sender<(RelayMessage<'static>, usize, Option<String>)>,
 }
@@ -102,10 +103,17 @@ impl<T> TestContext<T> {
     {
         let (tx, _rx) = flume::bounded(10);
         let sender = MessageSender::new(tx.clone(), 0);
+        let relay_pubkey = nostr_sdk::Keys::generate().public_key();
+        let metadata = Arc::new(ConnectionMetadata::new_with_context(
+            RelayUrl::parse("ws://test.relay").expect("Valid URL"),
+            Arc::new(nostr_lmdb::Scope::Default),
+            relay_pubkey,
+        ));
         Self {
             connection_id: "test_conn".to_string(),
             message: Some(message),
             state: Arc::new(RwLock::new(NostrConnectionState::<T>::default())),
+            metadata,
             sender,
             _raw_sender: tx,
         }
@@ -116,6 +124,7 @@ impl<T> TestContext<T> {
             connection_id: &self.connection_id,
             message: &mut self.message,
             state: &self.state,
+            metadata: &self.metadata,
             sender: &self.sender,
         }
     }
@@ -134,6 +143,7 @@ impl<T> TestContext<T> {
                 &self.connection_id,
                 &mut self.message,
                 &self.state,
+                &self.metadata,
                 from_position,
             )
             .await

@@ -1,7 +1,6 @@
 //! Integration tests for RelayMiddleware
 
 use nostr_sdk::prelude::*;
-use nostr_sdk::RelayUrl;
 use relay_builder::{Error, EventContext, EventProcessor, NostrConnectionState, StoreCommand};
 use std::sync::Arc;
 
@@ -22,10 +21,10 @@ impl EventProcessor for TestEventProcessor {
         &self,
         event: Event,
         _custom_state: Arc<parking_lot::RwLock<()>>,
-        context: EventContext<'_>,
+        context: &EventContext,
     ) -> Result<Vec<StoreCommand>, Error> {
         if self.allow_all {
-            Ok(vec![(event, context.subdomain.clone()).into()])
+            Ok(vec![(event, (*context.subdomain).clone()).into()])
         } else {
             Err(Error::restricted("Events not allowed"))
         }
@@ -35,7 +34,7 @@ impl EventProcessor for TestEventProcessor {
         &self,
         _event: &Event,
         _custom_state: Arc<parking_lot::RwLock<()>>,
-        _context: EventContext<'_>,
+        _context: &EventContext,
     ) -> Result<bool, Error> {
         Ok(self.allow_all)
     }
@@ -50,10 +49,10 @@ impl EventProcessor for RestrictiveEventProcessor {
         &self,
         event: Event,
         _custom_state: Arc<parking_lot::RwLock<()>>,
-        context: EventContext<'_>,
+        context: &EventContext,
     ) -> Result<Vec<StoreCommand>, Error> {
         if context.authed_pubkey.is_some() {
-            Ok(vec![(event, context.subdomain.clone()).into()])
+            Ok(vec![(event, (*context.subdomain).clone()).into()])
         } else {
             Err(Error::auth_required(
                 "Authentication required to publish events",
@@ -65,7 +64,7 @@ impl EventProcessor for RestrictiveEventProcessor {
         &self,
         _event: &Event,
         _custom_state: Arc<parking_lot::RwLock<()>>,
-        context: EventContext<'_>,
+        context: &EventContext,
     ) -> Result<bool, Error> {
         Ok(context.authed_pubkey.is_some())
     }
@@ -74,7 +73,7 @@ impl EventProcessor for RestrictiveEventProcessor {
         &self,
         _filters: &[Filter],
         _custom_state: Arc<parking_lot::RwLock<()>>,
-        context: EventContext<'_>,
+        context: &EventContext,
     ) -> Result<(), Error> {
         if context.authed_pubkey.is_some() {
             Ok(())
@@ -87,40 +86,42 @@ impl EventProcessor for RestrictiveEventProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nostr_lmdb::Scope;
 
     #[tokio::test]
     async fn test_verify_filters() {
         let restrict_processor = RestrictiveEventProcessor;
         let relay_pubkey = Keys::generate().public_key();
-        let state = NostrConnectionState::<()>::new(RelayUrl::parse("ws://test").unwrap()).unwrap();
+        let _state = NostrConnectionState::<()>::new().unwrap();
         let filters = vec![Filter::new()];
 
+        let test_subdomain = Arc::new(Scope::Default);
         let context = EventContext {
             authed_pubkey: None,
-            subdomain: &state.subdomain,
-            relay_pubkey: &relay_pubkey,
+            subdomain: test_subdomain.clone(),
+            relay_pubkey,
         };
 
         // Test without authentication
         let verify_result = restrict_processor.verify_filters(
             &filters,
             Arc::new(parking_lot::RwLock::new(())),
-            context,
+            &context,
         );
         assert!(verify_result.is_err());
 
         // Test with authentication
         let auth_pubkey = Keys::generate().public_key();
         let auth_context = EventContext {
-            authed_pubkey: Some(&auth_pubkey),
-            subdomain: &state.subdomain,
-            relay_pubkey: &relay_pubkey,
+            authed_pubkey: Some(auth_pubkey),
+            subdomain: test_subdomain.clone(),
+            relay_pubkey,
         };
 
         let verify_result = restrict_processor.verify_filters(
             &filters,
             Arc::new(parking_lot::RwLock::new(())),
-            auth_context,
+            &auth_context,
         );
         assert!(verify_result.is_ok());
     }
@@ -132,50 +133,54 @@ mod tests {
         let restrict_processor = RestrictiveEventProcessor;
 
         let relay_pubkey = Keys::generate().public_key();
-        let state = NostrConnectionState::<()>::new(RelayUrl::parse("ws://test").unwrap()).unwrap();
+        let _state = NostrConnectionState::<()>::new().unwrap();
         let keys = Keys::generate();
         let event = keys
             .sign_event(EventBuilder::text_note("test").build(keys.public_key()))
             .await
             .unwrap();
 
+        let test_subdomain = Arc::new(Scope::Default);
         let context = EventContext {
             authed_pubkey: None,
-            subdomain: &state.subdomain,
-            relay_pubkey: &relay_pubkey,
+            subdomain: test_subdomain.clone(),
+            relay_pubkey,
         };
 
         // Test allow all processor
         assert!(allow_processor
-            .can_see_event(&event, Arc::new(parking_lot::RwLock::new(())), context)
+            .can_see_event(&event, Arc::new(parking_lot::RwLock::new(())), &context)
             .unwrap());
 
         // Test deny all processor
         assert!(!deny_processor
-            .can_see_event(&event, Arc::new(parking_lot::RwLock::new(())), context)
+            .can_see_event(&event, Arc::new(parking_lot::RwLock::new(())), &context)
             .unwrap());
 
         // Test restrictive processor without auth
         assert!(!restrict_processor
-            .can_see_event(&event, Arc::new(parking_lot::RwLock::new(())), context)
+            .can_see_event(&event, Arc::new(parking_lot::RwLock::new(())), &context)
             .unwrap());
 
         // Test restrictive processor with auth
         let auth_pubkey = keys.public_key();
         let auth_context = EventContext {
-            authed_pubkey: Some(&auth_pubkey),
-            subdomain: &state.subdomain,
-            relay_pubkey: &relay_pubkey,
+            authed_pubkey: Some(auth_pubkey),
+            subdomain: test_subdomain.clone(),
+            relay_pubkey,
         };
         assert!(restrict_processor
-            .can_see_event(&event, Arc::new(parking_lot::RwLock::new(())), auth_context)
+            .can_see_event(
+                &event,
+                Arc::new(parking_lot::RwLock::new(())),
+                &auth_context
+            )
             .unwrap());
     }
 
     #[tokio::test]
     async fn test_subscription_limiting() {
-        let mut state =
-            NostrConnectionState::<()>::new(RelayUrl::parse("ws://test").unwrap()).unwrap();
+        let mut state = NostrConnectionState::<()>::new().unwrap();
         state.set_max_subscriptions(Some(3));
 
         // Can add first subscription

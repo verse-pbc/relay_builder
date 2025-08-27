@@ -1,7 +1,8 @@
 //! Either middleware implementation for conditional middleware support
 
 use crate::nostr_middleware::{
-    DisconnectContext, InboundContext, InboundProcessor, NostrMiddleware, OutboundContext,
+    ConnectionContext, DisconnectContext, InboundContext, InboundProcessor, NostrMiddleware,
+    OutboundContext,
 };
 use anyhow::Result;
 
@@ -59,7 +60,7 @@ where
 {
     fn on_connect(
         &self,
-        ctx: crate::nostr_middleware::ConnectionContext<'_, T>,
+        ctx: ConnectionContext<'_, T>,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
         async move {
             match self {

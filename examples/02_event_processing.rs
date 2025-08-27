@@ -52,7 +52,7 @@ impl EventProcessor for SmartEventProcessor {
         &self,
         event: Event,
         _custom_state: Arc<parking_lot::RwLock<()>>,
-        context: EventContext<'_>,
+        context: &EventContext,
     ) -> RelayResult<Vec<StoreCommand>> {
         // First check rate limit
         let pubkey = event.pubkey.to_string();
@@ -131,7 +131,7 @@ impl EventProcessor for SmartEventProcessor {
             events_received
         );
 
-        Ok(vec![(event, context.subdomain.clone()).into()])
+        Ok(vec![(event, (*context.subdomain).clone()).into()])
     }
 }
 

@@ -202,12 +202,11 @@ where
                         connection_id_clone, auth_event_id
                     );
 
-                    let (expected_challenge, connection_subdomain) = {
+                    let expected_challenge = {
                         let state_guard = ctx.state.read();
-                        let challenge = state_guard.challenge.as_ref().cloned();
-                        let subdomain = Arc::clone(&state_guard.subdomain);
-                        (challenge, subdomain)
+                        state_guard.challenge.as_ref().cloned()
                     };
+                    let connection_subdomain = Arc::clone(&ctx.metadata.subdomain);
 
                     let Some(expected_challenge) = expected_challenge else {
                         let conn_id_err = ctx.connection_id;
@@ -369,8 +368,7 @@ where
                     // Authentication successful
                     {
                         let mut state_write = ctx.state.write();
-                        state_write.authed_pubkey = Some(auth_event_pubkey);
-                        state_write.challenge = None;
+                        state_write.set_authenticated(auth_event_pubkey, ctx.metadata);
                     }
                     debug!(
                         target: "auth",
@@ -413,15 +411,30 @@ mod tests {
         message: Option<ClientMessage<'static>>,
         state: crate::state::NostrConnectionState<()>,
     ) -> (crate::test_utils::TestInboundContext<()>, MessageReceiver) {
+        create_test_auth_context_with_subdomain(
+            connection_id,
+            message,
+            state,
+            Arc::new(nostr_lmdb::Scope::Default),
+        )
+    }
+
+    fn create_test_auth_context_with_subdomain(
+        connection_id: String,
+        message: Option<ClientMessage<'static>>,
+        state: crate::state::NostrConnectionState<()>,
+        subdomain: Arc<nostr_lmdb::Scope>,
+    ) -> (crate::test_utils::TestInboundContext<()>, MessageReceiver) {
         // Create a proper channel for testing
         let (tx, rx) = flume::bounded::<(RelayMessage<'static>, usize, Option<String>)>(10);
-        let test_ctx = crate::test_utils::create_test_inbound_context(
+        let test_ctx = crate::test_utils::create_test_inbound_context_with_subdomain(
             connection_id,
             message,
             Some(tx), // sender
             state,
             vec![], // middlewares (unused in new system)
             0,      // index
+            subdomain,
         );
         (test_ctx, rx)
     }
@@ -508,10 +521,11 @@ mod tests {
             .build_with_ctx(&Instant::now(), keys.public_key());
         let auth_event = keys.sign_event(auth_event).await.unwrap();
 
-        let (mut test_ctx, _rx) = create_test_auth_context(
+        let (mut test_ctx, _rx) = create_test_auth_context_with_subdomain(
             "test_conn".to_string(),
             Some(ClientMessage::Auth(Cow::Owned(auth_event.clone()))),
             state,
+            Arc::new(Scope::named("test").unwrap()),
         );
 
         let ctx = test_ctx.as_context();
@@ -540,10 +554,11 @@ mod tests {
             .build_with_ctx(&Instant::now(), keys.public_key());
         let auth_event = keys.sign_event(auth_event).await.unwrap();
 
-        let (mut test_ctx, _rx) = create_test_auth_context(
+        let (mut test_ctx, _rx) = create_test_auth_context_with_subdomain(
             "test_conn".to_string(),
             Some(ClientMessage::Auth(Cow::Owned(auth_event.clone()))),
             state,
+            Arc::new(Scope::named("test").unwrap()),
         );
 
         let ctx = test_ctx.as_context();
@@ -573,10 +588,11 @@ mod tests {
             .build_with_ctx(&Instant::now(), keys.public_key());
         let auth_event = wrong_keys.sign_event(auth_event).await.unwrap();
 
-        let (mut test_ctx, _rx) = create_test_auth_context(
+        let (mut test_ctx, _rx) = create_test_auth_context_with_subdomain(
             "test_conn".to_string(),
             Some(ClientMessage::Auth(Cow::Owned(auth_event.clone()))),
             state,
+            Arc::new(Scope::named("test").unwrap()),
         );
 
         let ctx = test_ctx.as_context();
@@ -612,10 +628,11 @@ mod tests {
             .build(keys.public_key());
         let auth_event = keys.sign_event(auth_event).await.unwrap();
 
-        let (mut test_ctx, _rx) = create_test_auth_context(
+        let (mut test_ctx, _rx) = create_test_auth_context_with_subdomain(
             "test_conn".to_string(),
             Some(ClientMessage::Auth(Cow::Owned(auth_event.clone()))),
             state,
+            Arc::new(Scope::named("test").unwrap()),
         );
 
         let ctx = test_ctx.as_context();
@@ -659,14 +676,9 @@ mod tests {
         let mut state = create_test_state(None);
         let challenge = "test_challenge".to_string();
         state.challenge = Some(challenge.clone());
-        state.subdomain = Arc::new(Scope::named("test").unwrap()); // Connection is for test.example.com
 
         // Debug connection state before creating context
-        let subdomain_str = match state.subdomain.as_ref() {
-            Scope::Named { name, .. } => name.clone(),
-            Scope::Default => "Default".to_string(),
-        };
-        println!("Test setup - subdomain: {subdomain_str}, auth_url: {auth_url}");
+        println!("Test setup - subdomain: test, auth_url: {auth_url}");
 
         // Auth event with correct subdomain (test.example.com)
         let auth_event = EventBuilder::new(Kind::Authentication, "")
@@ -688,10 +700,11 @@ mod tests {
             .unwrap_or("No relay URL found");
         println!("Auth event relay URL: {client_url}");
 
-        let (mut test_ctx, _rx) = create_test_auth_context(
+        let (mut test_ctx, _rx) = create_test_auth_context_with_subdomain(
             "test_conn".to_string(),
             Some(ClientMessage::Auth(Cow::Owned(auth_event.clone()))),
             state,
+            Arc::new(Scope::named("test").unwrap()),
         );
 
         let ctx = test_ctx.as_context();
@@ -715,7 +728,7 @@ mod tests {
         let mut state = create_test_state(None);
         let challenge = "test_challenge".to_string();
         state.challenge = Some(challenge.clone());
-        state.subdomain = Arc::new(Scope::named("test").unwrap()); // Connection is for test.example.com
+        // subdomain will be set through the test context creation
 
         println!("Wrong subdomain test - connection subdomain: test, auth_url: {auth_url}");
 
@@ -728,10 +741,11 @@ mod tests {
             .build_with_ctx(&Instant::now(), keys.public_key());
         let auth_event = keys.sign_event(auth_event).await.unwrap();
 
-        let (mut test_ctx, _rx) = create_test_auth_context(
+        let (mut test_ctx, _rx) = create_test_auth_context_with_subdomain(
             "test_conn".to_string(),
             Some(ClientMessage::Auth(Cow::Owned(auth_event.clone()))),
             state,
+            Arc::new(Scope::named("test").unwrap()),
         );
 
         let ctx = test_ctx.as_context();
@@ -751,7 +765,7 @@ mod tests {
         let mut state = create_test_state(None);
         let challenge = "test_challenge".to_string();
         state.challenge = Some(challenge.clone());
-        state.subdomain = Arc::new(Scope::named("test").unwrap()); // Connection is for test.example.com
+        // subdomain will be set through the test context creation
 
         println!("Different base domain test - connection subdomain: test, auth_url: {auth_url}");
 
@@ -764,10 +778,11 @@ mod tests {
             .build_with_ctx(&Instant::now(), keys.public_key());
         let auth_event = keys.sign_event(auth_event).await.unwrap();
 
-        let (mut test_ctx, _rx) = create_test_auth_context(
+        let (mut test_ctx, _rx) = create_test_auth_context_with_subdomain(
             "test_conn".to_string(),
             Some(ClientMessage::Auth(Cow::Owned(auth_event.clone()))),
             state,
+            Arc::new(Scope::named("test").unwrap()),
         );
 
         let ctx = test_ctx.as_context();

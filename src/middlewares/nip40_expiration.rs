@@ -63,7 +63,7 @@ where
                         let filter = Filter::new().id(event_ref.id);
                         let delete_command = StoreCommand::DeleteEvents(
                             filter,
-                            (*ctx.state.read().subdomain).clone(),
+                            (*ctx.metadata.subdomain).clone(),
                             None,
                         );
 

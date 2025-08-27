@@ -4,7 +4,7 @@
 //! using concrete types to avoid generic complexity while maintaining compile-time performance.
 //! It follows the patterns from websocket_builder's API guide with index-based routing.
 
-use crate::state::NostrConnectionState;
+use crate::state::{ConnectionMetadata, NostrConnectionState};
 use flume::Sender;
 use nostr_sdk::prelude::*;
 use std::sync::Arc;
@@ -104,8 +104,10 @@ pub struct InboundContext<'a, T, Next> {
     pub connection_id: &'a str,
     /// The incoming message (mutable reference for consumption)
     pub message: &'a mut Option<ClientMessage<'static>>,
-    /// Connection state
+    /// Connection state (mutable fields)
     pub state: &'a Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+    /// Connection metadata (immutable fields)
+    pub metadata: &'a Arc<ConnectionMetadata>,
     /// Message sender for sending responses with index tracking
     pub sender: MessageSender,
     /// Reference to the next processor in the chain (static dispatch)
@@ -119,7 +121,7 @@ where
     /// Continue to the next middleware in the chain
     pub async fn next(self) -> Result<(), anyhow::Error> {
         self.next
-            .process_inbound_chain(self.connection_id, self.message, self.state)
+            .process_inbound_chain(self.connection_id, self.message, self.state, self.metadata)
             .await
     }
 }
@@ -153,8 +155,10 @@ pub struct OutboundContext<'a, T> {
     pub connection_id: &'a str,
     /// The outgoing message (mutable reference for modification)
     pub message: &'a mut Option<RelayMessage<'static>>,
-    /// Connection state
+    /// Connection state (mutable fields)
     pub state: &'a Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+    /// Connection metadata (immutable fields)
+    pub metadata: &'a Arc<ConnectionMetadata>,
     /// Message sender with position tracking
     pub sender: &'a MessageSender,
 }
@@ -167,8 +171,10 @@ where
 {
     /// Connection ID (remote address)
     pub connection_id: &'a str,
-    /// Connection state
+    /// Connection state (mutable fields)
     pub state: &'a Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+    /// Connection metadata (immutable fields)
+    pub metadata: &'a Arc<ConnectionMetadata>,
 }
 
 /// Context for connection events
@@ -179,8 +185,10 @@ where
 {
     /// Connection ID (remote address)
     pub connection_id: &'a str,
-    /// Connection state
+    /// Connection state (mutable fields)
     pub state: &'a Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+    /// Connection metadata (immutable fields)
+    pub metadata: &'a Arc<ConnectionMetadata>,
     /// Message sender for sending responses with index tracking
     pub sender: MessageSender,
 }
@@ -218,12 +226,14 @@ pub trait InboundProcessor<T>: Send + Sync {
         connection_id: &str,
         message: &mut Option<ClientMessage<'static>>,
         state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        metadata: &Arc<ConnectionMetadata>,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send;
 
     fn on_connect_chain(
         &self,
         connection_id: &str,
         state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        metadata: &Arc<ConnectionMetadata>,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send;
 }
 
@@ -234,6 +244,7 @@ pub trait OutboundProcessor<T>: Send + Sync {
         connection_id: &str,
         message: &mut Option<RelayMessage<'static>>,
         state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        metadata: &Arc<ConnectionMetadata>,
         from_position: usize,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send;
 
@@ -241,6 +252,7 @@ pub trait OutboundProcessor<T>: Send + Sync {
         &self,
         connection_id: &str,
         state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        metadata: &Arc<ConnectionMetadata>,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send;
 }
 

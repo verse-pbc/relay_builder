@@ -17,12 +17,12 @@ impl EventProcessor for AcceptAllProcessor {
         &self,
         event: Event,
         _custom_state: Arc<RwLock<()>>,
-        context: EventContext<'_>,
+        context: &EventContext,
     ) -> Result<Vec<StoreCommand>, relay_builder::Error> {
         // Accept all events
         Ok(vec![StoreCommand::SaveSignedEvent(
             Box::new(event),
-            context.subdomain.clone(),
+            (*context.subdomain).clone(),
             None, // No response handler
         )])
     }

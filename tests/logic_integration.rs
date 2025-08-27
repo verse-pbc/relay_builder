@@ -1,7 +1,7 @@
 //! Integration tests for EventProcessor trait and implementations
 
+use nostr_lmdb::Scope;
 use nostr_sdk::prelude::*;
-use nostr_sdk::RelayUrl;
 use relay_builder::{Error, EventContext, EventProcessor, NostrConnectionState, StoreCommand};
 use std::sync::Arc;
 
@@ -14,10 +14,10 @@ impl EventProcessor for PublicEventProcessor {
         &self,
         event: Event,
         _custom_state: Arc<parking_lot::RwLock<()>>,
-        context: EventContext<'_>,
+        context: &EventContext,
     ) -> Result<Vec<StoreCommand>, Error> {
         // Public relay accepts all events
-        Ok(vec![(event, context.subdomain.clone()).into()])
+        Ok(vec![(event, (*context.subdomain).clone()).into()])
     }
 }
 
@@ -30,11 +30,11 @@ impl EventProcessor for AuthRequiredEventProcessor {
         &self,
         event: Event,
         _custom_state: Arc<parking_lot::RwLock<()>>,
-        context: EventContext<'_>,
+        context: &EventContext,
     ) -> Result<Vec<StoreCommand>, Error> {
         // Only accept events from authenticated users
         if context.authed_pubkey.is_some() {
-            Ok(vec![(event, context.subdomain.clone()).into()])
+            Ok(vec![(event, (*context.subdomain).clone()).into()])
         } else {
             Err(Error::auth_required(
                 "Authentication required to publish events",
@@ -46,7 +46,7 @@ impl EventProcessor for AuthRequiredEventProcessor {
         &self,
         _event: &Event,
         _custom_state: Arc<parking_lot::RwLock<()>>,
-        context: EventContext<'_>,
+        context: &EventContext,
     ) -> Result<bool, Error> {
         // Only authenticated users can see events
         Ok(context.authed_pubkey.is_some())
@@ -56,7 +56,7 @@ impl EventProcessor for AuthRequiredEventProcessor {
         &self,
         _filters: &[Filter],
         _custom_state: Arc<parking_lot::RwLock<()>>,
-        context: EventContext<'_>,
+        context: &EventContext,
     ) -> Result<(), Error> {
         // Only authenticated users can subscribe
         if context.authed_pubkey.is_some() {
@@ -70,16 +70,17 @@ impl EventProcessor for AuthRequiredEventProcessor {
 #[tokio::test]
 async fn test_public_event_processor() {
     let processor = PublicEventProcessor;
-    let state = NostrConnectionState::<()>::new(RelayUrl::parse("ws://test").unwrap()).unwrap();
+    let state = NostrConnectionState::<()>::new().unwrap();
     let keys = Keys::generate();
     let unsigned_event = EventBuilder::text_note("test").build(keys.public_key());
     let event = keys.sign_event(unsigned_event).await.unwrap();
     let relay_pubkey = Keys::generate().public_key();
 
+    let test_subdomain = Arc::new(Scope::Default);
     let context = EventContext {
-        authed_pubkey: state.authed_pubkey.as_ref(),
-        subdomain: &state.subdomain,
-        relay_pubkey: &relay_pubkey,
+        authed_pubkey: state.authed_pubkey,
+        subdomain: test_subdomain.clone(),
+        relay_pubkey,
     };
 
     // Test event handling - should accept all events
@@ -87,7 +88,7 @@ async fn test_public_event_processor() {
         .handle_event(
             event.clone(),
             Arc::new(parking_lot::RwLock::new(())),
-            context,
+            &context,
         )
         .await;
     assert!(result.is_ok());
@@ -100,51 +101,52 @@ async fn test_public_event_processor() {
 
     // Test can_see_event - should always return true
     let can_see = processor
-        .can_see_event(&event, Arc::new(parking_lot::RwLock::new(())), context)
+        .can_see_event(&event, Arc::new(parking_lot::RwLock::new(())), &context)
         .unwrap();
     assert!(can_see);
 
     // Test verify_filters - should always succeed
     let filters = vec![Filter::new()];
     let verify_result =
-        processor.verify_filters(&filters, Arc::new(parking_lot::RwLock::new(())), context);
+        processor.verify_filters(&filters, Arc::new(parking_lot::RwLock::new(())), &context);
     assert!(verify_result.is_ok());
 }
 
 #[tokio::test]
 async fn test_auth_required_event_processor() {
     let processor = AuthRequiredEventProcessor;
-    let mut state = NostrConnectionState::<()>::new(RelayUrl::parse("ws://test").unwrap()).unwrap();
+    let mut state = NostrConnectionState::<()>::new().unwrap();
     let keys = Keys::generate();
     let unsigned_event = EventBuilder::text_note("test").build(keys.public_key());
     let event = keys.sign_event(unsigned_event).await.unwrap();
     let relay_pubkey = Keys::generate().public_key();
 
     // Test without authentication
+    let test_subdomain = Arc::new(Scope::Default);
     let context = EventContext {
         authed_pubkey: None,
-        subdomain: &state.subdomain,
-        relay_pubkey: &relay_pubkey,
+        subdomain: test_subdomain.clone(),
+        relay_pubkey,
     };
 
     let result = processor
         .handle_event(
             event.clone(),
             Arc::new(parking_lot::RwLock::new(())),
-            context,
+            &context,
         )
         .await;
     assert!(result.is_err());
     assert!(matches!(result.unwrap_err(), Error::AuthRequired { .. }));
 
     let can_see = processor
-        .can_see_event(&event, Arc::new(parking_lot::RwLock::new(())), context)
+        .can_see_event(&event, Arc::new(parking_lot::RwLock::new(())), &context)
         .unwrap();
     assert!(!can_see);
 
     let filters = vec![Filter::new()];
     let verify_result =
-        processor.verify_filters(&filters, Arc::new(parking_lot::RwLock::new(())), context);
+        processor.verify_filters(&filters, Arc::new(parking_lot::RwLock::new(())), &context);
     assert!(verify_result.is_err());
 
     // Test with authentication
@@ -152,16 +154,16 @@ async fn test_auth_required_event_processor() {
     state.authed_pubkey = Some(auth_pubkey);
 
     let auth_context = EventContext {
-        authed_pubkey: state.authed_pubkey.as_ref(),
-        subdomain: &state.subdomain,
-        relay_pubkey: &relay_pubkey,
+        authed_pubkey: state.authed_pubkey,
+        subdomain: test_subdomain.clone(),
+        relay_pubkey,
     };
 
     let result = processor
         .handle_event(
             event.clone(),
             Arc::new(parking_lot::RwLock::new(())),
-            auth_context,
+            &auth_context,
         )
         .await;
     assert!(result.is_ok());
@@ -169,14 +171,18 @@ async fn test_auth_required_event_processor() {
     assert_eq!(commands.len(), 1);
 
     let can_see = processor
-        .can_see_event(&event, Arc::new(parking_lot::RwLock::new(())), auth_context)
+        .can_see_event(
+            &event,
+            Arc::new(parking_lot::RwLock::new(())),
+            &auth_context,
+        )
         .unwrap();
     assert!(can_see);
 
     let verify_result = processor.verify_filters(
         &filters,
         Arc::new(parking_lot::RwLock::new(())),
-        auth_context,
+        &auth_context,
     );
     assert!(verify_result.is_ok());
 }
@@ -192,7 +198,7 @@ impl EventProcessor for FilteringProcessor {
         &self,
         event: Event,
         _custom_state: Arc<parking_lot::RwLock<()>>,
-        context: EventContext<'_>,
+        context: &EventContext,
     ) -> Result<Vec<StoreCommand>, Error> {
         // Check if event contains blocked keywords
         for keyword in &self.blocked_keywords {
@@ -203,14 +209,14 @@ impl EventProcessor for FilteringProcessor {
             }
         }
 
-        Ok(vec![(event, context.subdomain.clone()).into()])
+        Ok(vec![(event, (*context.subdomain).clone()).into()])
     }
 
     fn can_see_event(
         &self,
         event: &Event,
         _custom_state: Arc<parking_lot::RwLock<()>>,
-        _context: EventContext<'_>,
+        _context: &EventContext,
     ) -> Result<bool, Error> {
         // Hide events with blocked keywords
         for keyword in &self.blocked_keywords {
@@ -227,14 +233,15 @@ async fn test_filtering_processor() {
     let processor = FilteringProcessor {
         blocked_keywords: vec!["spam".to_string(), "test123".to_string()],
     };
-    let state = NostrConnectionState::<()>::new(RelayUrl::parse("ws://test").unwrap()).unwrap();
+    let state = NostrConnectionState::<()>::new().unwrap();
     let keys = Keys::generate();
     let relay_pubkey = Keys::generate().public_key();
 
+    let test_subdomain = Arc::new(Scope::Default);
     let context = EventContext {
-        authed_pubkey: state.authed_pubkey.as_ref(),
-        subdomain: &state.subdomain,
-        relay_pubkey: &relay_pubkey,
+        authed_pubkey: state.authed_pubkey,
+        subdomain: test_subdomain.clone(),
+        relay_pubkey,
     };
 
     // Test with clean content
@@ -246,7 +253,7 @@ async fn test_filtering_processor() {
         .handle_event(
             clean_event.clone(),
             Arc::new(parking_lot::RwLock::new(())),
-            context,
+            &context,
         )
         .await;
     assert!(result.is_ok());
@@ -255,7 +262,7 @@ async fn test_filtering_processor() {
         .can_see_event(
             &clean_event,
             Arc::new(parking_lot::RwLock::new(())),
-            context,
+            &context,
         )
         .unwrap();
     assert!(can_see);
@@ -269,13 +276,17 @@ async fn test_filtering_processor() {
         .handle_event(
             spam_event.clone(),
             Arc::new(parking_lot::RwLock::new(())),
-            context,
+            &context,
         )
         .await;
     assert!(result.is_err());
 
     let can_see = processor
-        .can_see_event(&spam_event, Arc::new(parking_lot::RwLock::new(())), context)
+        .can_see_event(
+            &spam_event,
+            Arc::new(parking_lot::RwLock::new(())),
+            &context,
+        )
         .unwrap();
     assert!(!can_see);
 }

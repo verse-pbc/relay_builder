@@ -30,15 +30,15 @@ where
         &self,
         event: Event,
         _custom_state: Arc<parking_lot::RwLock<T>>,
-        context: EventContext<'_>,
+        context: &EventContext,
     ) -> RelayResult<Vec<StoreCommand>> {
         // Track events with their auth state
         self.auth_events
             .lock()
-            .push((event.clone(), context.authed_pubkey.copied()));
+            .push((event.clone(), context.authed_pubkey));
 
         // Accept all events
-        Ok(vec![(event, context.subdomain.clone()).into()])
+        Ok(vec![(event, (*context.subdomain).clone()).into()])
     }
 }
 
@@ -105,14 +105,14 @@ where
         &self,
         event: Event,
         _custom_state: Arc<parking_lot::RwLock<T>>,
-        context: EventContext<'_>,
+        context: &EventContext,
     ) -> RelayResult<Vec<StoreCommand>> {
         if context.authed_pubkey.is_none() {
             return Err(relay_builder::Error::restricted(
                 "authentication required: please AUTH first",
             ));
         }
-        Ok(vec![(event, context.subdomain.clone()).into()])
+        Ok(vec![(event, (*context.subdomain).clone()).into()])
     }
 }
 

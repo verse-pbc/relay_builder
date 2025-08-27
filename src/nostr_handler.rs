@@ -7,7 +7,7 @@ use crate::config::ScopeConfig;
 use crate::event_ingester::{EventIngester, IngesterError};
 use crate::middleware_chain::NostrChainBuilder;
 use crate::nostr_middleware::{InboundProcessor, OutboundProcessor};
-use crate::state::NostrConnectionState;
+use crate::state::{ConnectionMetadata, NostrConnectionState};
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::stream::{self, SplitSink, StreamExt};
 use futures_util::SinkExt;
@@ -28,6 +28,8 @@ pub struct NostrHandlerFactory<T, Chain> {
     scope_config: ScopeConfig,
     /// Size for the outbound message channel
     channel_size: usize,
+    /// The relay's public key for event context
+    relay_pubkey: PublicKey,
     /// Phantom data for the custom state type
     _phantom: std::marker::PhantomData<T>,
 }
@@ -38,12 +40,14 @@ impl<T, Chain> NostrHandlerFactory<T, Chain> {
         event_ingester: EventIngester,
         scope_config: ScopeConfig,
         channel_size: usize,
+        relay_pubkey: PublicKey,
     ) -> Self {
         Self {
             chain,
             event_ingester,
             scope_config,
             channel_size,
+            relay_pubkey,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -80,6 +84,8 @@ where
             event_ingester: self.event_ingester.clone(),
             subdomain: subdomain.unwrap_or_else(|| Arc::new(Scope::Default)),
             state: None,
+            metadata: None,
+            relay_pubkey: self.relay_pubkey,
             addr: None,
             inbound_task: None,
             outbound_task: None,
@@ -104,8 +110,12 @@ where
     event_ingester: EventIngester,
     /// The subdomain scope for this connection
     subdomain: Arc<Scope>,
-    /// Connection state
+    /// Connection state (mutable fields)
     state: Option<Arc<parking_lot::RwLock<NostrConnectionState<T>>>>,
+    /// Connection metadata (immutable fields)
+    metadata: Option<Arc<ConnectionMetadata>>,
+    /// Relay public key (needed to create metadata)
+    relay_pubkey: PublicKey,
     /// Remote address
     addr: Option<SocketAddr>,
     /// Handle to the inbound processing task
@@ -148,9 +158,18 @@ where
 
         let relay_url = RelayUrl::parse(&format!("ws://{addr}"))
             .unwrap_or_else(|_| RelayUrl::parse("ws://localhost").expect("Valid fallback URL"));
+
+        // Create connection metadata (immutable)
+        let metadata = Arc::new(ConnectionMetadata::new_with_context(
+            relay_url,
+            self.subdomain.clone(),
+            self.relay_pubkey,
+        ));
+        self.metadata = Some(metadata.clone());
+
+        // Create connection state (mutable)
         let state = Arc::new(parking_lot::RwLock::new(
-            NostrConnectionState::<T>::with_subdomain(relay_url, self.subdomain.clone())
-                .expect("Valid state"),
+            NostrConnectionState::<T>::new().expect("Valid state"),
         ));
         self.state = Some(state.clone());
 
@@ -165,6 +184,7 @@ where
         // Clone what we need for the outbound task
         let chain = connected_chain.clone();
         let state_clone = state.clone();
+        let metadata_clone = metadata.clone();
         let addr_string = addr.to_string();
         let outbound_rx = self.outbound_rx.clone();
 
@@ -206,6 +226,7 @@ where
                             &addr_string,
                             &mut message_opt,
                             &state_clone,
+                            &metadata_clone,
                             from_index,
                         )
                         .await
@@ -269,7 +290,7 @@ where
             .expect("Connected chain should be set");
 
         connected_chain
-            .on_connect_chain(&addr.to_string(), &state)
+            .on_connect_chain(&addr.to_string(), &state, &metadata)
             .await?;
 
         Ok(())
@@ -281,6 +302,10 @@ where
 
         let Some(state) = &self.state else {
             return Err(anyhow::anyhow!("No connection state"));
+        };
+
+        let Some(metadata) = &self.metadata else {
+            return Err(anyhow::anyhow!("No connection metadata"));
         };
 
         let Some(addr) = &self.addr else {
@@ -328,7 +353,7 @@ where
             .expect("Connected chain should be set");
 
         match connected_chain
-            .process_inbound_chain(&addr.to_string(), &mut message_opt, state)
+            .process_inbound_chain(&addr.to_string(), &mut message_opt, state, metadata)
             .await
         {
             Ok(_) => Ok(()),
@@ -352,11 +377,12 @@ where
 
         tracing::debug!("Connection disconnected: {:?}", reason);
 
-        if let (Some(state), Some(addr)) = (&self.state, &self.addr) {
+        if let (Some(state), Some(metadata), Some(addr)) = (&self.state, &self.metadata, &self.addr)
+        {
             // Use the connected chain for on_disconnect
             if let Some(connected_chain) = &self.connected_chain {
                 let _ = connected_chain
-                    .on_disconnect_chain(&addr.to_string(), state)
+                    .on_disconnect_chain(&addr.to_string(), state, metadata)
                     .await;
             }
         }
@@ -382,6 +408,7 @@ pub trait IntoHandlerFactory<T, Chain> {
         event_ingester: EventIngester,
         scope_config: ScopeConfig,
         channel_size: usize,
+        relay_pubkey: PublicKey,
     ) -> NostrHandlerFactory<T, Chain>;
 }
 
@@ -396,8 +423,15 @@ where
         event_ingester: EventIngester,
         scope_config: ScopeConfig,
         channel_size: usize,
+        relay_pubkey: PublicKey,
     ) -> NostrHandlerFactory<T, Chain> {
-        NostrHandlerFactory::new(self.build(), event_ingester, scope_config, channel_size)
+        NostrHandlerFactory::new(
+            self.build(),
+            event_ingester,
+            scope_config,
+            channel_size,
+            relay_pubkey,
+        )
     }
 }
 
