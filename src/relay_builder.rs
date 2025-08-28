@@ -354,9 +354,9 @@ where
     ///     .await?;
     ///
     /// // Use with websocket_builder's route helper
-    /// let app = websocket_builder::websocket_route("/", factory);
+    /// let app = crate::websocket::websocket_route("/", factory);
     /// ```
-    pub async fn build(self) -> Result<impl websocket_builder::HandlerFactory, Error>
+    pub async fn build(self) -> Result<impl crate::websocket::HandlerFactory, Error>
     where
         T: Default,
     {
@@ -396,7 +396,7 @@ where
     pub async fn build_with<F, C>(
         mut self,
         chain_fn: F,
-    ) -> Result<impl websocket_builder::HandlerFactory, Error>
+    ) -> Result<impl crate::websocket::HandlerFactory, Error>
     where
         T: Default,
         F: FnOnce(NostrChainBuilder<T, End<T>>) -> NostrChainBuilder<T, C>,

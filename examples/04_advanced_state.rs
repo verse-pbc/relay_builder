@@ -17,13 +17,13 @@ use axum::{
     Router,
 };
 use nostr_sdk::prelude::*;
+use relay_builder::{handle_upgrade, HandlerFactory, WebSocketUpgrade};
 use relay_builder::{
     EventContext, EventProcessor, RelayBuilder, RelayConfig, RelayInfo, Result as RelayResult,
     StoreCommand,
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
-use websocket_builder::{handle_upgrade, HandlerFactory, WebSocketUpgrade};
 
 /// Custom state for each connection
 #[derive(Debug, Clone, Default)]

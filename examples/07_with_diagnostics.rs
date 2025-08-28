@@ -58,7 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("To test immediately, modify diagnostics.rs to use a shorter interval.");
 
     // Create the WebSocket route
-    let app = websocket_builder::websocket_route("/", handler_factory);
+    let app = relay_builder::websocket_route("/", handler_factory);
 
     // Start the server
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8080").await?;

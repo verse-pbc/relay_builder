@@ -18,6 +18,7 @@ use axum::{
     Router,
 };
 use nostr_sdk::prelude::*;
+use relay_builder::{handle_upgrade, HandlerFactory, WebSocketUpgrade};
 use relay_builder::{
     middlewares::{ErrorHandlingMiddleware, NostrLoggerMiddleware},
     nostr_middleware::{ConnectionContext, InboundContext, InboundProcessor, NostrMiddleware},
@@ -26,7 +27,6 @@ use relay_builder::{
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
-use websocket_builder::{handle_upgrade, HandlerFactory, WebSocketUpgrade};
 
 /// Custom middleware that logs request timing
 #[derive(Debug, Clone)]

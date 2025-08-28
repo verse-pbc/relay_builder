@@ -8,6 +8,7 @@ use crate::event_ingester::{EventIngester, IngesterError};
 use crate::middleware_chain::NostrChainBuilder;
 use crate::nostr_middleware::{InboundProcessor, OutboundProcessor};
 use crate::state::{ConnectionMetadata, NostrConnectionState};
+use crate::websocket::{DisconnectReason, HandlerFactory, Utf8Bytes, WebSocketHandler};
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::stream::{self, SplitSink, StreamExt};
 use futures_util::SinkExt;
@@ -15,7 +16,6 @@ use nostr_lmdb::Scope;
 use nostr_sdk::prelude::*;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use websocket_builder::{DisconnectReason, HandlerFactory, Utf8Bytes, WebSocketHandler};
 
 /// Factory for creating Nostr connection handlers
 #[derive(Clone)]

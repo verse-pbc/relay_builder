@@ -5,7 +5,7 @@ mod test_channel_overflow {
     use std::time::Instant;
     use tokio::sync::mpsc;
     use tokio::time::sleep;
-    use websocket_builder::MessageSender;
+    // use websocket_builder::MessageSender;  // TODO: Fix after websocket merge
     use nostr_sdk::prelude::*;
     use crate::subscription_service::*;
 

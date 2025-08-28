@@ -26,6 +26,7 @@ pub mod error;
 pub mod event_ingester;
 pub mod event_processor;
 pub mod global_metrics;
+pub mod websocket;
 
 pub mod handlers;
 pub mod metrics;
@@ -79,7 +80,9 @@ pub use middleware_chain::chain;
 pub use nostr_handler::{IntoHandlerFactory, NostrHandlerFactory};
 pub use nostr_middleware::{MessageSender, NostrMiddleware};
 
-// Re-export websocket_builder types to avoid version conflicts
-// pub use websocket_builder::MessageSender;  // Disabled - using NostrMessageSender instead
-
-pub use websocket_builder::WebSocketUpgrade;
+// Re-export websocket types
+pub use websocket::{
+    handle_socket, handle_upgrade, handle_upgrade_with_config, websocket_route,
+    websocket_route_with_config, ConnectionConfig, DisconnectReason, HandlerFactory, Utf8Bytes,
+    WebSocketHandler, WebSocketUpgrade,
+};

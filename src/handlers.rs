@@ -3,6 +3,7 @@
 //! This module provides pre-built handlers that can be used with various web frameworks.
 //! Currently supports Axum, with other frameworks planned.
 
+use crate::websocket::WebSocketUpgrade;
 use axum::{
     extract::ConnectInfo,
     http::HeaderMap,
@@ -16,7 +17,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
-use websocket_builder::WebSocketUpgrade;
 
 /// Helper struct for automatic connection counting
 struct ConnectionCounter {

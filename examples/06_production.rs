@@ -19,6 +19,9 @@ use axum::{
     Router,
 };
 use nostr_sdk::prelude::*;
+use relay_builder::{
+    handle_upgrade_with_config, ConnectionConfig, HandlerFactory, WebSocketUpgrade,
+};
 use relay_builder::{RelayBuilder, RelayConfig, RelayInfo, WebSocketConfig};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -26,9 +29,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
-use websocket_builder::{
-    handle_upgrade_with_config, ConnectionConfig, HandlerFactory, WebSocketUpgrade,
-};
 
 /// Health check endpoint
 async fn health(State(counter): State<Arc<AtomicUsize>>) -> String {

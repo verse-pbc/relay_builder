@@ -9,15 +9,15 @@ use axum::{
 };
 use nostr_sdk::prelude::*;
 use relay_builder::{cpu_affinity, RelayInfo, WebSocketConfig};
+use relay_builder::{
+    handle_upgrade_with_config, ConnectionConfig, HandlerFactory, WebSocketUpgrade,
+};
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpSocket};
 use tokio::task::JoinSet;
-use websocket_builder::{
-    handle_upgrade_with_config, ConnectionConfig, HandlerFactory, WebSocketUpgrade,
-};
 
 /// Initialize tracing subscriber for examples
 pub fn init_logging() {
