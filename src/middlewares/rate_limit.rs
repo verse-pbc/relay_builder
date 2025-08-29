@@ -1,0 +1,273 @@
+//! Rate limiting middleware using governor crate
+//!
+//! Provides per-connection and global rate limiting for Nostr relays
+
+use crate::nostr_middleware::{InboundContext, InboundProcessor, NostrMiddleware};
+use governor::{DefaultKeyedRateLimiter, DefaultDirectRateLimiter, Quota, RateLimiter};
+use nostr_sdk::prelude::*;
+use std::sync::Arc;
+
+/// Rate limiting middleware for Nostr connections
+#[derive(Clone)]
+pub struct RateLimitMiddleware<T = ()> {
+    /// Per-connection rate limiter (keyed by connection ID)
+    per_connection_limiter: Arc<DefaultKeyedRateLimiter<String>>,
+    /// Optional global rate limiter for the entire relay
+    global_limiter: Option<Arc<DefaultDirectRateLimiter>>,
+    _phantom: std::marker::PhantomData<T>,
+}
+
+impl<T> RateLimitMiddleware<T> {
+    /// Create a new rate limiter with per-connection limits
+    pub fn new(per_connection_quota: Quota) -> Self {
+        Self {
+            per_connection_limiter: Arc::new(RateLimiter::keyed(per_connection_quota)),
+            global_limiter: None,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
+    /// Create a new rate limiter with both per-connection and global limits
+    pub fn with_global_limit(per_connection_quota: Quota, global_quota: Quota) -> Self {
+        Self {
+            per_connection_limiter: Arc::new(RateLimiter::keyed(per_connection_quota)),
+            global_limiter: Some(Arc::new(RateLimiter::direct(global_quota))),
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T> NostrMiddleware<T> for RateLimitMiddleware<T>
+where
+    T: Send + Sync + Clone + 'static,
+{
+    async fn process_inbound<Next>(
+        &self,
+        ctx: InboundContext<'_, T, Next>,
+    ) -> Result<(), anyhow::Error>
+    where
+        Next: InboundProcessor<T>,
+    {
+        // Check global rate limit first (if configured)
+        if let Some(global_limiter) = &self.global_limiter {
+            if global_limiter.check().is_err() {
+                // Extract event ID if this is an EVENT message
+                if let Some(ClientMessage::Event(event)) = ctx.message.as_ref() {
+                    ctx.send_ok(event.id, false, "rate limit: global limit exceeded".to_string())?;
+                } else {
+                    ctx.send_notice("rate limit: global limit exceeded".to_string())?;
+                }
+                return Ok(());
+            }
+        }
+        
+        // Check per-connection rate limit
+        let connection_id = ctx.connection_id.to_string();
+        if self.per_connection_limiter.check_key(&connection_id).is_err() {
+            // Extract event ID if this is an EVENT message
+            if let Some(ClientMessage::Event(event)) = ctx.message.as_ref() {
+                ctx.send_ok(event.id, false, "rate limit: connection limit exceeded".to_string())?;
+            } else {
+                ctx.send_notice("rate limit: connection limit exceeded".to_string())?;
+            }
+            return Ok(());
+        }
+        
+        // Both rate limits passed, continue to next middleware
+        ctx.next().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::{create_test_inbound_context, create_test_event};
+    use nonzero_ext::nonzero;
+
+    #[tokio::test]
+    async fn test_allows_requests_within_rate_limit() {
+        // Create middleware allowing 10 requests per second
+        let quota = Quota::per_second(nonzero!(10u32));
+        let middleware = RateLimitMiddleware::<()>::new(quota);
+        
+        // Create test context
+        let connection_id = "test_connection_1".to_string();
+        
+        // Create a valid test event
+        let keys = Keys::generate();
+        let test_event = create_test_event(&keys, 1, vec![]).await;
+        let message = Some(ClientMessage::event(test_event));
+        
+        let (tx, _rx) = flume::bounded::<(RelayMessage<'static>, usize, Option<String>)>(10);
+        let mut ctx = create_test_inbound_context(
+            connection_id.clone(),
+            message,
+            Some(tx),
+            Default::default(),
+            vec![],
+            0,
+        );
+        
+        // First request should pass
+        let result = middleware.process_inbound(ctx.as_context()).await;
+        assert!(result.is_ok(), "First request should be allowed");
+    }
+
+    #[tokio::test]
+    async fn test_rejects_requests_exceeding_rate_limit() {
+        // Create middleware allowing only 1 request per second
+        let quota = Quota::per_second(nonzero!(1u32));
+        let middleware = RateLimitMiddleware::<()>::new(quota);
+        
+        let connection_id = "test_connection_2".to_string();
+        
+        // Create valid test events
+        let keys = Keys::generate();
+        let test_event1 = create_test_event(&keys, 1, vec![]).await;
+        let message = Some(ClientMessage::event(test_event1));
+        
+        let (tx, rx) = flume::bounded::<(RelayMessage<'static>, usize, Option<String>)>(10);
+        let mut ctx = create_test_inbound_context(
+            connection_id.clone(),
+            message,
+            Some(tx.clone()),
+            Default::default(),
+            vec![],
+            0,
+        );
+        
+        let result = middleware.process_inbound(ctx.as_context()).await;
+        assert!(result.is_ok(), "First request should be allowed");
+        
+        // Second request should be rate limited
+        let test_event2 = create_test_event(&keys, 1, vec![]).await;
+        let message2 = Some(ClientMessage::event(test_event2));
+        
+        let mut ctx2 = create_test_inbound_context(
+            connection_id.clone(),
+            message2,
+            Some(tx),
+            Default::default(),
+            vec![],
+            0,
+        );
+        
+        let result2 = middleware.process_inbound(ctx2.as_context()).await;
+        assert!(result2.is_ok(), "Rate limiting should not return error");
+        
+        // Check that a rate limit message was sent
+        let sent_messages: Vec<_> = rx.try_iter().collect();
+        assert!(!sent_messages.is_empty(), "Should send rate limit notice");
+        
+        let (msg, _, _) = &sent_messages[0];
+        match msg {
+            RelayMessage::Notice(message) => {
+                assert!(message.contains("rate limit"), "Notice should mention rate limit");
+            }
+            RelayMessage::Ok { event_id: _, status, message } => {
+                assert!(!status, "OK message should indicate rejection");
+                assert!(message.contains("rate limit"), "Message should mention rate limit");
+            }
+            _ => panic!("Expected Notice or OK message for rate limiting"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_different_connections_have_independent_limits() {
+        // Create middleware allowing 2 requests per second per connection
+        let quota = Quota::per_second(nonzero!(2u32));
+        let middleware = RateLimitMiddleware::<()>::new(quota);
+        
+        let connection1 = "conn1".to_string();
+        let connection2 = "conn2".to_string();
+        
+        // Create valid test event
+        let keys = Keys::generate();
+        let test_event = create_test_event(&keys, 1, vec![]).await;
+        let message = Some(ClientMessage::event(test_event));
+        
+        // Both connections should be able to make 2 requests
+        for _ in 0..2 {
+            // Connection 1
+            let (tx1, _rx1) = flume::bounded::<(RelayMessage<'static>, usize, Option<String>)>(10);
+            let mut ctx1 = create_test_inbound_context(
+                connection1.clone(),
+                message.clone(),
+                Some(tx1),
+                Default::default(),
+                vec![],
+                0,
+            );
+            let result1 = middleware.process_inbound(ctx1.as_context()).await;
+            assert!(result1.is_ok());
+            
+            // Connection 2
+            let (tx2, _rx2) = flume::bounded::<(RelayMessage<'static>, usize, Option<String>)>(10);
+            let mut ctx2 = create_test_inbound_context(
+                connection2.clone(),
+                message.clone(),
+                Some(tx2),
+                Default::default(),
+                vec![],
+                0,
+            );
+            let result2 = middleware.process_inbound(ctx2.as_context()).await;
+            assert!(result2.is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_global_rate_limit() {
+        // Create middleware with both per-connection and global limits
+        let per_conn_quota = Quota::per_second(nonzero!(10u32));
+        let global_quota = Quota::per_second(nonzero!(2u32)); // Very restrictive global limit
+        let middleware = RateLimitMiddleware::<()>::with_global_limit(per_conn_quota, global_quota);
+        
+        let connection1 = "conn1".to_string();
+        let connection2 = "conn2".to_string();
+        
+        // Create valid test event
+        let keys = Keys::generate();
+        let test_event = create_test_event(&keys, 1, vec![]).await;
+        let message = Some(ClientMessage::event(test_event));
+        
+        // First two requests should pass (using up global limit)
+        let (tx1, _rx1) = flume::bounded::<(RelayMessage<'static>, usize, Option<String>)>(10);
+        let mut ctx1 = create_test_inbound_context(
+            connection1.clone(),
+            message.clone(),
+            Some(tx1),
+            Default::default(),
+            vec![],
+            0,
+        );
+        assert!(middleware.process_inbound(ctx1.as_context()).await.is_ok());
+        
+        let (tx2, _rx2) = flume::bounded::<(RelayMessage<'static>, usize, Option<String>)>(10);
+        let mut ctx2 = create_test_inbound_context(
+            connection2.clone(),
+            message.clone(),
+            Some(tx2),
+            Default::default(),
+            vec![],
+            0,
+        );
+        assert!(middleware.process_inbound(ctx2.as_context()).await.is_ok());
+        
+        // Third request should be blocked by global limit even though per-connection limit allows it
+        let (tx3, rx3) = flume::bounded::<(RelayMessage<'static>, usize, Option<String>)>(10);
+        let mut ctx3 = create_test_inbound_context(
+            connection1.clone(),
+            message.clone(),
+            Some(tx3),
+            Default::default(),
+            vec![],
+            0,
+        );
+        assert!(middleware.process_inbound(ctx3.as_context()).await.is_ok());
+        
+        // Verify rate limit message was sent
+        let sent_messages: Vec<_> = rx3.try_iter().collect();
+        assert!(!sent_messages.is_empty(), "Should send rate limit notice");
+    }
+}
