@@ -68,13 +68,13 @@ async fn main() -> Result<()> {
     // Example 1: Basic per-connection rate limiting
     // Allow 10 events per second per connection
     let per_connection_limiter = RateLimitMiddleware::<()>::new(
-        Quota::per_second(nonzero!(10u32)) // 10 events per second per connection
+        Quota::per_second(nonzero!(10u32)), // 10 events per second per connection
     );
 
     // Example 2: More restrictive rate limiting
     // Allow only 2 events per second per connection
     let _strict_limiter = RateLimitMiddleware::<()>::new(
-        Quota::per_second(nonzero!(2u32)) // 2 events per second per connection
+        Quota::per_second(nonzero!(2u32)), // 2 events per second per connection
     );
 
     // Example 3: Rate limiting with both per-connection and global limits
@@ -86,7 +86,7 @@ async fn main() -> Result<()> {
 
     // Example 4: Different time windows
     let _per_minute_limiter = RateLimitMiddleware::<()>::new(
-        Quota::per_minute(nonzero!(60u32)) // 60 events per minute (1 per second average)
+        Quota::per_minute(nonzero!(60u32)), // 60 events per minute (1 per second average)
     );
 
     // Build relay with the rate limiting middleware
@@ -95,11 +95,10 @@ async fn main() -> Result<()> {
         RelayBuilder::<()>::new(config.clone())
             .event_processor(SimpleProcessor)
             .build_with(|chain| {
-                chain
-                    .with(per_connection_limiter) // Basic rate limiting
-                    // .with(strict_limiter)      // Strict rate limiting
-                    // .with(hybrid_limiter)      // Hybrid rate limiting
-                    // .with(per_minute_limiter)  // Per-minute rate limiting
+                chain.with(per_connection_limiter) // Basic rate limiting
+                                                   // .with(strict_limiter)      // Strict rate limiting
+                                                   // .with(hybrid_limiter)      // Hybrid rate limiting
+                                                   // .with(per_minute_limiter)  // Per-minute rate limiting
             })
             .await?,
     );
