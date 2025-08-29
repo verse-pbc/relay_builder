@@ -150,7 +150,9 @@ mod tests {
 
         // Verify it's the correct type of error
         let error = result2.unwrap_err();
-        let relay_error = error.downcast_ref::<Error>().expect("Should be relay Error");
+        let relay_error = error
+            .downcast_ref::<Error>()
+            .expect("Should be relay Error");
         match relay_error {
             Error::Restricted { message, .. } => {
                 assert!(
@@ -259,7 +261,9 @@ mod tests {
 
         // Verify it's the correct type of error
         let error = result3.unwrap_err();
-        let relay_error = error.downcast_ref::<Error>().expect("Should be relay Error");
+        let relay_error = error
+            .downcast_ref::<Error>()
+            .expect("Should be relay Error");
         match relay_error {
             Error::Restricted { message, .. } => {
                 assert!(

@@ -360,12 +360,11 @@ where
             Err(e) => {
                 // Log error but don't disconnect
                 tracing::error!("Inbound processing error: {}", e);
-
-                if let Some(nostr_error) = e.downcast_ref::<crate::error::Error>() {
-                    let notice = RelayMessage::notice(nostr_error.to_string());
-                    let _ = self.outbound_tx.send((notice, 0, None));
-                }
-
+                
+                // Don't send a duplicate NOTICE here - ErrorHandlingMiddleware already sends
+                // the appropriate OK(false) or CLOSED message with correct prefix
+                // (e.g., "restricted:", "auth-required:", "error:")
+                
                 Ok(())
             }
         }
