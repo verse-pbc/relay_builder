@@ -6,7 +6,7 @@ use crate::error::Error;
 use crate::event_processor::{DefaultRelayProcessor, EventProcessor};
 use crate::metrics::SubscriptionMetricsHandler;
 use crate::middleware_chain::chain;
-use crate::middleware_chain::{End, NostrChainBuilder};
+// Middleware chain types are used in type signatures
 use crate::middlewares::{MetricsHandler, Nip42Middleware};
 use crate::nostr_handler::IntoHandlerFactory;
 use crate::nostr_middleware::{InboundProcessor, OutboundProcessor};
@@ -399,7 +399,15 @@ where
     ) -> Result<impl crate::websocket::HandlerFactory, Error>
     where
         T: Default,
-        F: FnOnce(NostrChainBuilder<T, End<T>>) -> NostrChainBuilder<T, C>,
+        F: FnOnce(
+            crate::middleware_chain::NostrChainBuilder<
+                T,
+                crate::middleware_chain::ChainBlueprint<
+                    RelayMiddleware<P, T>,
+                    crate::middleware_chain::End<T>,
+                >,
+            >,
+        ) -> crate::middleware_chain::NostrChainBuilder<T, C>,
         C: crate::middleware_chain::BuildConnected + Send + Sync + 'static + Clone,
         C::Output: InboundProcessor<T> + OutboundProcessor<T> + Send + Sync + 'static + Clone,
     {
@@ -483,11 +491,11 @@ where
             replaceable_event_queue,
         );
 
-        // Let the user build their custom middleware chain
-        let user_chain = chain_fn(chain::<T>());
+        // Start with relay middleware as the innermost middleware
+        let base_chain = chain::<T>().with(relay_middleware);
 
-        // Add the relay middleware as the innermost middleware
-        let chain_with_relay = user_chain.with(relay_middleware);
+        // Let the user build their custom middleware chain on top of relay middleware
+        let chain_with_relay = chain_fn(base_chain);
 
         // Build the final chain with conditionally applied defaults using Either
         use crate::middlewares::MetricsMiddleware;

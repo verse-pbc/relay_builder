@@ -81,7 +81,10 @@ where
                         }
                     } else {
                         // No message ID available, just log the error
-                        error!("Error occurred but no message ID available for response: {}", err);
+                        error!(
+                            "Error occurred but no message ID available for response: {}",
+                            err
+                        );
                     }
                 } else {
                     error!("Unhandled error in middleware chain: {}", e);
