@@ -42,31 +42,29 @@ where
     where
         Next: InboundProcessor<T>,
     {
+        // Extract message ID before it potentially gets consumed by other middleware
         let client_message_id = match &ctx.message {
-            Some(ClientMessage::Event(event)) => ClientMessageId::Event(event.id),
+            Some(ClientMessage::Event(event)) => Some(ClientMessageId::Event(event.id)),
             Some(ClientMessage::Req {
                 subscription_id, ..
-            }) => ClientMessageId::Subscription(subscription_id.to_string()),
+            }) => Some(ClientMessageId::Subscription(subscription_id.to_string())),
             Some(ClientMessage::ReqMultiFilter {
                 subscription_id, ..
-            }) => ClientMessageId::Subscription(subscription_id.to_string()),
+            }) => Some(ClientMessageId::Subscription(subscription_id.to_string())),
             Some(ClientMessage::Close(subscription_id)) => {
-                ClientMessageId::Subscription(subscription_id.to_string())
+                Some(ClientMessageId::Subscription(subscription_id.to_string()))
             }
-            Some(ClientMessage::Auth(auth)) => ClientMessageId::Event(auth.id),
+            Some(ClientMessage::Auth(auth)) => Some(ClientMessageId::Event(auth.id)),
             Some(ClientMessage::NegOpen {
                 subscription_id, ..
-            }) => ClientMessageId::Subscription(subscription_id.to_string()),
+            }) => Some(ClientMessageId::Subscription(subscription_id.to_string())),
             Some(ClientMessage::NegMsg {
                 subscription_id, ..
-            }) => ClientMessageId::Subscription(subscription_id.to_string()),
+            }) => Some(ClientMessageId::Subscription(subscription_id.to_string())),
             Some(ClientMessage::NegClose { subscription_id }) => {
-                ClientMessageId::Subscription(subscription_id.to_string())
+                Some(ClientMessageId::Subscription(subscription_id.to_string()))
             }
-            _ => {
-                error!("Skipping unhandled client message: {:?}", ctx.message);
-                return Ok(());
-            }
+            _ => None,
         };
 
         // Extract what we need before calling next()
@@ -76,8 +74,14 @@ where
             Ok(()) => Ok(()),
             Err(e) => {
                 if let Some(err) = e.downcast_ref::<Error>() {
-                    if let Err(err) = handle_inbound_error(err, &sender, client_message_id).await {
-                        error!("Failed to handle inbound error: {}", err);
+                    // Only handle the error if we have a message ID to respond to
+                    if let Some(message_id) = client_message_id {
+                        if let Err(err) = handle_inbound_error(err, &sender, message_id).await {
+                            error!("Failed to handle inbound error: {}", err);
+                        }
+                    } else {
+                        // No message ID available, just log the error
+                        error!("Error occurred but no message ID available for response: {}", err);
                     }
                 } else {
                     error!("Unhandled error in middleware chain: {}", e);
