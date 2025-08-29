@@ -360,11 +360,11 @@ where
             Err(e) => {
                 // Log error but don't disconnect
                 tracing::error!("Inbound processing error: {}", e);
-                
+
                 // Don't send a duplicate NOTICE here - ErrorHandlingMiddleware already sends
                 // the appropriate OK(false) or CLOSED message with correct prefix
                 // (e.g., "restricted:", "auth-required:", "error:")
-                
+
                 Ok(())
             }
         }
