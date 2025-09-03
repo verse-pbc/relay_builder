@@ -43,7 +43,7 @@ impl RelayDatabase {
     pub fn with_config(
         db_path_param: impl AsRef<std::path::Path>,
         max_readers: Option<u32>,
-        ingester_thread_config: Option<Box<dyn FnOnce() + Send>>,
+        _ingester_thread_config: Option<Box<dyn FnOnce() + Send>>,
     ) -> Result<Self, Error> {
         let db_path = db_path_param.as_ref().to_path_buf();
 
@@ -75,9 +75,8 @@ impl RelayDatabase {
         if let Some(readers) = max_readers {
             builder = builder.max_readers(readers);
         }
-        if let Some(config) = ingester_thread_config {
-            builder = builder.with_ingester_thread_config(config);
-        }
+        // Note: ingester_thread_config is no longer supported in nostr-lmdb
+        // but we keep the parameter for API compatibility
 
         let lmdb_instance = builder.build().map_err(|e| {
             Error::database(format!(
@@ -104,7 +103,7 @@ impl RelayDatabase {
             Error::database(format!("Failed to get scoped view: {e}"))
         })?;
 
-        scoped_view.save_event(event).await.map_err(|e| {
+        scoped_view.save_event(&event).await.map_err(|e| {
             error!("Error saving event for scope {:?}: {:?}", scope, e);
             Box::new(e) as Box<dyn std::error::Error>
         })?;
@@ -133,7 +132,7 @@ impl RelayDatabase {
             Error::database(format!("Failed to get scoped view: {e}"))
         })?;
 
-        scoped_view.save_event_owned(event).await.map_err(|e| {
+        scoped_view.save_event(&event).await.map_err(|e| {
             error!("Error saving event for scope {:?}: {:?}", scope, e);
             Box::new(e) as Box<dyn std::error::Error>
         })?;
