@@ -11,9 +11,10 @@ A framework for building custom Nostr relays in Rust.
 - Custom middleware support with static dispatch (zero-cost abstractions)
 - Automatic signature verification and error handling
 - Built-in NIPs: 09 (deletion), 40 (expiration), 42 (auth), 70 (protected)
+- Rate limiting middleware with configurable limits
 - Subdomain isolation for multi-tenant deployments
 - Metrics, monitoring, and graceful shutdown
-- WebSocket backend support via tungstenite
+- Integrated WebSocket support via internal websocket module
 
 ## Quick Start
 
@@ -59,9 +60,9 @@ async fn main() -> Result<()> {
 }
 ```
 
-## WebSocket Backend
+## WebSocket Support
 
-The framework uses tungstenite for WebSocket connections via the `websocket_builder` dependency.
+The framework includes an integrated websocket module for handling WebSocket connections using tungstenite.
 
 ## Documentation
 

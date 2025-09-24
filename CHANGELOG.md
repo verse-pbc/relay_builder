@@ -10,14 +10,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.5.0-alpha.1] - Unreleased
 
 ### Added
-- WebSocket backend support: can now use either tungstenite (default) or fastwebsockets
-- Unified WebSocket API via websocket_builder v0.2.0-alpha.1
+- Rate limiting middleware (`RateLimitMiddleware`) using governor crate for efficient token bucket rate limiting
+- WebSocket module integrated directly into relay_builder (previously external websocket_builder dependency)
+- Example 07: Rate limiting demonstration
 
 ### Changed
-- **BREAKING**: Updated to websocket_builder v0.2.0-alpha.1 with new unified API
-- **BREAKING**: MessageConverter trait now uses byte-based methods for better performance
-- **BREAKING**: Database actor pattern with hybrid response system
+- **BREAKING**: WebSocket handling now uses integrated `websocket` module instead of external websocket_builder dependency
+- **BREAKING**: Consolidated websocket_builder functionality into relay_builder for simpler dependency management
+- Optimized lock usage and eliminated allocations in hot paths for better performance
+- Fixed duplicate message bug in error handling middleware chain
+- Fixed middleware chain ordering to ensure RelayMiddleware is always innermost
+- Updated to latest nostr-lmdb API
 - Moved to alpha versioning to reflect active development status
+
+### Removed
+- External websocket_builder dependency (functionality now integrated)
 
 ### Previous Changes (v0.1.0 - v0.4.1)
 Previous versions implemented core functionality including:

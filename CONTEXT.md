@@ -4,9 +4,9 @@ A framework for building custom Nostr relays with middleware support. Built on t
 
 ## Technology Stack
 
-- **Language**: Rust (edition 2024, requires 1.88.0)
+- **Language**: Rust (edition 2021)
 - **Async Runtime**: Tokio
-- **WebSocket**: websocket_builder (workspace dependency) for generic WebSocket transport
+- **WebSocket**: Integrated websocket module using tungstenite
 - **Database**: LMDB via nostr-lmdb with scoped-heed for multi-tenant support
 - **Web Framework**: Axum (always included)
 - **Nostr**: nostr-sdk for protocol types and operations
@@ -28,7 +28,13 @@ relay_builder/
 │   │   ├── metrics.rs        # Performance metrics
 │   │   ├── nip40_expiration.rs # NIP-40 expiration
 │   │   ├── nip42_auth.rs    # NIP-42 authentication
-│   │   └── nip70_protected.rs # NIP-70 protected events
+│   │   ├── nip70_protected.rs # NIP-70 protected events
+│   │   └── rate_limit.rs    # Rate limiting middleware
+│   ├── websocket/           # WebSocket handling module
+│   │   ├── mod.rs           # Module exports
+│   │   ├── axum_integration.rs # Axum WebSocket integration
+│   │   ├── connection.rs    # Connection management
+│   │   └── handler.rs       # WebSocket handler traits
 │   ├── crypto_helper.rs     # Cryptographic operations helper
 │   ├── database.rs          # Async database abstraction
 │   ├── subscription_coordinator.rs # Event storage and subscription management
@@ -43,7 +49,9 @@ relay_builder/
 │   ├── 03_protocol_features.rs # NIPs support
 │   ├── 04_advanced_state.rs    # Custom state and multi-tenancy
 │   ├── 05_custom_middleware.rs # Middleware patterns
-│   └── 06_production.rs        # Production-ready setup
+│   ├── 06_production.rs        # Production-ready setup
+│   ├── 07_rate_limiting.rs     # Rate limiting example
+│   └── 07_with_diagnostics.rs  # Diagnostics integration
 └── tests/
     ├── logic_integration.rs
     ├── middleware_integration.rs
@@ -141,6 +149,7 @@ Event signature verification is handled automatically by EventIngester, not via 
 ## Built-in Features
 
 - **NIPs Support**: 09 (deletion), 40 (expiration), 42 (auth for EVENT and REQ), 70 (protected)
+- **Rate Limiting**: Built-in RateLimitMiddleware using governor crate for efficient rate limiting
 - **Multi-tenant**: Subdomain isolation via Scope
 - **Database**: StoreCommand enum for async database operations
 - **Crypto**: EventIngester handles signature verification automatically
@@ -240,7 +249,7 @@ cargo bench
 See `examples/06_production.rs` for:
 - Metrics collection via metrics middleware
 - Error recovery with error_handling middleware
-- Rate limiting patterns would need to be added. We will add a middleware for this in the future and grow the collection from community usage.
+- Rate limiting via RateLimitMiddleware (see `examples/07_rate_limiting.rs` for detailed example)
 - NIP-42 authentication setup is optional, enabled by a builder flag, for both inbound and outbound events
 - Proper logging configuration
 
@@ -254,11 +263,12 @@ Common patterns:
 ## Dependencies
 
 Core dependencies from Cargo.toml:
-- `websocket_builder` (workspace dependency) - Generic WebSocket transport layer
 - `nostr-sdk`, `nostr`, `nostr-database`, `nostr-lmdb` - Nostr protocol support
 - `scoped-heed` - Multi-tenant LMDB support
 - `tokio` with full features
 - `axum` for web server integration
+- `governor` - Rate limiting
+- `tungstenite` via `tokio-tungstenite` - WebSocket support
 
 ## Example Applications
 

@@ -284,5 +284,5 @@ Static dispatch provides:
 
 ## Full Examples
 
-- [examples/10_custom_middleware.rs](../examples/10_custom_middleware.rs) - Simple approach using `with_essentials()`
-- [examples/10_custom_middleware.rs](../examples/10_custom_middleware.rs) - Advanced approach with full control over middleware stack
+- [examples/05_custom_middleware.rs](../examples/05_custom_middleware.rs) - Complete example showing both simple and advanced approaches
+- [examples/07_rate_limiting.rs](../examples/07_rate_limiting.rs) - Production-ready rate limiting middleware example

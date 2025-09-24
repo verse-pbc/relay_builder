@@ -7,7 +7,7 @@ This guide walks through relay_builder features with progressive examples.
 - Familiarity with Nostr protocol basics
 
 ## Structure
-- Examples are numbered 01 through 06
+- Examples are numbered 01 through 07
 - Each builds on previous concepts
 - Run with: `cargo run --example 01_minimal_relay`
 
@@ -137,6 +137,25 @@ Monitoring, metrics, and graceful shutdown for production deployments.
 
 **Run:** `cargo run --example 06_production`
 
+## Example 7: Rate Limiting
+
+Efficient rate limiting using the governor crate.
+
+**Library Features:**
+- `RateLimitMiddleware::new()` - Create rate limiter
+- Per-connection rate limiting
+- Global rate limiting option
+- Configurable limits and time windows
+- Integration with middleware chain
+
+**Key Points:**
+- Uses token bucket algorithm for efficiency
+- No allocations in hot path
+- Automatic cleanup of old connections
+- Customizable error messages
+
+**Run:** `cargo run --example 07_rate_limiting`
+
 ## Quick Reference
 
 ### RelayBuilder Methods
@@ -184,6 +203,7 @@ RelayConfig::new(url, db_path, keys)    // db_path can be String or Arc<RelayDat
 4. **Example 4** - Advanced state when you need per-connection data or multi-tenancy
 5. **Example 5** - Custom middleware for specialized requirements
 6. **Example 6** - Production deployment considerations
+7. **Example 7** - Add rate limiting to protect your relay
 
 ## Next Steps
 
