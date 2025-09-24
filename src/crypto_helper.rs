@@ -36,6 +36,63 @@ impl std::fmt::Debug for CryptoHelper {
     }
 }
 
+/// Statistics tracker for batch processing
+struct BatchStats {
+    batch_count: AtomicUsize,
+    batch_size_sum: AtomicUsize,
+    batch_size_max: AtomicUsize,
+}
+
+impl BatchStats {
+    fn new() -> Self {
+        Self {
+            batch_count: AtomicUsize::new(0),
+            batch_size_sum: AtomicUsize::new(0),
+            batch_size_max: AtomicUsize::new(0),
+        }
+    }
+
+    fn record_batch(&self, batch_size: usize, total_processed: usize, operation_name: &str) {
+        let batch_num = self.batch_count.fetch_add(1, Ordering::Relaxed);
+        self.batch_size_sum.fetch_add(batch_size, Ordering::Relaxed);
+
+        // Update max batch size
+        let mut current_max = self.batch_size_max.load(Ordering::Relaxed);
+        while current_max < batch_size {
+            match self.batch_size_max.compare_exchange_weak(
+                current_max,
+                batch_size,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(x) => current_max = x,
+            }
+        }
+
+        // Log every 100 batches
+        #[allow(clippy::manual_is_multiple_of)]
+        if batch_num > 0 && batch_num % 100 == 0 {
+            let sum = self.batch_size_sum.load(Ordering::Relaxed);
+            let max = self.batch_size_max.load(Ordering::Relaxed);
+            let avg = sum / (batch_num + 1);
+
+            info!(
+                "Crypto {} batch stats: {} batches processed, avg size: {}, max size: {}, total processed: {}",
+                operation_name, batch_num + 1, avg, max, total_processed
+            );
+
+            // Also log current batch size for comparison
+            if batch_size > avg * 2 {
+                info!(
+                    "Current batch size {} is significantly above average",
+                    batch_size
+                );
+            }
+        }
+    }
+}
+
 impl CryptoHelper {
     /// Create a new crypto helper with the given keys
     pub fn new(keys: Arc<Keys>) -> Self {
@@ -120,49 +177,14 @@ impl CryptoHelper {
             // Update stats
             verified_count.fetch_add(batch_size, Ordering::Relaxed);
 
-            // Log batch size periodically (every 100 batches)
-            static BATCH_COUNT: AtomicUsize = AtomicUsize::new(0);
-            static BATCH_SIZE_SUM: AtomicUsize = AtomicUsize::new(0);
-            static BATCH_SIZE_MAX: AtomicUsize = AtomicUsize::new(0);
-
-            let batch_num = BATCH_COUNT.fetch_add(1, Ordering::Relaxed);
-            BATCH_SIZE_SUM.fetch_add(batch_size, Ordering::Relaxed);
-
-            // Update max batch size
-            let mut current_max = BATCH_SIZE_MAX.load(Ordering::Relaxed);
-            while current_max < batch_size {
-                match BATCH_SIZE_MAX.compare_exchange_weak(
-                    current_max,
-                    batch_size,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(_) => break,
-                    Err(x) => current_max = x,
-                }
-            }
-
-            // Log every 100 batches
-            #[allow(clippy::manual_is_multiple_of)]
-            if batch_num > 0 && batch_num % 100 == 0 {
-                let sum = BATCH_SIZE_SUM.load(Ordering::Relaxed);
-                let max = BATCH_SIZE_MAX.load(Ordering::Relaxed);
-                let avg = sum / (batch_num + 1);
-                let total = verified_count.load(Ordering::Relaxed);
-
-                info!(
-                    "Crypto verification batch stats: {} batches processed, avg size: {}, max size: {}, total verified: {}",
-                    batch_num + 1, avg, max, total
-                );
-
-                // Also log current batch size for comparison
-                if batch_size > avg * 2 {
-                    info!(
-                        "Current batch size {} is significantly above average",
-                        batch_size
-                    );
-                }
-            }
+            // Log batch statistics
+            use once_cell::sync::Lazy;
+            static STATS: Lazy<BatchStats> = Lazy::new(BatchStats::new);
+            STATS.record_batch(
+                batch_size,
+                verified_count.load(Ordering::Relaxed),
+                "verification",
+            );
         }
 
         info!("Crypto verification processor stopped");
@@ -241,41 +263,10 @@ impl CryptoHelper {
             // Update stats
             signed_count.fetch_add(batch_size, Ordering::Relaxed);
 
-            // Log batch size periodically (every 100 batches)
-            static BATCH_COUNT: AtomicUsize = AtomicUsize::new(0);
-            static BATCH_SIZE_SUM: AtomicUsize = AtomicUsize::new(0);
-            static BATCH_SIZE_MAX: AtomicUsize = AtomicUsize::new(0);
-
-            let batch_num = BATCH_COUNT.fetch_add(1, Ordering::Relaxed);
-            BATCH_SIZE_SUM.fetch_add(batch_size, Ordering::Relaxed);
-
-            // Update max batch size
-            let mut current_max = BATCH_SIZE_MAX.load(Ordering::Relaxed);
-            while current_max < batch_size {
-                match BATCH_SIZE_MAX.compare_exchange_weak(
-                    current_max,
-                    batch_size,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(_) => break,
-                    Err(x) => current_max = x,
-                }
-            }
-
-            // Log every 100 batches
-            #[allow(clippy::manual_is_multiple_of)]
-            if batch_num > 0 && batch_num % 100 == 0 {
-                let sum = BATCH_SIZE_SUM.load(Ordering::Relaxed);
-                let max = BATCH_SIZE_MAX.load(Ordering::Relaxed);
-                let avg = sum / (batch_num + 1);
-                let total = signed_count.load(Ordering::Relaxed);
-
-                info!(
-                    "Crypto signing batch stats: {} batches processed, avg size: {}, max size: {}, total signed: {}",
-                    batch_num + 1, avg, max, total
-                );
-            }
+            // Log batch statistics
+            use once_cell::sync::Lazy;
+            static STATS: Lazy<BatchStats> = Lazy::new(BatchStats::new);
+            STATS.record_batch(batch_size, signed_count.load(Ordering::Relaxed), "signing");
         }
 
         info!("Crypto signing processor stopped");
