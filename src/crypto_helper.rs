@@ -143,6 +143,7 @@ impl CryptoHelper {
             }
 
             // Log every 100 batches
+            #[allow(clippy::manual_is_multiple_of)]
             if batch_num > 0 && batch_num % 100 == 0 {
                 let sum = BATCH_SIZE_SUM.load(Ordering::Relaxed);
                 let max = BATCH_SIZE_MAX.load(Ordering::Relaxed);
@@ -263,6 +264,7 @@ impl CryptoHelper {
             }
 
             // Log every 100 batches
+            #[allow(clippy::manual_is_multiple_of)]
             if batch_num > 0 && batch_num % 100 == 0 {
                 let sum = BATCH_SIZE_SUM.load(Ordering::Relaxed);
                 let max = BATCH_SIZE_MAX.load(Ordering::Relaxed);

@@ -96,6 +96,7 @@ impl EventProcessor<UserSession> for AdvancedStateProcessor {
         }
 
         // Log statistics every 10 messages
+        #[allow(clippy::manual_is_multiple_of)]
         if state.messages_sent % 10 == 0 {
             let duration = state
                 .first_event_time
