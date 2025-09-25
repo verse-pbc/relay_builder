@@ -46,6 +46,12 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
+    #[snafu(display("Duplicate: {message}"))]
+    Duplicate {
+        message: String,
+        backtrace: Backtrace,
+    },
+
     #[snafu(display("Event error: {message}"))]
     EventError {
         message: String,
@@ -105,6 +111,14 @@ impl Error {
     /// Create a notice error
     pub fn notice(message: impl Into<String>) -> Self {
         Self::Notice {
+            message: message.into(),
+            backtrace: Backtrace::capture(),
+        }
+    }
+
+    /// Create a duplicate error
+    pub fn duplicate(message: impl Into<String>) -> Self {
+        Self::Duplicate {
             message: message.into(),
             backtrace: Backtrace::capture(),
         }

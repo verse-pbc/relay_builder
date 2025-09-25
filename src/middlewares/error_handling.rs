@@ -148,6 +148,20 @@ async fn handle_inbound_error(
                 },
             }
         }
+        Duplicate { message, .. } => {
+            // For duplicate errors, use the duplicate prefix as per NIP-29
+            match client_message_id {
+                ClientMessageId::Event(event_id) => RelayMessage::Ok {
+                    event_id,
+                    status: false,
+                    message: format!("duplicate: {message}").into(),
+                },
+                ClientMessageId::Subscription(subscription_id) => RelayMessage::Closed {
+                    subscription_id: Cow::Owned(SubscriptionId::new(subscription_id)),
+                    message: format!("duplicate: {message}").into(),
+                },
+            }
+        }
         _ => {
             // For other error types, use generic error prefix
             match client_message_id {
@@ -272,6 +286,15 @@ mod tests {
             }
             _ => panic!("Expected Restricted error"),
         }
+
+        // Test duplicate error
+        let duplicate_error = Error::duplicate("User is already a member");
+        match &duplicate_error {
+            Error::Duplicate { message, .. } => {
+                assert_eq!(message, "User is already a member");
+            }
+            _ => panic!("Expected Duplicate error"),
+        }
     }
 
     #[test]
@@ -341,5 +364,10 @@ mod tests {
         let error_msg = format!("error: {}", "Database connection failed");
         assert!(error_msg.starts_with("error: "));
         assert!(error_msg.contains("Database connection failed"));
+
+        // Test duplicate prefix
+        let duplicate_msg = format!("duplicate: {}", "User is already a member");
+        assert!(duplicate_msg.starts_with("duplicate: "));
+        assert!(duplicate_msg.contains("User is already a member"));
     }
 }
