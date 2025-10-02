@@ -16,6 +16,7 @@ use nostr_lmdb::Scope;
 use nostr_sdk::prelude::*;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 /// Factory for creating Nostr connection handlers
 #[derive(Clone)]
@@ -91,6 +92,7 @@ where
             outbound_task: None,
             outbound_tx,
             outbound_rx,
+            outbound_cancellation: CancellationToken::new(),
             connection_span: None,
         }
     }
@@ -126,6 +128,8 @@ where
     outbound_tx: flume::Sender<(RelayMessage<'static>, usize, Option<String>)>,
     /// Receiver for outbound messages from middleware
     outbound_rx: flume::Receiver<(RelayMessage<'static>, usize, Option<String>)>,
+    /// Cancellation token for graceful outbound task shutdown
+    outbound_cancellation: CancellationToken,
     /// Span for tracing this connection
     connection_span: Option<tracing::Span>,
 }
@@ -187,6 +191,7 @@ where
         let metadata_clone = metadata.clone();
         let addr_string = addr.to_string();
         let outbound_rx = self.outbound_rx.clone();
+        let cancellation = self.outbound_cancellation.clone();
 
         // Spawn the outbound processing task
         let outbound_span = span.clone();
@@ -209,69 +214,89 @@ where
                 .ready_chunks(buffer_size),
             );
 
-            while let Some(message_batch) = message_stream.next().await {
-                let mut processed_messages = Vec::new();
+            loop {
+                tokio::select! {
+                    message_batch_opt = message_stream.next() => {
+                        let Some(message_batch) = message_batch_opt else {
+                            // Channel closed, close sink gracefully
+                            tracing::debug!("Message stream ended, closing sink for {}", debug_addr);
+                            if let Err(e) = sink.close().await {
+                                tracing::debug!("Failed to close sink on normal exit: {}", e);
+                            }
+                            break;
+                        };
+                        let mut processed_messages = Vec::new();
 
-                for (message, from_index, pre_json) in message_batch {
-                    // Capture original event ID for invalidation check (if it's an EVENT message)
-                    let original_event_id = if let RelayMessage::Event { event, .. } = &message {
-                        Some(event.id)
-                    } else {
-                        None
-                    };
-
-                    let mut message_opt = Some(message);
-                    if let Err(e) = chain
-                        .process_outbound_chain(
-                            &addr_string,
-                            &mut message_opt,
-                            &state_clone,
-                            &metadata_clone,
-                            from_index,
-                        )
-                        .await
-                    {
-                        tracing::error!("Outbound middleware processing error: {}", e);
-                        continue;
-                    }
-
-                    // If message survived processing, add to batch
-                    if let Some(msg) = message_opt {
-                        // Middleware changed the event - invalidate pre-serialized JSON
-                        let json_to_use =
-                            if let (Some(original_id), RelayMessage::Event { event, .. }) =
-                                (original_event_id, &msg)
-                            {
-                                if original_id != event.id {
-                                    // Event was modified, invalidate pre-serialized JSON
-                                    None
-                                } else {
-                                    // Event unchanged, can use pre-serialized JSON
-                                    pre_json
-                                }
+                        for (message, from_index, pre_json) in message_batch {
+                            // Capture original event ID for invalidation check (if it's an EVENT message)
+                            let original_event_id = if let RelayMessage::Event { event, .. } = &message {
+                                Some(event.id)
                             } else {
-                                // Not an event message or no original event, use pre-json as-is
-                                pre_json
+                                None
                             };
 
-                        processed_messages.push((msg, json_to_use));
-                    }
-                }
+                            let mut message_opt = Some(message);
+                            if let Err(e) = chain
+                                .process_outbound_chain(
+                                    &addr_string,
+                                    &mut message_opt,
+                                    &state_clone,
+                                    &metadata_clone,
+                                    from_index,
+                                )
+                                .await
+                            {
+                                tracing::error!("Outbound middleware processing error: {}", e);
+                                continue;
+                            }
 
-                // Serialize messages inline (no longer using rayon for better cache locality)
-                for (message, pre_serialized) in processed_messages {
-                    // Use pre-serialized JSON if available, otherwise serialize inline
-                    let json = pre_serialized.unwrap_or_else(|| message.as_json());
-                    if let Err(e) = sink.send(Message::Text(json.into())).await {
-                        // Use debug level for WebSocket errors after close/timeout
-                        if e.to_string().contains("Sending after closing")
-                            || e.to_string().contains("WebSocket protocol error")
-                        {
-                            tracing::debug!("WebSocket closed: {}", e);
-                        } else {
-                            tracing::error!("Failed to send message: {}", e);
+                            // If message survived processing, add to batch
+                            if let Some(msg) = message_opt {
+                                // Middleware changed the event - invalidate pre-serialized JSON
+                                let json_to_use =
+                                    if let (Some(original_id), RelayMessage::Event { event, .. }) =
+                                        (original_event_id, &msg)
+                                    {
+                                        if original_id != event.id {
+                                            // Event was modified, invalidate pre-serialized JSON
+                                            None
+                                        } else {
+                                            // Event unchanged, can use pre-serialized JSON
+                                            pre_json
+                                        }
+                                    } else {
+                                        // Not an event message or no original event, use pre-json as-is
+                                        pre_json
+                                    };
+
+                                processed_messages.push((msg, json_to_use));
+                            }
                         }
-                        return; // Exit on error
+
+                        // Serialize messages inline (no longer using rayon for better cache locality)
+                        for (message, pre_serialized) in processed_messages {
+                            // Use pre-serialized JSON if available, otherwise serialize inline
+                            let json = pre_serialized.unwrap_or_else(|| message.as_json());
+                            if let Err(e) = sink.send(Message::Text(json.into())).await {
+                                // Use debug level for WebSocket errors after close/timeout
+                                if e.to_string().contains("Sending after closing")
+                                    || e.to_string().contains("WebSocket protocol error")
+                                {
+                                    tracing::debug!("WebSocket closed: {}", e);
+                                } else {
+                                    tracing::error!("Failed to send message: {}", e);
+                                }
+                                let _ = sink.close().await;
+                                return;
+                            }
+                        }
+                    }
+                    _ = cancellation.cancelled() => {
+                        tracing::debug!("Shutdown signal received, closing sink for {}", debug_addr);
+                        if let Err(e) = sink.close().await {
+                            tracing::error!("Failed to close sink during shutdown: {}", e);
+                        }
+                        break;
                     }
                 }
             }
@@ -391,10 +416,14 @@ where
             task.abort();
         }
 
-        // Cancel outbound task if running
+        // Gracefully cancel outbound task
+        self.outbound_cancellation.cancel();
         if let Some(task) = self.outbound_task.take() {
-            task.abort();
-            tracing::debug!("Aborted outbound task on disconnect");
+            match tokio::time::timeout(std::time::Duration::from_secs(5), task).await {
+                Ok(Ok(())) => tracing::debug!("Outbound task stopped gracefully"),
+                Ok(Err(e)) => tracing::error!("Outbound task panicked: {}", e),
+                Err(_) => tracing::warn!("Outbound task shutdown timeout (will finish async)"),
+            }
         }
     }
 }
