@@ -8,9 +8,10 @@ use nostr_sdk::prelude::*;
 use std::sync::Arc;
 
 /// Configuration for scope/subdomain handling
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum ScopeConfig {
     /// No scope/subdomain support - all data stored in default scope
+    #[default]
     Disabled,
     /// Enable subdomain extraction with specified base domain parts
     Subdomain {
@@ -23,12 +24,6 @@ pub enum ScopeConfig {
         /// The scope to use for all connections
         scope: Scope,
     },
-}
-
-impl Default for ScopeConfig {
-    fn default() -> Self {
-        Self::Disabled
-    }
 }
 
 impl ScopeConfig {
