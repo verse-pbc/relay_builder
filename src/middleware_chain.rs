@@ -185,7 +185,7 @@ impl BuildConnected for crate::util::IdentityMiddleware {
     }
 }
 
-/// Implementation for Arc<M> - just passes through since middleware is already Arc'd
+/// Implementation for `Arc<M>` - just passes through since middleware is already Arc'd
 impl<M> BuildConnected for Arc<M>
 where
     M: Send + Sync,

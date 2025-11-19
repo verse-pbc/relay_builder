@@ -82,7 +82,7 @@ impl From<(Event, Scope)> for StoreCommand {
     }
 }
 
-/// Implement conversion from (Box<Event>, Scope) tuple to StoreCommand
+/// Implement conversion from `(Box<Event>, Scope)` tuple to StoreCommand
 impl From<(Box<Event>, Scope)> for StoreCommand {
     fn from((event, scope): (Box<Event>, Scope)) -> Self {
         StoreCommand::SaveSignedEvent(event, scope, None)

@@ -257,7 +257,7 @@ impl SubscriptionIndex {
             event.id
         );
 
-        for filter in candidate_filters {
+        for (idx, filter) in candidate_filters.iter().enumerate() {
             // Skip if we've already checked this filter
             if !checked_filters.insert(filter.id) {
                 continue;
@@ -288,7 +288,14 @@ impl SubscriptionIndex {
             // Check group-level deduplication
             if let Some(filter_group_ref) = self.filter_groups.get(&group_key) {
                 let filter_group = filter_group_ref.value();
-                if filter_group.read().await.has_seen_event(&event.id).await {
+
+                // Check if group has seen event (don't hold lock across await)
+                let has_seen = {
+                    let guard = filter_group.read().await;
+                    guard.has_seen_event(&event.id).await
+                };
+
+                if has_seen {
                     trace!(
                         "Subscription {:?} already saw event {}",
                         group_key,
@@ -298,9 +305,18 @@ impl SubscriptionIndex {
                 }
 
                 // Mark event as seen by this group
-                filter_group.write().await.mark_event_seen(event.id).await;
+                {
+                    let guard = filter_group.write().await;
+                    guard.mark_event_seen(event.id).await;
+                }
 
                 matching_subscriptions.push(group_key);
+            }
+
+            // Yield periodically to avoid starving other tasks (M-YIELD-POINTS)
+            // Yield every 100 filters to balance task switching overhead (<1%)
+            if idx > 0 && idx % 100 == 0 {
+                tokio::task::yield_now().await;
             }
         }
 
@@ -368,8 +384,15 @@ impl SubscriptionIndex {
             Some(IndexedField::Author) => {
                 if let Some(authors) = &filter.filter.authors {
                     let mut index = self.authors.write().await;
-                    for author in authors {
+                    for (idx, author) in authors.iter().enumerate() {
                         index.entry(*author).or_default().push(filter.clone());
+
+                        // Yield every 1000 authors to prevent task starvation (M-YIELD-POINTS)
+                        if idx > 0 && idx % 1000 == 0 {
+                            drop(index);
+                            tokio::task::yield_now().await;
+                            index = self.authors.write().await;
+                        }
                     }
                 }
             }
@@ -431,12 +454,19 @@ impl SubscriptionIndex {
             Some(IndexedField::Author) => {
                 if let Some(authors) = &filter.filter.authors {
                     let mut index = self.authors.write().await;
-                    for author in authors {
+                    for (idx, author) in authors.iter().enumerate() {
                         if let Some(filters) = index.get_mut(author) {
                             filters.retain(|f| f.id != filter.id);
                             if filters.is_empty() {
                                 index.remove(author);
                             }
+                        }
+
+                        // Yield every 1000 authors to prevent task starvation (M-YIELD-POINTS)
+                        if idx > 0 && idx % 1000 == 0 {
+                            drop(index);
+                            tokio::task::yield_now().await;
+                            index = self.authors.write().await;
                         }
                     }
                 }

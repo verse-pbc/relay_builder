@@ -103,12 +103,12 @@ where
     ///
     /// This method is called in hot loops during subscription processing,
     /// so it must be synchronous for maximum performance with zero allocations.
-    /// The Arc<RwLock<T>> allows implementors to choose whether they need read
+    /// The `Arc<RwLock<T>>` allows implementors to choose whether they need read
     /// or write access to the state.
     ///
     /// # Arguments
     /// * `event` - The event to check visibility for
-    /// * `custom_state` - Custom per-connection state wrapped in Arc<RwLock<T>>
+    /// * `custom_state` - Custom per-connection state wrapped in `Arc<RwLock<T>>`
     /// * `context` - Minimal context with auth info and relay details
     ///
     /// # Returns
@@ -132,7 +132,7 @@ where
     ///
     /// # Arguments
     /// * `filters` - The filters from the REQ message
-    /// * `custom_state` - Custom per-connection state wrapped in Arc<RwLock<T>>
+    /// * `custom_state` - Custom per-connection state wrapped in `Arc<RwLock<T>>`
     /// * `context` - Minimal context with auth info
     ///
     /// # Returns
@@ -151,12 +151,12 @@ where
 
     /// Process an incoming event and return database commands.
     ///
-    /// This method handles EVENT messages with access to custom state through Arc<RwLock<T>>,
+    /// This method handles EVENT messages with access to custom state through `Arc<RwLock<T>>`,
     /// allowing the implementor to choose between read-only or write access as needed.
     ///
     /// # Arguments
     /// * `event` - The event to process
-    /// * `custom_state` - Custom per-connection state wrapped in Arc<RwLock<T>>
+    /// * `custom_state` - Custom per-connection state wrapped in `Arc<RwLock<T>>`
     /// * `context` - Minimal context with auth info
     ///
     /// # Returns
