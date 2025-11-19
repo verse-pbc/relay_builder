@@ -8,10 +8,11 @@
 
 use dashmap::DashMap;
 use nostr_sdk::prelude::*;
+use parking_lot::RwLock as SyncRwLock;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::RwLock as AsyncRwLock;
 use tracing::{debug, trace};
 
 /// Unique identifier for a filter
@@ -35,7 +36,8 @@ struct TrackedFilter {
     /// The original filter
     filter: Filter,
     /// Last event ID seen by this filter (for deduplication)
-    last_seen_event_id: RwLock<Option<EventId>>,
+    /// Uses parking_lot::RwLock for fine-grained synchronous access
+    last_seen_event_id: SyncRwLock<Option<EventId>>,
     /// Parent subscription (`connection_id`, `subscription_id`)
     parent_subscription: (String, SubscriptionId),
     /// Which field this filter is indexed by (None for match-all filters)
@@ -53,20 +55,20 @@ impl TrackedFilter {
     ) -> Self {
         Self {
             filter,
-            last_seen_event_id: RwLock::new(None),
+            last_seen_event_id: SyncRwLock::new(None),
             parent_subscription,
             indexed_field,
             id,
         }
     }
 
-    async fn has_seen_event(&self, event_id: &EventId) -> bool {
-        self.last_seen_event_id.read().await.as_ref() == Some(event_id)
+    fn has_seen_event(&self, event_id: &EventId) -> bool {
+        *self.last_seen_event_id.read() == Some(*event_id)
     }
 
     /// Mark this event as seen by this filter
-    async fn mark_event_seen(&self, event_id: EventId) {
-        *self.last_seen_event_id.write().await = Some(event_id);
+    fn mark_event_seen(&self, event_id: EventId) {
+        *self.last_seen_event_id.write() = Some(event_id);
     }
 
     fn matches_event(&self, event: &Event) -> bool {
@@ -85,9 +87,10 @@ struct FilterGroup {
     #[allow(dead_code)]
     subscription_id: SubscriptionId,
     /// Last event seen by any filter in this group
-    last_seen_event_id: RwLock<Option<EventId>>,
+    /// Uses parking_lot::RwLock for fine-grained synchronous access
+    last_seen_event_id: SyncRwLock<Option<EventId>>,
     /// IDs of filters in this group
-    filter_ids: RwLock<HashSet<FilterId>>,
+    filter_ids: AsyncRwLock<HashSet<FilterId>>,
 }
 
 impl FilterGroup {
@@ -95,39 +98,39 @@ impl FilterGroup {
         Self {
             connection_id,
             subscription_id,
-            last_seen_event_id: RwLock::new(None),
-            filter_ids: RwLock::new(HashSet::new()),
+            last_seen_event_id: SyncRwLock::new(None),
+            filter_ids: AsyncRwLock::new(HashSet::new()),
         }
     }
 
-    async fn has_seen_event(&self, event_id: &EventId) -> bool {
-        self.last_seen_event_id.read().await.as_ref() == Some(event_id)
+    fn has_seen_event(&self, event_id: &EventId) -> bool {
+        *self.last_seen_event_id.read() == Some(*event_id)
     }
 
     /// Mark this event as seen by this group
-    async fn mark_event_seen(&self, event_id: EventId) {
-        *self.last_seen_event_id.write().await = Some(event_id);
+    fn mark_event_seen(&self, event_id: EventId) {
+        *self.last_seen_event_id.write() = Some(event_id);
     }
 }
 
 /// Inverted index for efficient event distribution
 pub struct SubscriptionIndex {
     /// Index by author public key
-    authors: RwLock<BTreeMap<PublicKey, Vec<Arc<TrackedFilter>>>>,
+    authors: AsyncRwLock<BTreeMap<PublicKey, Vec<Arc<TrackedFilter>>>>,
     /// Index by event kind
-    kinds: RwLock<BTreeMap<Kind, Vec<Arc<TrackedFilter>>>>,
+    kinds: AsyncRwLock<BTreeMap<Kind, Vec<Arc<TrackedFilter>>>>,
     /// Index by event ID
-    event_ids: RwLock<BTreeMap<EventId, Vec<Arc<TrackedFilter>>>>,
+    event_ids: AsyncRwLock<BTreeMap<EventId, Vec<Arc<TrackedFilter>>>>,
     /// Index by tags (tag name -> tag value -> filters)
-    tags: RwLock<TagIndex>,
+    tags: AsyncRwLock<TagIndex>,
 
     /// Filters that match all events (empty filters)
-    match_all_filters: RwLock<Vec<Arc<TrackedFilter>>>,
+    match_all_filters: AsyncRwLock<Vec<Arc<TrackedFilter>>>,
 
     /// All tracked filters by ID
     all_filters: DashMap<FilterId, Arc<TrackedFilter>>,
     /// Filter groups for subscription-level deduplication
-    filter_groups: DashMap<(String, SubscriptionId), Arc<RwLock<FilterGroup>>>,
+    filter_groups: DashMap<(String, SubscriptionId), Arc<AsyncRwLock<FilterGroup>>>,
 
     /// Next filter ID
     next_filter_id: AtomicU64,
@@ -143,11 +146,11 @@ impl SubscriptionIndex {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            authors: RwLock::new(BTreeMap::new()),
-            kinds: RwLock::new(BTreeMap::new()),
-            event_ids: RwLock::new(BTreeMap::new()),
-            tags: RwLock::new(HashMap::new()),
-            match_all_filters: RwLock::new(Vec::new()),
+            authors: AsyncRwLock::new(BTreeMap::new()),
+            kinds: AsyncRwLock::new(BTreeMap::new()),
+            event_ids: AsyncRwLock::new(BTreeMap::new()),
+            tags: AsyncRwLock::new(HashMap::new()),
+            match_all_filters: AsyncRwLock::new(Vec::new()),
             all_filters: DashMap::new(),
             filter_groups: DashMap::new(),
             next_filter_id: AtomicU64::new(1),
@@ -174,7 +177,7 @@ impl SubscriptionIndex {
             .filter_groups
             .entry(group_key)
             .or_insert_with(|| {
-                Arc::new(RwLock::new(FilterGroup::new(
+                Arc::new(AsyncRwLock::new(FilterGroup::new(
                     connection_id.to_string(),
                     subscription_id.clone(),
                 )))
@@ -265,7 +268,7 @@ impl SubscriptionIndex {
             }
 
             // Skip if filter has already seen this event
-            if filter.has_seen_event(&event.id).await {
+            if filter.has_seen_event(&event.id) {
                 trace!("Filter {} already saw event {}", filter.id, event.id);
                 continue;
             }
@@ -277,7 +280,7 @@ impl SubscriptionIndex {
             }
 
             // Mark event as seen by this filter
-            filter.mark_event_seen(event.id).await;
+            filter.mark_event_seen(event.id);
 
             let group_key = filter.parent_subscription.clone();
 
@@ -290,10 +293,11 @@ impl SubscriptionIndex {
             if let Some(filter_group_ref) = self.filter_groups.get(&group_key) {
                 let filter_group = filter_group_ref.value();
 
-                // Check if group has seen event (don't hold lock across await)
+                // Check if group has seen event (acquire then immediately release lock)
                 let has_seen = {
                     let guard = filter_group.read().await;
-                    guard.has_seen_event(&event.id).await
+                    guard.has_seen_event(&event.id) // Synchronous call - no await
+                                                    // Guard dropped here
                 };
 
                 if has_seen {
@@ -305,10 +309,11 @@ impl SubscriptionIndex {
                     continue;
                 }
 
-                // Mark event as seen by this group
+                // Mark event as seen by this group (acquire then immediately release lock)
                 {
                     let guard = filter_group.write().await;
-                    guard.mark_event_seen(event.id).await;
+                    guard.mark_event_seen(event.id); // Synchronous call - no await
+                                                     // Guard dropped here
                 }
 
                 matching_subscriptions.push(group_key);
@@ -586,7 +591,7 @@ impl SubscriptionIndex {
         // Count tracked events (filters that have seen at least one event)
         let mut tracked_events = 0;
         for entry in &self.all_filters {
-            if entry.value().last_seen_event_id.read().await.is_some() {
+            if entry.value().last_seen_event_id.read().is_some() {
                 tracked_events += 1;
             }
         }

@@ -232,7 +232,7 @@ async fn test_empty_filter_handling() {
     assert_eq!(matches[0].1, SubscriptionId::new("sub1"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_concurrent_operations() {
     use std::sync::Arc;
 
