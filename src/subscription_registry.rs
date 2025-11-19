@@ -13,9 +13,9 @@ use crate::subscription_index::SubscriptionIndex;
 use dashmap::DashMap;
 use nostr_lmdb::Scope;
 use nostr_sdk::prelude::*;
-use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use tracing::{debug, trace, warn};
 
 /// Diagnostic information for a single scope
@@ -107,7 +107,10 @@ impl Drop for ConnectionHandle {
                  on_disconnect may not have executed properly",
                 self.id
             );
-            registry.cleanup_connection(&self.id);
+            let connection_id = self.id.clone();
+            tokio::spawn(async move {
+                registry.cleanup_connection(&connection_id).await;
+            });
         } else {
             // Connection already cleaned up - this is the expected path
             trace!(
@@ -153,7 +156,7 @@ impl SubscriptionRegistry {
     }
 
     /// Add a subscription for a connection
-    pub fn add_subscription(
+    pub async fn add_subscription(
         &self,
         connection_id: &str,
         subscription_id: &SubscriptionId,
@@ -165,7 +168,7 @@ impl SubscriptionRegistry {
             .ok_or_else(|| Error::internal("Connection not found"))?;
 
         // Add to connection's local subscriptions
-        let mut subscriptions = connection.subscriptions.write();
+        let mut subscriptions = connection.subscriptions.write().await;
         let is_new = subscriptions
             .insert(subscription_id.clone(), filters.clone())
             .is_none();
@@ -179,7 +182,9 @@ impl SubscriptionRegistry {
             .clone();
 
         // Add to the index for efficient distribution
-        index.add_subscription(connection_id, subscription_id, filters);
+        index
+            .add_subscription(connection_id, subscription_id, filters)
+            .await;
 
         // Only increment if this was a new subscription, not a replacement
         if is_new {
@@ -196,7 +201,7 @@ impl SubscriptionRegistry {
     }
 
     /// Remove a subscription for a connection
-    pub fn remove_subscription(
+    pub async fn remove_subscription(
         &self,
         connection_id: &str,
         subscription_id: &SubscriptionId,
@@ -207,13 +212,14 @@ impl SubscriptionRegistry {
             .ok_or_else(|| Error::internal("Connection not found"))?;
 
         let scope = connection.subdomain.as_ref().clone();
-        let mut subscriptions = connection.subscriptions.write();
+        let mut subscriptions = connection.subscriptions.write().await;
         if subscriptions.remove(subscription_id).is_some() {
             // Remove from the appropriate scope index
             if let Some(index_entry) = self.indexes.get(&scope) {
                 index_entry
                     .value()
-                    .remove_subscription(connection_id, subscription_id);
+                    .remove_subscription(connection_id, subscription_id)
+                    .await;
             }
 
             if let Some(handler) = &self.metrics_handler {
@@ -245,13 +251,13 @@ impl SubscriptionRegistry {
 
     /// Clean up a connection and all its subscriptions
     /// This is used both by Drop handler and when removing dead connections
-    pub fn cleanup_connection(&self, connection_id: &str) {
+    pub async fn cleanup_connection(&self, connection_id: &str) {
         debug!("Cleaning up connection {}", connection_id);
 
         // Get subscription IDs and scope before removing the connection
         let cleanup_info = if let Some(connection) = self.connections.get(connection_id) {
             let scope = connection.subdomain.as_ref().clone();
-            let subscriptions = connection.subscriptions.read();
+            let subscriptions = connection.subscriptions.read().await;
             let ids: Vec<SubscriptionId> = subscriptions.keys().cloned().collect();
             let count = ids.len();
             drop(subscriptions);
@@ -276,7 +282,7 @@ impl SubscriptionRegistry {
             if let Some(index_entry) = self.indexes.get(&scope) {
                 let index = index_entry.value();
                 for sub_id in ids {
-                    index.remove_subscription(connection_id, &sub_id);
+                    index.remove_subscription(connection_id, &sub_id).await;
                 }
             }
 
@@ -295,14 +301,14 @@ impl SubscriptionRegistry {
 
 impl SubscriptionRegistry {
     /// Collect diagnostic information about the registry
-    pub fn get_diagnostics(&self) -> RegistryDiagnostics {
+    pub async fn get_diagnostics(&self) -> RegistryDiagnostics {
         let mut scope_diagnostics = Vec::new();
 
         // Collect per-scope information
         for index_entry in self.indexes.iter() {
             let scope = index_entry.key().clone();
             let index = index_entry.value();
-            let index_stats = index.stats();
+            let index_stats = index.stats().await;
 
             // Count connections for this scope
             let connection_count = self
@@ -312,12 +318,12 @@ impl SubscriptionRegistry {
                 .count();
 
             // Count total subscriptions for this scope
-            let subscription_count = self
-                .connections
-                .iter()
-                .filter(|conn| conn.subdomain.as_ref() == &scope)
-                .map(|conn| conn.subscriptions.read().len())
-                .sum();
+            let mut subscription_count = 0;
+            for conn in self.connections.iter() {
+                if conn.subdomain.as_ref() == &scope {
+                    subscription_count += conn.subscriptions.read().await.len();
+                }
+            }
 
             scope_diagnostics.push(ScopeDiagnostics {
                 scope: scope.clone(),
@@ -354,7 +360,7 @@ impl SubscriptionRegistry {
     }
 
     /// Indexed event distribution using strfry optimization
-    fn distribute_event_indexed(&self, event: &Arc<Event>, scope: &Scope) {
+    async fn distribute_event_indexed(&self, event: &Arc<Event>, scope: &Scope) {
         trace!(
             "Distributing event {} to subscribers using index in scope {:?}",
             event.id,
@@ -375,7 +381,7 @@ impl SubscriptionRegistry {
         };
 
         // Get matching subscriptions from scope's index
-        let matching_subscriptions = index.distribute_event(event);
+        let matching_subscriptions = index.distribute_event(event).await;
 
         trace!(
             "Index found {} potential matches for event {} in scope {:?}",
@@ -449,7 +455,7 @@ impl SubscriptionRegistry {
         // Clean up dead connections
         for conn_id in dead_connections {
             // Use the shared cleanup method to ensure metrics are decremented
-            self.cleanup_connection(&conn_id);
+            self.cleanup_connection(&conn_id).await;
         }
 
         if total_matches > 0 {
@@ -461,7 +467,7 @@ impl SubscriptionRegistry {
 impl EventDistributor for SubscriptionRegistry {
     async fn distribute_event(&self, event: Arc<Event>, scope: &Scope) {
         // Use indexed distribution for O(log k + m) performance
-        self.distribute_event_indexed(&event, scope);
+        self.distribute_event_indexed(&event, scope).await;
     }
 }
 
@@ -491,6 +497,9 @@ mod tests {
             // Handle will be dropped here
         }
 
+        // Give the spawned cleanup task a chance to run
+        tokio::task::yield_now().await;
+
         // After drop, connection should be removed
         assert!(!registry.connections.contains_key("conn1"));
     }
@@ -515,10 +524,14 @@ mod tests {
 
         registry
             .add_subscription("conn1", &sub_id, filters)
+            .await
             .unwrap();
 
         // Remove subscription
-        registry.remove_subscription("conn1", &sub_id).unwrap();
+        registry
+            .remove_subscription("conn1", &sub_id)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -554,9 +567,11 @@ mod tests {
 
         registry
             .add_subscription("conn_default", &sub_id1, filters.clone())
+            .await
             .unwrap();
         registry
             .add_subscription("conn_tenant1", &sub_id2, filters)
+            .await
             .unwrap();
 
         // Create a test event
@@ -681,6 +696,7 @@ mod tests {
                 &SubscriptionId::new("sub1"),
                 filters.clone(),
             )
+            .await
             .unwrap();
         registry
             .add_subscription(
@@ -688,9 +704,11 @@ mod tests {
                 &SubscriptionId::new("sub2"),
                 filters.clone(),
             )
+            .await
             .unwrap();
         registry
             .add_subscription("conn_tenant3", &SubscriptionId::new("sub3"), filters)
+            .await
             .unwrap();
 
         // Create and distribute event to tenant2 only

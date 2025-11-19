@@ -54,15 +54,17 @@ async fn test_normal_cleanup_via_explicit_call() {
         // Add some subscriptions
         registry
             .add_subscription("conn1", &SubscriptionId::new("sub1"), vec![Filter::new()])
+            .await
             .unwrap();
         registry
             .add_subscription("conn1", &SubscriptionId::new("sub2"), vec![Filter::new()])
+            .await
             .unwrap();
 
         assert_eq!(metrics.get_count(), 2, "Should have 2 subscriptions");
 
         // Explicitly cleanup (simulating on_disconnect)
-        registry.cleanup_connection("conn1");
+        registry.cleanup_connection("conn1").await;
 
         assert_eq!(metrics.get_count(), 0, "Subscriptions should be cleaned up");
         assert!(
@@ -107,9 +109,11 @@ async fn test_fallback_cleanup_via_drop() {
         // Add some subscriptions
         registry
             .add_subscription("conn2", &SubscriptionId::new("sub1"), vec![Filter::new()])
+            .await
             .unwrap();
         registry
             .add_subscription("conn2", &SubscriptionId::new("sub2"), vec![Filter::new()])
+            .await
             .unwrap();
 
         assert_eq!(metrics.get_count(), 2, "Should have 2 subscriptions");
@@ -148,6 +152,7 @@ async fn test_subscription_replacement_no_increment() {
     let sub_id = SubscriptionId::new("sub1");
     registry
         .add_subscription("conn3", &sub_id, vec![Filter::new()])
+        .await
         .unwrap();
     assert_eq!(metrics.get_count(), 1, "Should have 1 subscription");
 
@@ -155,6 +160,7 @@ async fn test_subscription_replacement_no_increment() {
     let new_filter = Filter::new().kind(Kind::TextNote);
     registry
         .add_subscription("conn3", &sub_id, vec![new_filter])
+        .await
         .unwrap();
 
     // Count should still be 1 (not incremented on replacement)
@@ -165,7 +171,7 @@ async fn test_subscription_replacement_no_increment() {
     );
 
     // Cleanup
-    registry.cleanup_connection("conn3");
+    registry.cleanup_connection("conn3").await;
     assert_eq!(
         metrics.get_count(),
         0,
@@ -187,6 +193,7 @@ async fn test_dead_connection_cleanup() {
     // Add a subscription
     registry
         .add_subscription("conn4", &SubscriptionId::new("sub1"), vec![Filter::new()])
+        .await
         .unwrap();
     assert_eq!(metrics.get_count(), 1, "Should have 1 subscription");
 

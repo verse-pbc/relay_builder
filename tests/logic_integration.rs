@@ -13,7 +13,7 @@ impl EventProcessor for PublicEventProcessor {
     async fn handle_event(
         &self,
         event: Event,
-        _custom_state: Arc<parking_lot::RwLock<()>>,
+        _custom_state: Arc<tokio::sync::RwLock<()>>,
         context: &EventContext,
     ) -> Result<Vec<StoreCommand>, Error> {
         // Public relay accepts all events
@@ -29,7 +29,7 @@ impl EventProcessor for AuthRequiredEventProcessor {
     async fn handle_event(
         &self,
         event: Event,
-        _custom_state: Arc<parking_lot::RwLock<()>>,
+        _custom_state: Arc<tokio::sync::RwLock<()>>,
         context: &EventContext,
     ) -> Result<Vec<StoreCommand>, Error> {
         // Only accept events from authenticated users
@@ -45,7 +45,7 @@ impl EventProcessor for AuthRequiredEventProcessor {
     fn can_see_event(
         &self,
         _event: &Event,
-        _custom_state: Arc<parking_lot::RwLock<()>>,
+        _custom_state: Arc<tokio::sync::RwLock<()>>,
         context: &EventContext,
     ) -> Result<bool, Error> {
         // Only authenticated users can see events
@@ -55,7 +55,7 @@ impl EventProcessor for AuthRequiredEventProcessor {
     fn verify_filters(
         &self,
         _filters: &[Filter],
-        _custom_state: Arc<parking_lot::RwLock<()>>,
+        _custom_state: Arc<tokio::sync::RwLock<()>>,
         context: &EventContext,
     ) -> Result<(), Error> {
         // Only authenticated users can subscribe
@@ -87,7 +87,7 @@ async fn test_public_event_processor() {
     let result = processor
         .handle_event(
             event.clone(),
-            Arc::new(parking_lot::RwLock::new(())),
+            Arc::new(tokio::sync::RwLock::new(())),
             &context,
         )
         .await;
@@ -101,14 +101,14 @@ async fn test_public_event_processor() {
 
     // Test can_see_event - should always return true
     let can_see = processor
-        .can_see_event(&event, Arc::new(parking_lot::RwLock::new(())), &context)
+        .can_see_event(&event, Arc::new(tokio::sync::RwLock::new(())), &context)
         .unwrap();
     assert!(can_see);
 
     // Test verify_filters - should always succeed
     let filters = vec![Filter::new()];
     let verify_result =
-        processor.verify_filters(&filters, Arc::new(parking_lot::RwLock::new(())), &context);
+        processor.verify_filters(&filters, Arc::new(tokio::sync::RwLock::new(())), &context);
     assert!(verify_result.is_ok());
 }
 
@@ -132,7 +132,7 @@ async fn test_auth_required_event_processor() {
     let result = processor
         .handle_event(
             event.clone(),
-            Arc::new(parking_lot::RwLock::new(())),
+            Arc::new(tokio::sync::RwLock::new(())),
             &context,
         )
         .await;
@@ -140,13 +140,13 @@ async fn test_auth_required_event_processor() {
     assert!(matches!(result.unwrap_err(), Error::AuthRequired { .. }));
 
     let can_see = processor
-        .can_see_event(&event, Arc::new(parking_lot::RwLock::new(())), &context)
+        .can_see_event(&event, Arc::new(tokio::sync::RwLock::new(())), &context)
         .unwrap();
     assert!(!can_see);
 
     let filters = vec![Filter::new()];
     let verify_result =
-        processor.verify_filters(&filters, Arc::new(parking_lot::RwLock::new(())), &context);
+        processor.verify_filters(&filters, Arc::new(tokio::sync::RwLock::new(())), &context);
     assert!(verify_result.is_err());
 
     // Test with authentication
@@ -162,7 +162,7 @@ async fn test_auth_required_event_processor() {
     let result = processor
         .handle_event(
             event.clone(),
-            Arc::new(parking_lot::RwLock::new(())),
+            Arc::new(tokio::sync::RwLock::new(())),
             &auth_context,
         )
         .await;
@@ -173,7 +173,7 @@ async fn test_auth_required_event_processor() {
     let can_see = processor
         .can_see_event(
             &event,
-            Arc::new(parking_lot::RwLock::new(())),
+            Arc::new(tokio::sync::RwLock::new(())),
             &auth_context,
         )
         .unwrap();
@@ -181,7 +181,7 @@ async fn test_auth_required_event_processor() {
 
     let verify_result = processor.verify_filters(
         &filters,
-        Arc::new(parking_lot::RwLock::new(())),
+        Arc::new(tokio::sync::RwLock::new(())),
         &auth_context,
     );
     assert!(verify_result.is_ok());
@@ -197,7 +197,7 @@ impl EventProcessor for FilteringProcessor {
     async fn handle_event(
         &self,
         event: Event,
-        _custom_state: Arc<parking_lot::RwLock<()>>,
+        _custom_state: Arc<tokio::sync::RwLock<()>>,
         context: &EventContext,
     ) -> Result<Vec<StoreCommand>, Error> {
         // Check if event contains blocked keywords
@@ -215,7 +215,7 @@ impl EventProcessor for FilteringProcessor {
     fn can_see_event(
         &self,
         event: &Event,
-        _custom_state: Arc<parking_lot::RwLock<()>>,
+        _custom_state: Arc<tokio::sync::RwLock<()>>,
         _context: &EventContext,
     ) -> Result<bool, Error> {
         // Hide events with blocked keywords
@@ -252,7 +252,7 @@ async fn test_filtering_processor() {
     let result = processor
         .handle_event(
             clean_event.clone(),
-            Arc::new(parking_lot::RwLock::new(())),
+            Arc::new(tokio::sync::RwLock::new(())),
             &context,
         )
         .await;
@@ -261,7 +261,7 @@ async fn test_filtering_processor() {
     let can_see = processor
         .can_see_event(
             &clean_event,
-            Arc::new(parking_lot::RwLock::new(())),
+            Arc::new(tokio::sync::RwLock::new(())),
             &context,
         )
         .unwrap();
@@ -275,7 +275,7 @@ async fn test_filtering_processor() {
     let result = processor
         .handle_event(
             spam_event.clone(),
-            Arc::new(parking_lot::RwLock::new(())),
+            Arc::new(tokio::sync::RwLock::new(())),
             &context,
         )
         .await;
@@ -284,7 +284,7 @@ async fn test_filtering_processor() {
     let can_see = processor
         .can_see_event(
             &spam_event,
-            Arc::new(parking_lot::RwLock::new(())),
+            Arc::new(tokio::sync::RwLock::new(())),
             &context,
         )
         .unwrap();

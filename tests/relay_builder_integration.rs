@@ -28,7 +28,7 @@ impl EventProcessor for TestEventProcessor {
     async fn handle_event(
         &self,
         event: Event,
-        _custom_state: Arc<parking_lot::RwLock<()>>,
+        _custom_state: Arc<tokio::sync::RwLock<()>>,
         context: &EventContext,
     ) -> Result<Vec<StoreCommand>, relay_builder::Error> {
         self.events_processed.lock().push(event.clone());

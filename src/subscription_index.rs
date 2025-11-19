@@ -8,10 +8,10 @@
 
 use dashmap::DashMap;
 use nostr_sdk::prelude::*;
-use parking_lot::RwLock;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use tracing::{debug, trace};
 
 /// Unique identifier for a filter
@@ -60,13 +60,13 @@ impl TrackedFilter {
         }
     }
 
-    fn has_seen_event(&self, event_id: &EventId) -> bool {
-        self.last_seen_event_id.read().as_ref() == Some(event_id)
+    async fn has_seen_event(&self, event_id: &EventId) -> bool {
+        self.last_seen_event_id.read().await.as_ref() == Some(event_id)
     }
 
     /// Mark this event as seen by this filter
-    fn mark_event_seen(&self, event_id: EventId) {
-        *self.last_seen_event_id.write() = Some(event_id);
+    async fn mark_event_seen(&self, event_id: EventId) {
+        *self.last_seen_event_id.write().await = Some(event_id);
     }
 
     fn matches_event(&self, event: &Event) -> bool {
@@ -100,13 +100,13 @@ impl FilterGroup {
         }
     }
 
-    fn has_seen_event(&self, event_id: &EventId) -> bool {
-        self.last_seen_event_id.read().as_ref() == Some(event_id)
+    async fn has_seen_event(&self, event_id: &EventId) -> bool {
+        self.last_seen_event_id.read().await.as_ref() == Some(event_id)
     }
 
     /// Mark this event as seen by this group
-    fn mark_event_seen(&self, event_id: EventId) {
-        *self.last_seen_event_id.write() = Some(event_id);
+    async fn mark_event_seen(&self, event_id: EventId) {
+        *self.last_seen_event_id.write().await = Some(event_id);
     }
 }
 
@@ -154,7 +154,7 @@ impl SubscriptionIndex {
     }
 
     /// Add a subscription with its filters
-    pub fn add_subscription(
+    pub async fn add_subscription(
         &self,
         connection_id: &str,
         subscription_id: &SubscriptionId,
@@ -198,15 +198,21 @@ impl SubscriptionIndex {
             self.all_filters.insert(filter_id, tracked_filter.clone());
 
             // Add to filter group
-            filter_group.write().filter_ids.write().insert(filter_id);
+            filter_group
+                .write()
+                .await
+                .filter_ids
+                .write()
+                .await
+                .insert(filter_id);
 
             // Add to appropriate indexes
-            self.add_filter_to_indexes(&tracked_filter);
+            self.add_filter_to_indexes(&tracked_filter).await;
         }
     }
 
     /// Remove a subscription and all its filters
-    pub fn remove_subscription(&self, connection_id: &str, subscription_id: &SubscriptionId) {
+    pub async fn remove_subscription(&self, connection_id: &str, subscription_id: &SubscriptionId) {
         debug!(
             "Removing subscription {} for connection {}",
             subscription_id, connection_id
@@ -217,8 +223,10 @@ impl SubscriptionIndex {
         if let Some((_, filter_group)) = self.filter_groups.remove(&group_key) {
             let filter_ids: Vec<FilterId> = filter_group
                 .write()
+                .await
                 .filter_ids
                 .read()
+                .await
                 .iter()
                 .copied()
                 .collect();
@@ -226,14 +234,14 @@ impl SubscriptionIndex {
             // Remove each filter
             for filter_id in filter_ids {
                 if let Some((_, tracked_filter)) = self.all_filters.remove(&filter_id) {
-                    self.remove_filter_from_indexes(&tracked_filter);
+                    self.remove_filter_from_indexes(&tracked_filter).await;
                 }
             }
         }
     }
 
     /// Distribute an event to matching subscriptions
-    pub fn distribute_event(&self, event: &Event) -> Vec<(String, SubscriptionId)> {
+    pub async fn distribute_event(&self, event: &Event) -> Vec<(String, SubscriptionId)> {
         trace!("Distributing event {} using indexes", event.id);
 
         let mut matching_subscriptions = Vec::new();
@@ -241,7 +249,7 @@ impl SubscriptionIndex {
         let mut checked_groups = HashSet::new();
 
         // Collect filters from all relevant indexes
-        let candidate_filters = self.get_candidate_filters(event);
+        let candidate_filters = self.get_candidate_filters(event).await;
 
         trace!(
             "Found {} candidate filters from indexes for event {}",
@@ -256,7 +264,7 @@ impl SubscriptionIndex {
             }
 
             // Skip if filter has already seen this event
-            if filter.has_seen_event(&event.id) {
+            if filter.has_seen_event(&event.id).await {
                 trace!("Filter {} already saw event {}", filter.id, event.id);
                 continue;
             }
@@ -268,7 +276,7 @@ impl SubscriptionIndex {
             }
 
             // Mark event as seen by this filter
-            filter.mark_event_seen(event.id);
+            filter.mark_event_seen(event.id).await;
 
             let group_key = filter.parent_subscription.clone();
 
@@ -280,7 +288,7 @@ impl SubscriptionIndex {
             // Check group-level deduplication
             if let Some(filter_group_ref) = self.filter_groups.get(&group_key) {
                 let filter_group = filter_group_ref.value();
-                if filter_group.read().has_seen_event(&event.id) {
+                if filter_group.read().await.has_seen_event(&event.id).await {
                     trace!(
                         "Subscription {:?} already saw event {}",
                         group_key,
@@ -290,7 +298,7 @@ impl SubscriptionIndex {
                 }
 
                 // Mark event as seen by this group
-                filter_group.write().mark_event_seen(event.id);
+                filter_group.write().await.mark_event_seen(event.id).await;
 
                 matching_subscriptions.push(group_key);
             }
@@ -343,15 +351,15 @@ impl SubscriptionIndex {
     }
 
     /// Add a filter to the appropriate indexes
-    fn add_filter_to_indexes(&self, filter: &Arc<TrackedFilter>) {
+    async fn add_filter_to_indexes(&self, filter: &Arc<TrackedFilter>) {
         match filter.indexed_field {
             None => {
                 // Match-all filter
-                self.match_all_filters.write().push(filter.clone());
+                self.match_all_filters.write().await.push(filter.clone());
             }
             Some(IndexedField::EventId) => {
                 if let Some(ids) = &filter.filter.ids {
-                    let mut index = self.event_ids.write();
+                    let mut index = self.event_ids.write().await;
                     for id in ids {
                         index.entry(*id).or_default().push(filter.clone());
                     }
@@ -359,7 +367,7 @@ impl SubscriptionIndex {
             }
             Some(IndexedField::Author) => {
                 if let Some(authors) = &filter.filter.authors {
-                    let mut index = self.authors.write();
+                    let mut index = self.authors.write().await;
                     for author in authors {
                         index.entry(*author).or_default().push(filter.clone());
                     }
@@ -367,7 +375,7 @@ impl SubscriptionIndex {
             }
             Some(IndexedField::Kind) => {
                 if let Some(kinds) = &filter.filter.kinds {
-                    let mut index = self.kinds.write();
+                    let mut index = self.kinds.write().await;
                     for kind in kinds {
                         index.entry(*kind).or_default().push(filter.clone());
                     }
@@ -384,7 +392,7 @@ impl SubscriptionIndex {
             }
             Some(IndexedField::Tag(tag_name)) => {
                 if let Some(values) = filter.filter.generic_tags.get(&tag_name) {
-                    let mut tags_index = self.tags.write();
+                    let mut tags_index = self.tags.write().await;
                     let tag_index = tags_index.entry(tag_name.as_str().to_string()).or_default();
                     for value in values {
                         tag_index
@@ -398,15 +406,18 @@ impl SubscriptionIndex {
     }
 
     /// Remove a filter from all indexes
-    fn remove_filter_from_indexes(&self, filter: &Arc<TrackedFilter>) {
+    async fn remove_filter_from_indexes(&self, filter: &Arc<TrackedFilter>) {
         match filter.indexed_field {
             None => {
                 // Remove from match-all filters
-                self.match_all_filters.write().retain(|f| f.id != filter.id);
+                self.match_all_filters
+                    .write()
+                    .await
+                    .retain(|f| f.id != filter.id);
             }
             Some(IndexedField::EventId) => {
                 if let Some(ids) = &filter.filter.ids {
-                    let mut index = self.event_ids.write();
+                    let mut index = self.event_ids.write().await;
                     for id in ids {
                         if let Some(filters) = index.get_mut(id) {
                             filters.retain(|f| f.id != filter.id);
@@ -419,7 +430,7 @@ impl SubscriptionIndex {
             }
             Some(IndexedField::Author) => {
                 if let Some(authors) = &filter.filter.authors {
-                    let mut index = self.authors.write();
+                    let mut index = self.authors.write().await;
                     for author in authors {
                         if let Some(filters) = index.get_mut(author) {
                             filters.retain(|f| f.id != filter.id);
@@ -432,7 +443,7 @@ impl SubscriptionIndex {
             }
             Some(IndexedField::Kind) => {
                 if let Some(kinds) = &filter.filter.kinds {
-                    let mut index = self.kinds.write();
+                    let mut index = self.kinds.write().await;
                     for kind in kinds {
                         if let Some(filters) = index.get_mut(kind) {
                             filters.retain(|f| f.id != filter.id);
@@ -445,7 +456,7 @@ impl SubscriptionIndex {
             }
             Some(IndexedField::Tag(tag_name)) => {
                 if let Some(values) = filter.filter.generic_tags.get(&tag_name) {
-                    let mut tags_index = self.tags.write();
+                    let mut tags_index = self.tags.write().await;
                     let tag_str = tag_name.as_str().to_string();
                     if let Some(tag_index) = tags_index.get_mut(&tag_str) {
                         for value in values {
@@ -466,12 +477,12 @@ impl SubscriptionIndex {
     }
 
     /// Get candidate filters that might match an event
-    fn get_candidate_filters(&self, event: &Event) -> Vec<Arc<TrackedFilter>> {
+    async fn get_candidate_filters(&self, event: &Event) -> Vec<Arc<TrackedFilter>> {
         let mut candidates = Vec::new();
         let mut seen_filter_ids = HashSet::new();
 
         // First, add all match-all filters
-        for filter in self.match_all_filters.read().iter() {
+        for filter in self.match_all_filters.read().await.iter() {
             if seen_filter_ids.insert(filter.id) {
                 candidates.push(filter.clone());
             }
@@ -479,7 +490,7 @@ impl SubscriptionIndex {
 
         // Check event ID index
         {
-            let index = self.event_ids.read();
+            let index = self.event_ids.read().await;
             if let Some(filters) = index.get(&event.id) {
                 for filter in filters {
                     if seen_filter_ids.insert(filter.id) {
@@ -491,7 +502,7 @@ impl SubscriptionIndex {
 
         // Check author index
         {
-            let index = self.authors.read();
+            let index = self.authors.read().await;
             if let Some(filters) = index.get(&event.pubkey) {
                 for filter in filters {
                     if seen_filter_ids.insert(filter.id) {
@@ -503,7 +514,7 @@ impl SubscriptionIndex {
 
         // Check kind index
         {
-            let index = self.kinds.read();
+            let index = self.kinds.read().await;
             if let Some(filters) = index.get(&event.kind) {
                 for filter in filters {
                     if seen_filter_ids.insert(filter.id) {
@@ -515,7 +526,7 @@ impl SubscriptionIndex {
 
         // Check tag indexes
         {
-            let tags_index = self.tags.read();
+            let tags_index = self.tags.read().await;
             for tag in event.tags.iter() {
                 // Try to parse tag kind as single letter
                 if let Ok(single_letter) = tag.kind().as_str().parse::<SingleLetterTag>() {
@@ -539,21 +550,22 @@ impl SubscriptionIndex {
     }
 
     /// Get statistics about the index
-    pub fn stats(&self) -> IndexStats {
+    pub async fn stats(&self) -> IndexStats {
         // Count tracked events (filters that have seen at least one event)
-        let tracked_events = self
-            .all_filters
-            .iter()
-            .filter(|entry| entry.value().last_seen_event_id.read().is_some())
-            .count();
+        let mut tracked_events = 0;
+        for entry in self.all_filters.iter() {
+            if entry.value().last_seen_event_id.read().await.is_some() {
+                tracked_events += 1;
+            }
+        }
 
         IndexStats {
             total_filters: self.all_filters.len(),
             total_subscriptions: self.filter_groups.len(),
-            authors_indexed: self.authors.read().len(),
-            kinds_indexed: self.kinds.read().len(),
-            event_ids_indexed: self.event_ids.read().len(),
-            tags_indexed: self.tags.read().values().map(|m| m.len()).sum(),
+            authors_indexed: self.authors.read().await.len(),
+            kinds_indexed: self.kinds.read().await.len(),
+            event_ids_indexed: self.event_ids.read().await.len(),
+            tags_indexed: self.tags.read().await.values().map(|m| m.len()).sum(),
             tracked_events,
         }
     }
@@ -576,16 +588,16 @@ mod tests {
     use super::*;
     use nostr_sdk::{EventBuilder, Keys};
 
-    #[test]
-    fn test_index_creation() {
+    #[tokio::test]
+    async fn test_index_creation() {
         let index = SubscriptionIndex::new();
-        let stats = index.stats();
+        let stats = index.stats().await;
         assert_eq!(stats.total_filters, 0);
         assert_eq!(stats.total_subscriptions, 0);
     }
 
-    #[test]
-    fn test_add_remove_subscription() {
+    #[tokio::test]
+    async fn test_add_remove_subscription() {
         let index = SubscriptionIndex::new();
 
         // Add a subscription with filters
@@ -594,29 +606,35 @@ mod tests {
             Filter::new().kind(Kind::TextNote),
         ];
 
-        index.add_subscription("conn1", &SubscriptionId::new("sub1"), filters);
+        index
+            .add_subscription("conn1", &SubscriptionId::new("sub1"), filters)
+            .await;
 
-        let stats = index.stats();
+        let stats = index.stats().await;
         assert_eq!(stats.total_filters, 2);
         assert_eq!(stats.total_subscriptions, 1);
 
         // Remove the subscription
-        index.remove_subscription("conn1", &SubscriptionId::new("sub1"));
+        index
+            .remove_subscription("conn1", &SubscriptionId::new("sub1"))
+            .await;
 
-        let stats = index.stats();
+        let stats = index.stats().await;
         assert_eq!(stats.total_filters, 0);
         assert_eq!(stats.total_subscriptions, 0);
     }
 
-    #[test]
-    fn test_event_distribution() {
+    #[tokio::test]
+    async fn test_event_distribution() {
         let index = SubscriptionIndex::new();
         let keys = Keys::generate();
 
         // Add subscription that matches our test event
         let filters = vec![Filter::new().author(keys.public_key()).kind(Kind::TextNote)];
 
-        index.add_subscription("conn1", &SubscriptionId::new("sub1"), filters);
+        index
+            .add_subscription("conn1", &SubscriptionId::new("sub1"), filters)
+            .await;
 
         // Create matching event
         let event = EventBuilder::text_note("Test message")
@@ -624,46 +642,52 @@ mod tests {
             .unwrap();
 
         // Distribute event
-        let matches = index.distribute_event(&event);
+        let matches = index.distribute_event(&event).await;
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].0, "conn1");
         assert_eq!(matches[0].1, SubscriptionId::new("sub1"));
 
         // Distribute same event again - should not match due to deduplication
-        let matches = index.distribute_event(&event);
+        let matches = index.distribute_event(&event).await;
         assert_eq!(matches.len(), 0);
     }
 
-    #[test]
-    fn test_multiple_subscriptions() {
+    #[tokio::test]
+    async fn test_multiple_subscriptions() {
         let index = SubscriptionIndex::new();
         let keys = Keys::generate();
 
         // Add multiple subscriptions
-        index.add_subscription(
-            "conn1",
-            &SubscriptionId::new("sub1"),
-            vec![Filter::new().author(keys.public_key())],
-        );
+        index
+            .add_subscription(
+                "conn1",
+                &SubscriptionId::new("sub1"),
+                vec![Filter::new().author(keys.public_key())],
+            )
+            .await;
 
-        index.add_subscription(
-            "conn2",
-            &SubscriptionId::new("sub2"),
-            vec![Filter::new().kind(Kind::TextNote)],
-        );
+        index
+            .add_subscription(
+                "conn2",
+                &SubscriptionId::new("sub2"),
+                vec![Filter::new().kind(Kind::TextNote)],
+            )
+            .await;
 
-        index.add_subscription(
-            "conn3",
-            &SubscriptionId::new("sub3"),
-            vec![Filter::new().author(Keys::generate().public_key())], // Different author
-        );
+        index
+            .add_subscription(
+                "conn3",
+                &SubscriptionId::new("sub3"),
+                vec![Filter::new().author(Keys::generate().public_key())], // Different author
+            )
+            .await;
 
         // Create event that matches first two subscriptions
         let event = EventBuilder::text_note("Test message")
             .sign_with_keys(&keys)
             .unwrap();
 
-        let matches = index.distribute_event(&event);
+        let matches = index.distribute_event(&event).await;
         assert_eq!(matches.len(), 2);
 
         // Verify both matching subscriptions are included
@@ -676,14 +700,16 @@ mod tests {
         assert!(!match_ids.contains(&("conn3", "sub3")));
     }
 
-    #[test]
-    fn test_tag_indexing() {
+    #[tokio::test]
+    async fn test_tag_indexing() {
         let index = SubscriptionIndex::new();
 
         // Add subscription with tag filter
         let filters = vec![Filter::new().hashtag("nostr")];
 
-        index.add_subscription("conn1", &SubscriptionId::new("sub1"), filters);
+        index
+            .add_subscription("conn1", &SubscriptionId::new("sub1"), filters)
+            .await;
 
         // Create event with matching hashtag
         let event = EventBuilder::text_note("Test #nostr message")
@@ -691,7 +717,7 @@ mod tests {
             .sign_with_keys(&Keys::generate())
             .unwrap();
 
-        let matches = index.distribute_event(&event);
+        let matches = index.distribute_event(&event).await;
         assert_eq!(matches.len(), 1);
 
         // Create event without matching hashtag
@@ -699,7 +725,7 @@ mod tests {
             .sign_with_keys(&Keys::generate())
             .unwrap();
 
-        let matches = index.distribute_event(&event2);
+        let matches = index.distribute_event(&event2).await;
         assert_eq!(matches.len(), 0);
     }
 }

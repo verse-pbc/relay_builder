@@ -60,23 +60,24 @@ pub struct EventContext {
 ///     fn can_see_event(
 ///         &self,
 ///         _event: &Event,
-///         custom_state: Arc<parking_lot::RwLock<RateLimitState>>,
+///         custom_state: Arc<tokio::sync::RwLock<RateLimitState>>,
 ///         _context: &EventContext,
 ///     ) -> Result<bool, relay_builder::Error> {
 ///         // For read-only access, use read lock
-///         let state = custom_state.read();
-///         Ok(state.tokens > 0.0)
+///         // Note: can_see_event is synchronous, so you cannot use async locks here.
+///         // If you need mutable state, use handle_event which is async.
+///         Ok(true) // Simplified example
 ///     }
 ///
 ///     fn handle_event(
 ///         &self,
 ///         event: Event,
-///         custom_state: Arc<parking_lot::RwLock<RateLimitState>>,
+///         custom_state: Arc<tokio::sync::RwLock<RateLimitState>>,
 ///         context: &EventContext,
 ///     ) -> impl Future<Output = Result<Vec<StoreCommand>, relay_builder::Error>> + Send {
 ///         async move {
 ///         // Get a write lock since we need to modify the rate limit state
-///         let mut state = custom_state.write();
+///         let mut state = custom_state.write().await;
 ///
 ///         if state.tokens < self.tokens_per_event {
 ///             return Err(relay_builder::Error::restricted("Rate limit exceeded"));
@@ -117,7 +118,7 @@ where
     fn can_see_event(
         &self,
         event: &Event,
-        custom_state: Arc<parking_lot::RwLock<T>>,
+        custom_state: Arc<tokio::sync::RwLock<T>>,
         context: &EventContext,
     ) -> Result<bool> {
         // Default implementation: allow all events (public relay behavior)
@@ -140,7 +141,7 @@ where
     fn verify_filters(
         &self,
         filters: &[Filter],
-        custom_state: Arc<parking_lot::RwLock<T>>,
+        custom_state: Arc<tokio::sync::RwLock<T>>,
         context: &EventContext,
     ) -> Result<()> {
         // Default implementation: allow all filters
@@ -164,7 +165,7 @@ where
     fn handle_event(
         &self,
         event: Event,
-        custom_state: Arc<parking_lot::RwLock<T>>,
+        custom_state: Arc<tokio::sync::RwLock<T>>,
         context: &EventContext,
     ) -> impl Future<Output = Result<Vec<StoreCommand>>> + Send {
         async move {

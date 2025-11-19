@@ -76,7 +76,7 @@ pub struct NostrConnectionState<T = ()> {
     /// Registry for looking up subscriptions (used to set up subscription coordinator)
     pub(crate) registry: Option<Arc<SubscriptionRegistry>>,
     /// Custom state that can be managed by middleware
-    pub custom_state: Arc<parking_lot::RwLock<T>>,
+    pub custom_state: Arc<tokio::sync::RwLock<T>>,
 }
 
 impl<T> Default for NostrConnectionState<T>
@@ -92,7 +92,7 @@ where
             subscription_quota_usage: std::collections::HashSet::new(),
             negentropy_subscriptions: HashMap::new(),
             registry: None,
-            custom_state: Arc::new(parking_lot::RwLock::new(T::default())),
+            custom_state: Arc::new(tokio::sync::RwLock::new(T::default())),
         }
     }
 }
@@ -110,7 +110,7 @@ where
             subscription_quota_usage: std::collections::HashSet::new(),
             negentropy_subscriptions: HashMap::new(),
             registry: None,
-            custom_state: Arc::new(parking_lot::RwLock::new(T::default())),
+            custom_state: Arc::new(tokio::sync::RwLock::new(T::default())),
         })
     }
 }
@@ -143,7 +143,7 @@ impl<T> NostrConnectionState<T> {
             subscription_quota_usage: std::collections::HashSet::new(),
             negentropy_subscriptions: HashMap::new(),
             registry: None,
-            custom_state: Arc::new(parking_lot::RwLock::new(custom_state)),
+            custom_state: Arc::new(tokio::sync::RwLock::new(custom_state)),
         })
     }
 
@@ -225,12 +225,12 @@ impl<T> NostrConnectionState<T> {
     }
 
     /// Remove a subscription
-    pub fn remove_subscription(&self, subscription_id: &SubscriptionId) -> Result<(), Error> {
+    pub async fn remove_subscription(&self, subscription_id: &SubscriptionId) -> Result<(), Error> {
         let Some(coordinator) = &self.subscription_coordinator else {
             return Err(Error::internal("No subscription coordinator available"));
         };
 
-        coordinator.remove_subscription(subscription_id)
+        coordinator.remove_subscription(subscription_id).await
     }
 
     /// Get the subscription coordinator (only for internal use)

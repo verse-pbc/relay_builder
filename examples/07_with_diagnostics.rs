@@ -4,9 +4,9 @@
 //! internal state metrics every 30 minutes to help identify memory issues.
 
 use nostr_sdk::prelude::*;
-use parking_lot::RwLock;
 use relay_builder::{EventContext, EventProcessor, RelayBuilder, RelayConfig, StoreCommand};
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 /// Simple event processor that accepts all events
 #[derive(Debug, Clone)]

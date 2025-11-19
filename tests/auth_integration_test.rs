@@ -29,7 +29,7 @@ where
     async fn handle_event(
         &self,
         event: Event,
-        _custom_state: Arc<parking_lot::RwLock<T>>,
+        _custom_state: Arc<tokio::sync::RwLock<T>>,
         context: &EventContext,
     ) -> RelayResult<Vec<StoreCommand>> {
         // Track events with their auth state
@@ -104,7 +104,7 @@ where
     async fn handle_event(
         &self,
         event: Event,
-        _custom_state: Arc<parking_lot::RwLock<T>>,
+        _custom_state: Arc<tokio::sync::RwLock<T>>,
         context: &EventContext,
     ) -> RelayResult<Vec<StoreCommand>> {
         if context.authed_pubkey.is_none() {

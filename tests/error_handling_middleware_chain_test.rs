@@ -18,7 +18,7 @@ impl EventProcessor for RejectingEventProcessor {
     async fn handle_event(
         &self,
         _event: Event,
-        _custom_state: Arc<parking_lot::RwLock<()>>,
+        _custom_state: Arc<tokio::sync::RwLock<()>>,
         _context: &EventContext,
     ) -> Result<Vec<StoreCommand>, Error> {
         // Always reject with restricted error
@@ -34,7 +34,7 @@ impl EventProcessor for AcceptingEventProcessor {
     async fn handle_event(
         &self,
         event: Event,
-        _custom_state: Arc<parking_lot::RwLock<()>>,
+        _custom_state: Arc<tokio::sync::RwLock<()>>,
         context: &EventContext,
     ) -> Result<Vec<StoreCommand>, Error> {
         Ok(vec![StoreCommand::SaveSignedEvent(

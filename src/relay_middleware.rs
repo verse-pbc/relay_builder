@@ -495,19 +495,23 @@ where
 
                 ClientMessage::Close(subscription_id) => {
                     // Handle CLOSE message
-                    {
+                    let subscription_id_owned = subscription_id.into_owned();
+                    let coordinator = {
                         let mut state = ctx.state.write();
-                        let subscription_id_owned = subscription_id.into_owned();
 
                         // Release quota slot for this subscription
                         state.release_quota_slot(&subscription_id_owned);
 
-                        if let Some(subscription_coordinator) = state.subscription_coordinator() {
-                            let _ = subscription_coordinator
-                                .remove_subscription(&subscription_id_owned);
-                            debug!("Closed subscription: {}", subscription_id_owned);
-                        }
+                        state.subscription_coordinator().cloned()
+                    };
+
+                    if let Some(subscription_coordinator) = coordinator {
+                        let _ = subscription_coordinator
+                            .remove_subscription(&subscription_id_owned)
+                            .await;
+                        debug!("Closed subscription: {}", subscription_id_owned);
                     }
+
                     ctx.next().await
                 }
 
@@ -661,7 +665,7 @@ where
 
             // Perform explicit cleanup immediately when connection closes
             // No need to read the lock - connection_id is already in the context
-            self.registry.cleanup_connection(ctx.connection_id);
+            self.registry.cleanup_connection(ctx.connection_id).await;
             debug!(
                 "RelayMiddleware: Cleaned up connection {}",
                 ctx.connection_id

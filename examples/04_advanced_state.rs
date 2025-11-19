@@ -43,10 +43,10 @@ impl EventProcessor<UserSession> for AdvancedStateProcessor {
     async fn handle_event(
         &self,
         event: Event,
-        custom_state: Arc<parking_lot::RwLock<UserSession>>,
+        custom_state: Arc<tokio::sync::RwLock<UserSession>>,
         context: &EventContext,
     ) -> RelayResult<Vec<StoreCommand>> {
-        let mut state = custom_state.write();
+        let mut state = custom_state.write().await;
 
         // Initialize session if first event
         if state.first_event_time.is_none() {

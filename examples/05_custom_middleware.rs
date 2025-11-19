@@ -94,7 +94,7 @@ impl EventProcessor for SimpleProcessor {
     async fn handle_event(
         &self,
         event: Event,
-        _custom_state: Arc<parking_lot::RwLock<()>>,
+        _custom_state: Arc<tokio::sync::RwLock<()>>,
         context: &EventContext,
     ) -> Result<Vec<StoreCommand>, relay_builder::Error> {
         tracing::debug!("Processing event {} from {}", event.id, event.pubkey);

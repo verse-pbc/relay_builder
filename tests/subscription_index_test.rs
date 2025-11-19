@@ -12,35 +12,41 @@ fn create_test_event(author: &Keys, kind: Kind, content: &str, tags: Vec<Tag>) -
         .unwrap()
 }
 
-#[test]
-fn test_basic_subscription_operations() {
+#[tokio::test]
+async fn test_basic_subscription_operations() {
     let index = SubscriptionIndex::new();
 
     // Add subscriptions
     for i in 0..5 {
         let filters = vec![Filter::new().kind(Kind::TextNote)];
-        index.add_subscription(
-            &format!("conn{i}"),
-            &SubscriptionId::new(format!("sub{i}")),
-            filters,
-        );
+        index
+            .add_subscription(
+                &format!("conn{i}"),
+                &SubscriptionId::new(format!("sub{i}")),
+                filters,
+            )
+            .await;
     }
 
-    let stats = index.stats();
+    let stats = index.stats().await;
     assert_eq!(stats.total_subscriptions, 5);
     assert_eq!(stats.total_filters, 5);
 
     // Remove some subscriptions
-    index.remove_subscription("conn1", &SubscriptionId::new("sub1"));
-    index.remove_subscription("conn3", &SubscriptionId::new("sub3"));
+    index
+        .remove_subscription("conn1", &SubscriptionId::new("sub1"))
+        .await;
+    index
+        .remove_subscription("conn3", &SubscriptionId::new("sub3"))
+        .await;
 
-    let stats = index.stats();
+    let stats = index.stats().await;
     assert_eq!(stats.total_subscriptions, 3);
     assert_eq!(stats.total_filters, 3);
 }
 
-#[test]
-fn test_event_deduplication_across_filters() {
+#[tokio::test]
+async fn test_event_deduplication_across_filters() {
     let index = SubscriptionIndex::new();
     let keys = Keys::generate();
 
@@ -51,13 +57,15 @@ fn test_event_deduplication_across_filters() {
         Filter::new().author(keys.public_key()).kind(Kind::TextNote),
     ];
 
-    index.add_subscription("conn1", &SubscriptionId::new("sub1"), filters);
+    index
+        .add_subscription("conn1", &SubscriptionId::new("sub1"), filters)
+        .await;
 
     // Create event that matches all three filters
     let event = create_test_event(&keys, Kind::TextNote, "Test", vec![]);
 
     // Should only get one match despite multiple matching filters
-    let matches = index.distribute_event(&event);
+    let matches = index.distribute_event(&event).await;
     assert_eq!(matches.len(), 1);
     assert_eq!(
         matches[0],
@@ -65,32 +73,38 @@ fn test_event_deduplication_across_filters() {
     );
 }
 
-#[test]
-fn test_complex_tag_filtering() {
+#[tokio::test]
+async fn test_complex_tag_filtering() {
     let index = SubscriptionIndex::new();
 
     // Subscription 1: follows hashtag "nostr"
-    index.add_subscription(
-        "conn1",
-        &SubscriptionId::new("sub1"),
-        vec![Filter::new().hashtag("nostr")],
-    );
+    index
+        .add_subscription(
+            "conn1",
+            &SubscriptionId::new("sub1"),
+            vec![Filter::new().hashtag("nostr")],
+        )
+        .await;
 
     // Subscription 2: follows event references
     let event_id = EventId::all_zeros();
-    index.add_subscription(
-        "conn2",
-        &SubscriptionId::new("sub2"),
-        vec![Filter::new().event(event_id)],
-    );
+    index
+        .add_subscription(
+            "conn2",
+            &SubscriptionId::new("sub2"),
+            vec![Filter::new().event(event_id)],
+        )
+        .await;
 
     // Subscription 3: follows specific pubkey mentions
     let mentioned_key = Keys::generate().public_key();
-    index.add_subscription(
-        "conn3",
-        &SubscriptionId::new("sub3"),
-        vec![Filter::new().pubkey(mentioned_key)],
-    );
+    index
+        .add_subscription(
+            "conn3",
+            &SubscriptionId::new("sub3"),
+            vec![Filter::new().pubkey(mentioned_key)],
+        )
+        .await;
 
     // Event with multiple tags
     let event = create_test_event(
@@ -104,7 +118,7 @@ fn test_complex_tag_filtering() {
         ],
     );
 
-    let matches = index.distribute_event(&event);
+    let matches = index.distribute_event(&event).await;
     assert_eq!(matches.len(), 3);
 
     // Verify all three subscriptions matched
@@ -114,40 +128,44 @@ fn test_complex_tag_filtering() {
     assert!(match_set.contains(&("conn3".to_string(), SubscriptionId::new("sub3"))));
 }
 
-#[test]
-fn test_subscription_isolation() {
+#[tokio::test]
+async fn test_subscription_isolation() {
     let index = SubscriptionIndex::new();
     let keys1 = Keys::generate();
     let keys2 = Keys::generate();
 
     // Two connections with different author filters
-    index.add_subscription(
-        "conn1",
-        &SubscriptionId::new("sub1"),
-        vec![Filter::new().author(keys1.public_key())],
-    );
+    index
+        .add_subscription(
+            "conn1",
+            &SubscriptionId::new("sub1"),
+            vec![Filter::new().author(keys1.public_key())],
+        )
+        .await;
 
-    index.add_subscription(
-        "conn2",
-        &SubscriptionId::new("sub2"),
-        vec![Filter::new().author(keys2.public_key())],
-    );
+    index
+        .add_subscription(
+            "conn2",
+            &SubscriptionId::new("sub2"),
+            vec![Filter::new().author(keys2.public_key())],
+        )
+        .await;
 
     // Event from first author
     let event1 = create_test_event(&keys1, Kind::TextNote, "From author 1", vec![]);
-    let matches = index.distribute_event(&event1);
+    let matches = index.distribute_event(&event1).await;
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0].0, "conn1");
 
     // Event from second author
     let event2 = create_test_event(&keys2, Kind::TextNote, "From author 2", vec![]);
-    let matches = index.distribute_event(&event2);
+    let matches = index.distribute_event(&event2).await;
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0].0, "conn2");
 }
 
-#[test]
-fn test_filter_with_multiple_criteria() {
+#[tokio::test]
+async fn test_filter_with_multiple_criteria() {
     let index = SubscriptionIndex::new();
     let author = Keys::generate();
 
@@ -157,7 +175,9 @@ fn test_filter_with_multiple_criteria() {
         .kind(Kind::from(30023)) // Long-form content
         .hashtag("bitcoin");
 
-    index.add_subscription("conn1", &SubscriptionId::new("sub1"), vec![filter]);
+    index
+        .add_subscription("conn1", &SubscriptionId::new("sub1"), vec![filter])
+        .await;
 
     // Event that matches all criteria
     let matching_event = create_test_event(
@@ -166,7 +186,7 @@ fn test_filter_with_multiple_criteria() {
         "Bitcoin article",
         vec![Tag::hashtag("bitcoin")],
     );
-    assert_eq!(index.distribute_event(&matching_event).len(), 1);
+    assert_eq!(index.distribute_event(&matching_event).await.len(), 1);
 
     // Event with wrong author
     let wrong_author_event = create_test_event(
@@ -175,7 +195,7 @@ fn test_filter_with_multiple_criteria() {
         "Bitcoin article",
         vec![Tag::hashtag("bitcoin")],
     );
-    assert_eq!(index.distribute_event(&wrong_author_event).len(), 0);
+    assert_eq!(index.distribute_event(&wrong_author_event).await.len(), 0);
 
     // Event with wrong kind
     let wrong_kind_event = create_test_event(
@@ -184,25 +204,27 @@ fn test_filter_with_multiple_criteria() {
         "Bitcoin note",
         vec![Tag::hashtag("bitcoin")],
     );
-    assert_eq!(index.distribute_event(&wrong_kind_event).len(), 0);
+    assert_eq!(index.distribute_event(&wrong_kind_event).await.len(), 0);
 
     // Event without required tag
     let no_tag_event = create_test_event(&author, Kind::from(30023), "Article without tag", vec![]);
-    assert_eq!(index.distribute_event(&no_tag_event).len(), 0);
+    assert_eq!(index.distribute_event(&no_tag_event).await.len(), 0);
 }
 
-#[test]
-fn test_empty_filter_handling() {
+#[tokio::test]
+async fn test_empty_filter_handling() {
     let index = SubscriptionIndex::new();
 
     // Add subscription with empty filter (matches everything)
-    index.add_subscription("conn1", &SubscriptionId::new("sub1"), vec![Filter::new()]);
+    index
+        .add_subscription("conn1", &SubscriptionId::new("sub1"), vec![Filter::new()])
+        .await;
 
     // Create any event
     let event = create_test_event(&Keys::generate(), Kind::TextNote, "Any event", vec![]);
 
     // Empty filters match all events - they're stored in a separate match_all_filters list
-    let matches = index.distribute_event(&event);
+    let matches = index.distribute_event(&event).await;
 
     // Empty filters should match all events
     assert_eq!(matches.len(), 1);
@@ -210,10 +232,9 @@ fn test_empty_filter_handling() {
     assert_eq!(matches[0].1, SubscriptionId::new("sub1"));
 }
 
-#[test]
-fn test_concurrent_operations() {
+#[tokio::test]
+async fn test_concurrent_operations() {
     use std::sync::Arc;
-    use std::thread;
 
     let index = Arc::new(SubscriptionIndex::new());
     let num_threads = 4;
@@ -224,7 +245,7 @@ fn test_concurrent_operations() {
     // Spawn threads that add/remove subscriptions concurrently
     for thread_id in 0..num_threads {
         let index_clone = index.clone();
-        let handle = thread::spawn(move || {
+        let handle = tokio::spawn(async move {
             for op in 0..ops_per_thread {
                 let conn_id = format!("conn_{thread_id}_{op}");
                 let sub_id = SubscriptionId::new(format!("sub_{thread_id}_{op}"));
@@ -234,7 +255,9 @@ fn test_concurrent_operations() {
                     Filter::new().kind(Kind::from(thread_id as u16)),
                     Filter::new().author(Keys::generate().public_key()),
                 ];
-                index_clone.add_subscription(&conn_id, &sub_id, filters);
+                index_clone
+                    .add_subscription(&conn_id, &sub_id, filters)
+                    .await;
 
                 // Distribute some events
                 for i in 0..5 {
@@ -244,25 +267,25 @@ fn test_concurrent_operations() {
                         &format!("Event {i} from thread {thread_id}"),
                         vec![],
                     );
-                    index_clone.distribute_event(&event);
+                    index_clone.distribute_event(&event).await;
                 }
 
                 // Remove subscription
                 if op % 2 == 0 {
-                    index_clone.remove_subscription(&conn_id, &sub_id);
+                    index_clone.remove_subscription(&conn_id, &sub_id).await;
                 }
             }
         });
         handles.push(handle);
     }
 
-    // Wait for all threads to complete
+    // Wait for all tasks to complete
     for handle in handles {
-        handle.join().unwrap();
+        handle.await.unwrap();
     }
 
     // Verify final state is consistent
-    let stats = index.stats();
+    let stats = index.stats().await;
     println!("Final stats after concurrent operations: {stats:?}");
 
     // Should have some subscriptions remaining (half were removed)
@@ -270,43 +293,49 @@ fn test_concurrent_operations() {
     assert!(stats.total_filters > 0);
 }
 
-#[test]
-fn test_index_stats_accuracy() {
+#[tokio::test]
+async fn test_index_stats_accuracy() {
     let index = SubscriptionIndex::new();
     let author1 = Keys::generate();
     let author2 = Keys::generate();
 
     // Add various types of indexed filters
-    index.add_subscription(
-        "conn1",
-        &SubscriptionId::new("sub1"),
-        vec![
-            Filter::new().author(author1.public_key()),
-            Filter::new().author(author2.public_key()),
-        ],
-    );
+    index
+        .add_subscription(
+            "conn1",
+            &SubscriptionId::new("sub1"),
+            vec![
+                Filter::new().author(author1.public_key()),
+                Filter::new().author(author2.public_key()),
+            ],
+        )
+        .await;
 
-    index.add_subscription(
-        "conn2",
-        &SubscriptionId::new("sub2"),
-        vec![
-            Filter::new().kind(Kind::TextNote),
-            Filter::new().kind(Kind::ChannelMessage),
-            Filter::new().kind(Kind::Reaction),
-        ],
-    );
+    index
+        .add_subscription(
+            "conn2",
+            &SubscriptionId::new("sub2"),
+            vec![
+                Filter::new().kind(Kind::TextNote),
+                Filter::new().kind(Kind::ChannelMessage),
+                Filter::new().kind(Kind::Reaction),
+            ],
+        )
+        .await;
 
-    index.add_subscription(
-        "conn3",
-        &SubscriptionId::new("sub3"),
-        vec![
-            Filter::new().id(EventId::all_zeros()),
-            Filter::new().hashtag("bitcoin"),
-            Filter::new().hashtag("nostr"),
-        ],
-    );
+    index
+        .add_subscription(
+            "conn3",
+            &SubscriptionId::new("sub3"),
+            vec![
+                Filter::new().id(EventId::all_zeros()),
+                Filter::new().hashtag("bitcoin"),
+                Filter::new().hashtag("nostr"),
+            ],
+        )
+        .await;
 
-    let stats = index.stats();
+    let stats = index.stats().await;
     assert_eq!(stats.total_filters, 8);
     assert_eq!(stats.total_subscriptions, 3);
     assert_eq!(stats.authors_indexed, 2);
@@ -315,8 +344,8 @@ fn test_index_stats_accuracy() {
     assert_eq!(stats.tags_indexed, 2); // Two hashtags
 }
 
-#[test]
-fn test_controlled_benchmark_25_connections() {
+#[tokio::test]
+async fn test_controlled_benchmark_25_connections() {
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
 
@@ -426,13 +455,15 @@ fn test_controlled_benchmark_25_connections() {
     for run in 0..NUM_RUNS {
         let index = SubscriptionIndex::new();
         for ((conn_id, sub_id), filters) in &filter_by_subscription {
-            index.add_subscription(conn_id, sub_id, filters.clone());
+            index
+                .add_subscription(conn_id, sub_id, filters.clone())
+                .await;
         }
 
         let start = Instant::now();
         let mut total_matches = 0;
         for event in &events {
-            total_matches += index.distribute_event(event).len();
+            total_matches += index.distribute_event(event).await.len();
         }
         let duration = start.elapsed();
         indexed_times.push(duration);
@@ -462,8 +493,8 @@ fn test_controlled_benchmark_25_connections() {
     );
 }
 
-#[test]
-fn test_performance_comparison_linear_vs_indexed() {
+#[tokio::test]
+async fn test_performance_comparison_linear_vs_indexed() {
     use std::collections::HashMap;
     use std::time::Instant;
 
@@ -606,14 +637,16 @@ fn test_performance_comparison_linear_vs_indexed() {
 
     // Add all subscriptions to index (one subscription per connection)
     for ((conn_id, sub_id), filters) in &filter_by_subscription {
-        index.add_subscription(conn_id, sub_id, filters.clone());
+        index
+            .add_subscription(conn_id, sub_id, filters.clone())
+            .await;
     }
 
     let start_indexed = Instant::now();
     let mut total_indexed_matches = 0;
 
     for event in &events {
-        let matches = index.distribute_event(event);
+        let matches = index.distribute_event(event).await;
         total_indexed_matches += matches.len();
     }
 
@@ -651,7 +684,7 @@ fn test_performance_comparison_linear_vs_indexed() {
     }
 
     // Let's print index statistics for analysis
-    let stats = index.stats();
+    let stats = index.stats().await;
     println!("\nIndex statistics:");
     println!("  Total filters: {}", stats.total_filters);
     println!("  Total subscriptions: {}", stats.total_subscriptions);

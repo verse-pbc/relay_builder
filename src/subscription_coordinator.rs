@@ -318,27 +318,29 @@ impl SubscriptionCoordinator {
     }
 
     /// Add a subscription
-    pub fn add_subscription(
+    pub async fn add_subscription(
         &self,
         subscription_id: &SubscriptionId,
         filters: Vec<Filter>,
     ) -> Result<(), Error> {
         // Remove existing subscription first (if it exists)
         // This ensures clean replacement without filter accumulation in the index
-        let _ = self.remove_subscription(subscription_id);
+        let _ = self.remove_subscription(subscription_id).await;
 
         // In the on_connect hook path we called register_connection which
         // matched the scope to the connection_id
         self.registry
             .add_subscription(&self.connection_id, subscription_id, filters)
+            .await
     }
 
     /// Remove a subscription
-    pub fn remove_subscription(&self, subscription_id: &SubscriptionId) -> Result<(), Error> {
-        // Just call directly now since it's not async
+    pub async fn remove_subscription(&self, subscription_id: &SubscriptionId) -> Result<(), Error> {
+        // Just call directly now since it's async
         if let Err(e) = self
             .registry
             .remove_subscription(&self.connection_id, subscription_id)
+            .await
         {
             warn!("Failed to remove subscription: {:?}", e);
         }
@@ -498,7 +500,7 @@ impl SubscriptionCoordinator {
         .await?;
 
         // Add the subscription for future events
-        self.add_subscription(&subscription_id, filters)?;
+        self.add_subscription(&subscription_id, filters).await?;
 
         Ok(())
     }
@@ -738,6 +740,7 @@ mod tests {
         let filters = vec![Filter::new().kinds(vec![Kind::Custom(39000)])];
         registry
             .add_subscription(&connection_id, &SubscriptionId::new("test_sub"), filters)
+            .await
             .unwrap();
 
         // Create buffer with registry
@@ -1422,6 +1425,7 @@ mod tests {
 
         coordinator
             .add_subscription(&sub_id, filters1.clone())
+            .await
             .expect("Failed to add first subscription");
 
         // Query with the subscription - should get event1
@@ -1453,6 +1457,7 @@ mod tests {
 
         coordinator
             .add_subscription(&sub_id, filters2.clone())
+            .await
             .expect("Failed to replace subscription");
 
         // Query with the replaced subscription - should get event2 only, not both

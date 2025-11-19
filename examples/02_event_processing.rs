@@ -51,7 +51,7 @@ impl EventProcessor for SmartEventProcessor {
     async fn handle_event(
         &self,
         event: Event,
-        _custom_state: Arc<parking_lot::RwLock<()>>,
+        _custom_state: Arc<tokio::sync::RwLock<()>>,
         context: &EventContext,
     ) -> RelayResult<Vec<StoreCommand>> {
         // First check rate limit

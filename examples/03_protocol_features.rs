@@ -29,7 +29,7 @@ impl EventProcessor for ProtocolProcessor {
     async fn handle_event(
         &self,
         event: Event,
-        _custom_state: Arc<parking_lot::RwLock<()>>,
+        _custom_state: Arc<tokio::sync::RwLock<()>>,
         context: &EventContext,
     ) -> RelayResult<Vec<StoreCommand>> {
         // NIP-42: Check authentication for posting

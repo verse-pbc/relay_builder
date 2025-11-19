@@ -42,7 +42,7 @@ pub async fn run_diagnostics(registry: Arc<SubscriptionRegistry>, interval_minut
         "Starting diagnostics with {}-minute interval",
         interval_minutes
     );
-    let diagnostics = registry.get_diagnostics();
+    let diagnostics = registry.get_diagnostics().await;
     log_health_check(&diagnostics, &mut previous);
 
     // Skip the first tick since we just showed initial diagnostics
@@ -51,7 +51,7 @@ pub async fn run_diagnostics(registry: Arc<SubscriptionRegistry>, interval_minut
     loop {
         interval.tick().await;
 
-        let diagnostics = registry.get_diagnostics();
+        let diagnostics = registry.get_diagnostics().await;
         log_health_check(&diagnostics, &mut previous);
     }
 }
