@@ -1,7 +1,7 @@
 //! Subscription coordinator for handling REQ messages and historical queries
 //!
-//! This module replaces the actor-based subscription_service with a simpler
-//! coordinator that integrates with the SubscriptionRegistry for live events.
+//! This module replaces the actor-based `subscription_service` with a simpler
+//! coordinator that integrates with the `SubscriptionRegistry` for live events.
 
 use crate::database::RelayDatabase;
 use crate::error::Error;
@@ -42,14 +42,16 @@ pub enum StoreCommand {
 }
 
 impl StoreCommand {
+    #[must_use]
     pub fn subdomain_scope(&self) -> &Scope {
         match self {
-            StoreCommand::SaveSignedEvent(_, scope, _) => scope,
-            StoreCommand::SaveUnsignedEvent(_, scope, _) => scope,
-            StoreCommand::DeleteEvents(_, scope, _) => scope,
+            StoreCommand::SaveSignedEvent(_, scope, _)
+            | StoreCommand::SaveUnsignedEvent(_, scope, _)
+            | StoreCommand::DeleteEvents(_, scope, _) => scope,
         }
     }
 
+    #[must_use]
     pub fn is_replaceable(&self) -> bool {
         match self {
             StoreCommand::SaveUnsignedEvent(event, _, _) => {
@@ -62,6 +64,11 @@ impl StoreCommand {
         }
     }
 
+    /// Set the message sender for store command responses.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if called on non-`SaveSignedEvent` command.
     pub fn set_message_sender(&mut self, message_sender: MessageSender) -> Result<(), Error> {
         match self {
             StoreCommand::SaveSignedEvent(_, _, ref mut handler) => {
@@ -75,14 +82,14 @@ impl StoreCommand {
     }
 }
 
-/// Implement conversion from (Event, Scope) tuple to StoreCommand
+/// Implement conversion from (Event, Scope) tuple to `StoreCommand`
 impl From<(Event, Scope)> for StoreCommand {
     fn from((event, scope): (Event, Scope)) -> Self {
         StoreCommand::SaveSignedEvent(Box::new(event), scope, None)
     }
 }
 
-/// Implement conversion from `(Box<Event>, Scope)` tuple to StoreCommand
+/// Implement conversion from `(Box<Event>, Scope)` tuple to `StoreCommand`
 impl From<(Box<Event>, Scope)> for StoreCommand {
     fn from((event, scope): (Box<Event>, Scope)) -> Self {
         StoreCommand::SaveSignedEvent(event, scope, None)
@@ -229,7 +236,7 @@ impl ReplaceableEventsBuffer {
 
             loop {
                 tokio::select! {
-                    _ = cancellation_token.cancelled() => {
+                    () = cancellation_token.cancelled() => {
                         debug!("{} cancelled, flushing remaining events", task_name);
                         self.flush(&database, &crypto_helper).await;
                         break;
@@ -241,7 +248,7 @@ impl ReplaceableEventsBuffer {
                         }
                     }
 
-                    _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                    () = tokio::time::sleep(Duration::from_secs(1)) => {
                         self.flush(&database, &crypto_helper).await;
                     }
                 }
@@ -264,6 +271,7 @@ pub struct SubscriptionCoordinator {
     _connection_handle: Arc<crate::subscription_registry::ConnectionHandle>,
 }
 
+#[allow(clippy::missing_fields_in_debug)] // Intentionally excludes large internal state from Debug output
 impl std::fmt::Debug for SubscriptionCoordinator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SubscriptionCoordinator")
@@ -278,11 +286,13 @@ impl std::fmt::Debug for SubscriptionCoordinator {
 
 impl SubscriptionCoordinator {
     /// Get the connection ID for this coordinator
+    #[must_use]
     pub fn connection_id(&self) -> &str {
         &self.connection_id
     }
 
     /// Create a new subscription coordinator
+    #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         database: Arc<RelayDatabase>,
@@ -318,6 +328,10 @@ impl SubscriptionCoordinator {
     }
 
     /// Add a subscription
+    ///
+    /// # Errors
+    ///
+    /// Returns error if subscription registration fails.
     pub async fn add_subscription(
         &self,
         subscription_id: &SubscriptionId,
@@ -335,6 +349,10 @@ impl SubscriptionCoordinator {
     }
 
     /// Remove a subscription
+    ///
+    /// # Errors
+    ///
+    /// Returns error if subscription removal fails.
     pub async fn remove_subscription(&self, subscription_id: &SubscriptionId) -> Result<(), Error> {
         // Just call directly now since it's async
         if let Err(e) = self
@@ -349,6 +367,10 @@ impl SubscriptionCoordinator {
     }
 
     /// Save and broadcast a store command
+    ///
+    /// # Errors
+    ///
+    /// Returns error if event signing, saving, or deletion fails.
     pub async fn save_and_broadcast(&self, command: StoreCommand) -> Result<(), Error> {
         match command {
             StoreCommand::SaveUnsignedEvent(event, scope, response_handler) => {
@@ -435,7 +457,7 @@ impl SubscriptionCoordinator {
                     let _ = tx.send(
                         save_result
                             .as_ref()
-                            .map(|_| ())
+                            .copied()
                             .map_err(|_| Error::internal("Failed to save event")),
                     );
                 }
@@ -462,7 +484,7 @@ impl SubscriptionCoordinator {
                     let _ = handler.send(
                         delete_result
                             .as_ref()
-                            .map(|_| ())
+                            .copied()
                             .map_err(|_| Error::internal("Failed to delete events")),
                     );
                 }
@@ -473,6 +495,10 @@ impl SubscriptionCoordinator {
     }
 
     /// Handle a REQ message from a client
+    ///
+    /// # Errors
+    ///
+    /// Returns error if subscription setup or query operation fails.
     pub async fn handle_req(
         &self,
         subscription_id: SubscriptionId,
@@ -533,6 +559,8 @@ impl SubscriptionCoordinator {
 
         // Process each filter separately
         for (filter_idx, filter) in filters.iter().enumerate() {
+            const MAX_ATTEMPTS: usize = 50;
+
             // All filters have been adjusted to have a limit by this point
             let requested_limit = filter
                 .limit
@@ -542,7 +570,6 @@ impl SubscriptionCoordinator {
             let mut filter_sent = 0;
             let mut last_timestamp = None;
             let mut attempts = 0;
-            const MAX_ATTEMPTS: usize = 50;
 
             loop {
                 attempts += 1;

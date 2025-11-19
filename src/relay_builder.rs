@@ -1,4 +1,4 @@
-//! RelayBuilder for constructing Nostr relays with custom state
+//! `RelayBuilder` for constructing Nostr relays with custom state
 
 use crate::config::{DatabaseConfig, RelayConfig};
 use crate::crypto_helper::CryptoHelper;
@@ -23,7 +23,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 pub enum HtmlOption {
     /// No HTML - returns 404 for non-WebSocket requests
     None,
-    /// Default HTML page that renders RelayInfo
+    /// Default HTML page that renders `RelayInfo`
     #[default]
     Default,
     /// Custom HTML provider function
@@ -51,7 +51,7 @@ impl std::fmt::Debug for HtmlOption {
 ///
 /// # Default Processing
 /// By default, the builder automatically provides:
-/// - **EventIngester** - High-performance JSON parsing and signature verification (pre-middleware)
+/// - **`EventIngester`** - High-performance JSON parsing and signature verification (pre-middleware)
 /// - `NostrLoggerMiddleware` - Request/response logging (outermost layer)
 /// - `ErrorHandlingMiddleware` - Global error handling (second layer)
 /// - `Nip42Middleware` - NIP-42 authentication (when `config.enable_auth` is true)
@@ -62,7 +62,7 @@ impl std::fmt::Debug for HtmlOption {
 ///
 /// # Without Defaults
 /// Use `.without_defaults()` to disable automatic middleware and have full control over the
-/// middleware stack. Note: EventIngester signature verification is always active regardless.
+/// middleware stack. Note: `EventIngester` signature verification is always active regardless.
 ///
 /// # Example
 /// ```rust,no_run
@@ -116,6 +116,7 @@ impl std::fmt::Debug for HtmlOption {
 /// # Ok(())
 /// # }
 /// ```
+#[allow(clippy::struct_excessive_bools)] // Builder pattern naturally accumulates boolean flags
 pub struct RelayBuilder<T = (), P = DefaultRelayProcessor<T>>
 where
     T: Clone + Send + Sync + std::fmt::Debug + 'static,
@@ -132,7 +133,7 @@ where
     subscription_metrics_handler: Option<Arc<dyn SubscriptionMetricsHandler>>,
     /// HTML rendering option for browser requests
     html_option: HtmlOption,
-    /// Optional shared TaskTracker for all background tasks
+    /// Optional shared `TaskTracker` for all background tasks
     task_tracker: Option<TaskTracker>,
     /// Skip default middlewares (logger, error handling)
     without_defaults: bool,
@@ -211,7 +212,7 @@ where
         self
     }
 
-    /// Set a shared TaskTracker for all background tasks
+    /// Set a shared `TaskTracker` for all background tasks
     #[must_use]
     pub fn task_tracker(mut self, tracker: TaskTracker) -> Self {
         self.task_tracker = Some(tracker);
@@ -220,11 +221,11 @@ where
 
     /// Skip default middlewares (logger, error handling)
     ///
-    /// By default, the relay automatically adds NostrLoggerMiddleware and
-    /// ErrorHandlingMiddleware as the outermost layers. Call this method
+    /// By default, the relay automatically adds `NostrLoggerMiddleware` and
+    /// `ErrorHandlingMiddleware` as the outermost layers. Call this method
     /// to opt out of these defaults and have full control over the middleware stack.
     ///
-    /// Note: EventIngester signature verification is always active and cannot be disabled.
+    /// Note: `EventIngester` signature verification is always active and cannot be disabled.
     #[must_use]
     pub fn without_defaults(mut self) -> Self {
         self.without_defaults = true;
@@ -235,7 +236,7 @@ where
 
     /// Set a custom event processor for handling relay business logic
     ///
-    /// If not set, uses DefaultRelayProcessor which accepts all valid events.
+    /// If not set, uses `DefaultRelayProcessor` which accepts all valid events.
     ///
     /// This method accepts both `MyProcessor` and `Arc::new(MyProcessor)`.
     #[must_use]
@@ -339,12 +340,12 @@ where
 
     /// Build a WebSocket handler factory with default middleware
     ///
-    /// This returns the concrete handler factory that can be used with websocket_builder's
-    /// axum integration or any other WebSocket server that accepts a HandlerFactory.
+    /// This returns the concrete handler factory that can be used with `websocket_builder`'s
+    /// axum integration or any other WebSocket server that accepts a `HandlerFactory`.
     ///
     /// Unless `.without_defaults()` has been called, this will automatically add:
-    /// - NostrLoggerMiddleware as the outermost layer
-    /// - ErrorHandlingMiddleware as the second layer
+    /// - `NostrLoggerMiddleware` as the outermost layer
+    /// - `ErrorHandlingMiddleware` as the second layer
     ///
     /// # Example
     /// ```ignore
@@ -356,6 +357,10 @@ where
     /// // Use with websocket_builder's route helper
     /// let app = crate::websocket::websocket_route("/", factory);
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns error if database configuration is missing or setup fails.
     pub async fn build(self) -> Result<impl crate::websocket::HandlerFactory, Error>
     where
         T: Default,
@@ -388,11 +393,21 @@ where
     /// Unless `.without_defaults()` is called, the default middleware (logger, error handling, auth)
     /// are automatically added as the outermost layers. This ensures proper error handling
     /// and logging for all requests.
-    /// EventIngester signature verification is always active regardless of middleware configuration.
+    /// `EventIngester` signature verification is always active regardless of middleware configuration.
     /// The relay middleware is automatically added as the innermost middleware.
     ///
     /// When `without_defaults()` is NOT set, the chain order will be:
-    /// NostrLoggerMiddleware -> ErrorHandlingMiddleware -> Nip42Middleware (if auth enabled) -> YourMiddleware -> RelayMiddleware
+    /// `NostrLoggerMiddleware` -> `ErrorHandlingMiddleware` -> `Nip42Middleware` (if auth enabled) -> `YourMiddleware` -> `RelayMiddleware`
+    ///
+    /// # Errors
+    ///
+    /// Returns error if database configuration is missing or chain setup fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the subscription metrics handler has already been set globally
+    #[allow(clippy::unused_async)]
+    #[allow(clippy::too_many_lines)] // Complex builder setup with conditional middleware
     pub async fn build_with<F, C>(
         mut self,
         chain_fn: F,
@@ -411,6 +426,9 @@ where
         C: crate::middleware_chain::BuildConnected + Send + Sync + 'static + Clone,
         C::Output: InboundProcessor<T> + OutboundProcessor<T> + Send + Sync + 'static + Clone,
     {
+        use crate::middlewares::MetricsMiddleware;
+        use crate::util::{Either, IdentityMiddleware};
+
         // Set the global subscription metrics handler if provided
         if let Some(handler) = self.subscription_metrics_handler.clone() {
             crate::global_metrics::set_subscription_metrics_handler(handler);
@@ -498,9 +516,6 @@ where
         let chain_with_relay = chain_fn(base_chain);
 
         // Build the final chain with conditionally applied defaults using Either
-        use crate::middlewares::MetricsMiddleware;
-        use crate::util::{Either, IdentityMiddleware};
-
         let final_chain = if self.without_defaults {
             // Without defaults - use Either::Right (identity/no-op) for metrics, auth, error handling, and logger
             let chain_with_metrics = if self.enable_metrics {

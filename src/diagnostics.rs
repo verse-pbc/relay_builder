@@ -1,4 +1,10 @@
 //! Diagnostic system for monitoring relay health and detecting memory issues
+//!
+//! This module performs metric calculations using usize/i64/f64 conversions.
+//! These conversions are intentional for delta calculations and rates.
+
+#![allow(clippy::cast_possible_wrap)] // usize -> i64 for signed deltas
+#![allow(clippy::cast_precision_loss)] // usize/i64 -> f64 for rate calculations
 
 use crate::subscription_registry::{RegistryDiagnostics, SubscriptionRegistry};
 use nostr_lmdb::Scope;

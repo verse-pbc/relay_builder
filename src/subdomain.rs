@@ -10,6 +10,7 @@
 /// * `extract_subdomain("sub.example.com", 2)` returns `Some("sub")`
 /// * `extract_subdomain("example.com", 2)` returns `None`
 /// * `extract_subdomain("a.b.example.co.uk", 3)` returns `Some("a.b")`
+#[must_use]
 pub fn extract_subdomain(host: &str, base_domain_parts: usize) -> Option<String> {
     // Remove port if present (host:port format)
     let host_without_port = host.split(':').next().unwrap_or(host);

@@ -46,7 +46,10 @@ impl EventIngester {
 
     /// Process a message inline (parse JSON and verify signature if it's an EVENT)
     /// This now runs directly in the connection thread for better performance
-    pub async fn process_message(
+    ///
+    /// # Errors
+    /// Returns an error if JSON parsing fails or event signature verification fails
+    pub fn process_message(
         &self,
         text: String,
     ) -> std::result::Result<ClientMessage<'static>, IngesterError> {
@@ -164,7 +167,7 @@ mod tests {
         let event_json = format!(r#"["EVENT", {}]"#, event.as_json());
 
         // Process the message
-        let result = ingester.process_message(event_json).await;
+        let result = ingester.process_message(event_json);
         assert!(result.is_ok());
 
         if let Ok(ClientMessage::Event(parsed_event)) = result {
@@ -192,7 +195,7 @@ mod tests {
         let event_json = format!(r#"["EVENT", {json}]"#);
 
         // Process the message
-        let result = ingester.process_message(event_json).await;
+        let result = ingester.process_message(event_json);
         assert!(result.is_err());
 
         if let Err(IngesterError::SignatureVerificationFailed(_)) = result {
@@ -210,7 +213,7 @@ mod tests {
         let req_json = r#"["REQ", "sub1", {"kinds": [1], "limit": 10}]"#;
 
         // Process the message
-        let result = ingester.process_message(req_json.to_string()).await;
+        let result = ingester.process_message(req_json.to_string());
         assert!(result.is_ok());
 
         if let Ok(ClientMessage::Req {
@@ -234,7 +237,7 @@ mod tests {
         let invalid_json = "not valid json";
 
         // Process the message
-        let result = ingester.process_message(invalid_json.to_string()).await;
+        let result = ingester.process_message(invalid_json.to_string());
         assert!(result.is_err());
 
         if let Err(IngesterError::JsonParseError(_)) = result {
@@ -261,7 +264,7 @@ mod tests {
                     .unwrap();
                 let event_json = format!(r#"["EVENT", {}]"#, event.as_json());
 
-                ingester_clone.process_message(event_json).await
+                ingester_clone.process_message(event_json)
             }));
         }
 
@@ -284,7 +287,7 @@ mod tests {
         let event_json = format!(r#"["EVENT", {}]"#, event.as_json());
 
         // Process the message from async context (this tests block_in_place)
-        let result = ingester.process_message(event_json).await;
+        let result = ingester.process_message(event_json);
         assert!(result.is_ok());
 
         if let Ok(ClientMessage::Event(parsed_event)) = result {

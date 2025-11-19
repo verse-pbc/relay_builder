@@ -1,4 +1,4 @@
-//! Strfry-style ActiveMonitors optimization for efficient event distribution
+//! Strfry-style `ActiveMonitors` optimization for efficient event distribution
 //!
 //! This module implements an inverted index system that reduces event distribution
 //! complexity from O(n*m) to O(log k + m) where:
@@ -36,7 +36,7 @@ struct TrackedFilter {
     filter: Filter,
     /// Last event ID seen by this filter (for deduplication)
     last_seen_event_id: RwLock<Option<EventId>>,
-    /// Parent subscription (connection_id, subscription_id)
+    /// Parent subscription (`connection_id`, `subscription_id`)
     parent_subscription: (String, SubscriptionId),
     /// Which field this filter is indexed by (None for match-all filters)
     indexed_field: Option<IndexedField>,
@@ -140,6 +140,7 @@ impl Default for SubscriptionIndex {
 }
 
 impl SubscriptionIndex {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             authors: RwLock::new(BTreeMap::new()),
@@ -356,7 +357,7 @@ impl SubscriptionIndex {
         }
 
         // Check for indexable tags
-        for (tag_name, values) in filter.generic_tags.iter() {
+        for (tag_name, values) in &filter.generic_tags {
             if !values.is_empty() {
                 return Some(IndexedField::Tag(*tag_name));
             }
@@ -414,6 +415,7 @@ impl SubscriptionIndex {
                 }
             }
             Some(IndexedField::Tag(tag_name)) => {
+                #[allow(clippy::similar_names)] // tags_index vs tag_index is clear in context
                 if let Some(values) = filter.filter.generic_tags.get(&tag_name) {
                     let mut tags_index = self.tags.write().await;
                     let tag_index = tags_index.entry(tag_name.as_str().to_string()).or_default();
@@ -583,7 +585,7 @@ impl SubscriptionIndex {
     pub async fn stats(&self) -> IndexStats {
         // Count tracked events (filters that have seen at least one event)
         let mut tracked_events = 0;
-        for entry in self.all_filters.iter() {
+        for entry in &self.all_filters {
             if entry.value().last_seen_event_id.read().await.is_some() {
                 tracked_events += 1;
             }
@@ -595,7 +597,13 @@ impl SubscriptionIndex {
             authors_indexed: self.authors.read().await.len(),
             kinds_indexed: self.kinds.read().await.len(),
             event_ids_indexed: self.event_ids.read().await.len(),
-            tags_indexed: self.tags.read().await.values().map(|m| m.len()).sum(),
+            tags_indexed: self
+                .tags
+                .read()
+                .await
+                .values()
+                .map(std::collections::BTreeMap::len)
+                .sum(),
             tracked_events,
         }
     }

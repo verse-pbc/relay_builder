@@ -19,6 +19,7 @@ pub struct End<T> {
 }
 
 impl<T> End<T> {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             _phantom: PhantomData,
@@ -40,7 +41,7 @@ where
         &self,
         _connection_id: &str,
         _message: &mut Option<ClientMessage<'static>>,
-        _state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        _state: &Arc<tokio::sync::RwLock<NostrConnectionState<T>>>,
         _metadata: &Arc<ConnectionMetadata>,
     ) -> Result<(), anyhow::Error> {
         // End of chain - no more processing
@@ -50,7 +51,7 @@ where
     async fn on_connect_chain(
         &self,
         _connection_id: &str,
-        _state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        _state: &Arc<tokio::sync::RwLock<NostrConnectionState<T>>>,
         _metadata: &Arc<ConnectionMetadata>,
     ) -> Result<(), anyhow::Error> {
         // End of chain - no more processing
@@ -66,7 +67,7 @@ where
         &self,
         _connection_id: &str,
         _message: &mut Option<RelayMessage<'static>>,
-        _state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        _state: &Arc<tokio::sync::RwLock<NostrConnectionState<T>>>,
         _metadata: &Arc<ConnectionMetadata>,
         _from_position: usize,
     ) -> Result<(), anyhow::Error> {
@@ -77,7 +78,7 @@ where
     async fn on_disconnect_chain(
         &self,
         _connection_id: &str,
-        _state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        _state: &Arc<tokio::sync::RwLock<NostrConnectionState<T>>>,
         _metadata: &Arc<ConnectionMetadata>,
     ) -> Result<(), anyhow::Error> {
         // End of chain - no more processing
@@ -92,7 +93,7 @@ where
     // Uses default implementations which are no-ops
 }
 
-/// Blueprint for building connected chains - contains no MessageSender
+/// Blueprint for building connected chains - contains no `MessageSender`
 #[derive(Clone)]
 pub struct ChainBlueprint<M, Next> {
     pub middleware: Arc<M>,
@@ -100,7 +101,7 @@ pub struct ChainBlueprint<M, Next> {
     pub position: usize,
 }
 
-/// Connected chain with MessageSender for each middleware
+/// Connected chain with `MessageSender` for each middleware
 #[derive(Clone)]
 pub struct ConnectedChain<M, Next> {
     pub middleware: Arc<M>,
@@ -118,7 +119,7 @@ pub trait BuildConnected {
     ) -> Self::Output;
 }
 
-/// Implementation for ChainBlueprint to build ConnectedChain
+/// Implementation for `ChainBlueprint` to build `ConnectedChain`
 impl<M, Next> BuildConnected for ChainBlueprint<M, Next>
 where
     Next: BuildConnected,
@@ -173,7 +174,7 @@ where
     }
 }
 
-/// Implementation for IdentityMiddleware - it doesn't need transformation
+/// Implementation for `IdentityMiddleware` - it doesn't need transformation
 impl BuildConnected for crate::util::IdentityMiddleware {
     type Output = crate::util::IdentityMiddleware;
 
@@ -200,7 +201,7 @@ where
     }
 }
 
-/// InboundProcessor implementation for ConnectedChain - uses pre-created MessageSender
+/// `InboundProcessor` implementation for `ConnectedChain` - uses pre-created `MessageSender`
 impl<M, Next, T> InboundProcessor<T> for ConnectedChain<M, Next>
 where
     M: NostrMiddleware<T>,
@@ -211,7 +212,7 @@ where
         &self,
         connection_id: &str,
         message: &mut Option<ClientMessage<'static>>,
-        state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        state: &Arc<tokio::sync::RwLock<NostrConnectionState<T>>>,
         metadata: &Arc<ConnectionMetadata>,
     ) -> Result<(), anyhow::Error> {
         // Use pre-created MessageSender - no allocation!
@@ -231,7 +232,7 @@ where
     async fn on_connect_chain(
         &self,
         connection_id: &str,
-        state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        state: &Arc<tokio::sync::RwLock<NostrConnectionState<T>>>,
         metadata: &Arc<ConnectionMetadata>,
     ) -> Result<(), anyhow::Error> {
         let ctx = ConnectionContext {
@@ -247,7 +248,7 @@ where
     }
 }
 
-/// OutboundProcessor implementation for ConnectedChain
+/// `OutboundProcessor` implementation for `ConnectedChain`
 impl<M, Next, T> OutboundProcessor<T> for ConnectedChain<M, Next>
 where
     M: NostrMiddleware<T>,
@@ -258,7 +259,7 @@ where
         &self,
         connection_id: &str,
         message: &mut Option<RelayMessage<'static>>,
-        state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        state: &Arc<tokio::sync::RwLock<NostrConnectionState<T>>>,
         metadata: &Arc<ConnectionMetadata>,
         from_position: usize,
     ) -> Result<(), anyhow::Error> {
@@ -285,7 +286,7 @@ where
     async fn on_disconnect_chain(
         &self,
         connection_id: &str,
-        state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        state: &Arc<tokio::sync::RwLock<NostrConnectionState<T>>>,
         metadata: &Arc<ConnectionMetadata>,
     ) -> Result<(), anyhow::Error> {
         // Same as Chain
@@ -314,6 +315,7 @@ where
     T: Send + Sync + 'static,
 {
     /// Create a new chain builder
+    #[must_use]
     pub fn new() -> Self {
         Self {
             chain: End::new(),
@@ -332,8 +334,8 @@ where
     }
 }
 
-/// Type alias for the essential middleware chain created by with_essentials()
-/// Note: Event verification is handled by EventIngester, not middleware
+/// Type alias for the essential middleware chain created by `with_essentials()`
+/// Note: Event verification is handled by `EventIngester`, not middleware
 pub type EssentialsChain<T, Current> = ChainBlueprint<
     crate::middlewares::NostrLoggerMiddleware<T>,
     ChainBlueprint<crate::middlewares::ErrorHandlingMiddleware, Current>,
@@ -363,7 +365,7 @@ where
     /// Add essential middleware (error handling, logger)
     ///
     /// This is a convenience method that adds the most commonly needed middleware
-    /// in the proper order. Note: Event verification is handled automatically by EventIngester.
+    /// in the proper order. Note: Event verification is handled automatically by `EventIngester`.
     /// This method is equivalent to:
     /// ```ignore
     /// chain
@@ -382,6 +384,7 @@ where
 }
 
 /// Convenience function to start building a chain
+#[must_use]
 pub fn chain<T>() -> NostrChainBuilder<T, End<T>>
 where
     T: Send + Sync + 'static,

@@ -22,6 +22,7 @@ impl<T> Default for LoggerMiddleware<T> {
 }
 
 impl<T> LoggerMiddleware<T> {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             _phantom: std::marker::PhantomData,
@@ -84,8 +85,10 @@ where
                     filters,
                 }) => {
                     let sub_id_clone = subscription_id.clone();
-                    let filters_json_clone =
-                        filters.iter().map(|f| f.as_json()).collect::<Vec<String>>();
+                    let filters_json_clone = filters
+                        .iter()
+                        .map(nostr_sdk::JsonUtil::as_json)
+                        .collect::<Vec<String>>();
                     debug!("> REQ {}: {:?}", sub_id_clone, filters_json_clone);
                 }
                 Some(ClientMessage::Close(subscription_id)) => {

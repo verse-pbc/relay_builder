@@ -1,6 +1,6 @@
 //! High-performance subscription registry using inverted indexes for efficient event distribution
 //!
-//! This module implements the strfry ActiveMonitors optimization to reduce event distribution
+//! This module implements the strfry `ActiveMonitors` optimization to reduce event distribution
 //! complexity from O(n*m) to O(log k + m) where:
 //! - n = number of connections
 //! - m = average filters per connection
@@ -53,7 +53,7 @@ pub trait EventDistributor: Send + Sync {
 /// Registry for managing all active subscriptions across connections
 #[derive(Clone)]
 pub struct SubscriptionRegistry {
-    /// Map of connection_id to their subscription data
+    /// Map of `connection_id` to their subscription data
     connections: Arc<DashMap<String, Arc<ConnectionSubscriptions>>>,
     /// Subscription indexes per scope for efficient event distribution
     indexes: Arc<DashMap<Scope, Arc<SubscriptionIndex>>>,
@@ -73,7 +73,7 @@ impl std::fmt::Debug for SubscriptionRegistry {
 
 /// Subscription data for a single connection
 pub struct ConnectionSubscriptions {
-    /// Map of subscription_id to filters - RwLock since writes are rare
+    /// Map of `subscription_id` to filters - `RwLock` since writes are rare
     subscriptions: RwLock<HashMap<SubscriptionId, Vec<Filter>>>,
     /// Channel to send events to this connection
     sender: MessageSender,
@@ -123,6 +123,7 @@ impl Drop for ConnectionHandle {
 
 impl SubscriptionRegistry {
     /// Create a new subscription registry
+    #[must_use]
     pub fn new(metrics_handler: Option<Arc<dyn SubscriptionMetricsHandler>>) -> Self {
         Self {
             connections: Arc::new(DashMap::new()),
@@ -132,6 +133,7 @@ impl SubscriptionRegistry {
     }
 
     /// Register a new connection and return a handle for cleanup
+    #[must_use]
     pub fn register_connection(
         self: &Arc<Self>,
         connection_id: String,
@@ -156,6 +158,10 @@ impl SubscriptionRegistry {
     }
 
     /// Add a subscription for a connection
+    ///
+    /// # Errors
+    ///
+    /// Returns error if connection is not found.
     pub async fn add_subscription(
         &self,
         connection_id: &str,
@@ -201,6 +207,10 @@ impl SubscriptionRegistry {
     }
 
     /// Remove a subscription for a connection
+    ///
+    /// # Errors
+    ///
+    /// Returns error if connection is not found.
     pub async fn remove_subscription(
         &self,
         connection_id: &str,
@@ -235,6 +245,7 @@ impl SubscriptionRegistry {
     }
 
     /// Get connection info for REQ processing
+    #[must_use]
     pub fn get_connection_info(
         &self,
         connection_id: &str,
@@ -245,6 +256,7 @@ impl SubscriptionRegistry {
     }
 
     /// Check if a connection exists (mainly for testing)
+    #[must_use]
     pub fn has_connection(&self, connection_id: &str) -> bool {
         self.connections.contains_key(connection_id)
     }
@@ -371,13 +383,12 @@ impl SubscriptionRegistry {
         let mut dead_connections = Vec::new();
 
         // Get the index for this scope
-        let index = match self.indexes.get(scope) {
-            Some(index_entry) => index_entry.value().clone(),
-            None => {
-                // No subscriptions for this scope
-                trace!("No index found for scope {:?}", scope);
-                return;
-            }
+        let index = if let Some(index_entry) = self.indexes.get(scope) {
+            index_entry.value().clone()
+        } else {
+            // No subscriptions for this scope
+            trace!("No index found for scope {:?}", scope);
+            return;
         };
 
         // Get matching subscriptions from scope's index
@@ -391,21 +402,18 @@ impl SubscriptionRegistry {
         );
 
         // Pre-serialize the event once if we have matches
-        let event_json = if !matching_subscriptions.is_empty() {
-            Some(event.as_json())
-        } else {
+        let event_json = if matching_subscriptions.is_empty() {
             None
+        } else {
+            Some(event.as_json())
         };
 
         for (conn_id, sub_id) in matching_subscriptions {
             // Get connection data
-            let conn_data = match self.connections.get(&conn_id) {
-                Some(conn) => conn,
-                None => {
-                    // Connection was removed after index returned it
-                    trace!("Connection {} no longer exists", conn_id);
-                    continue;
-                }
+            let Some(conn_data) = self.connections.get(&conn_id) else {
+                // Connection was removed after index returned it
+                trace!("Connection {} no longer exists", conn_id);
+                continue;
             };
 
             // Double-check scope matches (should always match since we're using per-scope indexes)

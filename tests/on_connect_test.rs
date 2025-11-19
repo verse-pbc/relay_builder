@@ -1,7 +1,6 @@
 //! Test that on_connect is properly propagated through the middleware chain
 
 use nostr_sdk::prelude::*;
-use parking_lot::RwLock;
 use relay_builder::{
     middleware_chain::chain,
     nostr_middleware::{InboundContext, InboundProcessor, NostrMiddleware, OutboundContext},
@@ -11,6 +10,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
+use tokio::sync::RwLock;
 
 /// Test middleware that tracks when on_connect is called
 #[derive(Clone)]
@@ -69,7 +69,7 @@ where
         &self,
         _connection_id: &str,
         _message: &mut Option<ClientMessage<'static>>,
-        _state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        _state: &Arc<tokio::sync::RwLock<NostrConnectionState<T>>>,
         _metadata: &Arc<ConnectionMetadata>,
     ) -> Result<(), anyhow::Error> {
         println!("{}: InboundProcessor::process_inbound called", self.name);
@@ -79,7 +79,7 @@ where
     async fn on_connect_chain(
         &self,
         _connection_id: &str,
-        _state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        _state: &Arc<tokio::sync::RwLock<NostrConnectionState<T>>>,
         _metadata: &Arc<ConnectionMetadata>,
     ) -> Result<(), anyhow::Error> {
         println!("{}: InboundProcessor::on_connect called", self.name);

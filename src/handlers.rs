@@ -98,6 +98,8 @@ pub struct RelayInfo {
 }
 
 /// Generate default HTML page for relay info
+#[must_use]
+#[allow(clippy::too_many_lines)] // HTML template is inherently long
 pub fn default_relay_html(relay_info: &RelayInfo) -> String {
     format!(
         r#"<!DOCTYPE html>
@@ -256,12 +258,14 @@ pub fn default_relay_html(relay_info: &RelayInfo) -> String {
         contact = relay_info.contact,
         software = relay_info.software,
         version = relay_info.version,
-        nips = relay_info
-            .supported_nips
-            .iter()
-            .map(|nip| format!(r#"<span class="nip-badge">NIP-{nip}</span>"#))
-            .collect::<Vec<_>>()
-            .join("")
+        nips = {
+            #[allow(clippy::format_collect)] // HTML badge generation is clearest with format!
+            relay_info
+                .supported_nips
+                .iter()
+                .map(|nip| format!(r#"<span class="nip-badge">NIP-{nip}</span>"#))
+                .collect::<String>()
+        }
     )
 }
 
@@ -288,21 +292,25 @@ where
     }
 
     /// Check if request wants NIP-11 JSON based on Accept header
+    #[must_use]
     pub fn wants_nostr_json(accept_header: &str) -> bool {
         accept_header == "application/nostr+json"
     }
 
     /// Get the relay information
+    #[must_use]
     pub fn relay_info(&self) -> &RelayInfo {
         &self.relay_info
     }
 
     /// Get the cancellation token
+    #[must_use]
     pub fn cancellation_token(&self) -> &CancellationToken {
         &self.cancellation_token
     }
 
     /// Get the current connection count if tracking is enabled
+    #[must_use]
     pub fn connection_count(&self) -> Option<usize> {
         self.connection_counter
             .as_ref()
@@ -310,6 +318,7 @@ where
     }
 
     /// Common WebSocket upgrade handling logic
+    #[allow(clippy::unused_async)]
     async fn handle_websocket_upgrade(
         &self,
         _ws: WebSocketUpgrade,
@@ -331,10 +340,10 @@ where
         });
 
         let display_info = if let Some(sub) = &subdomain {
-            if !sub.is_empty() {
-                format!(" @{sub}")
-            } else {
+            if sub.is_empty() {
                 String::new()
+            } else {
+                format!(" @{sub}")
             }
         } else {
             String::new()

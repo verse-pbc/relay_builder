@@ -2,7 +2,7 @@
 //!
 //! This module provides a middleware system specifically designed for Nostr relays,
 //! using concrete types to avoid generic complexity while maintaining compile-time performance.
-//! It follows the patterns from websocket_builder's API guide with index-based routing.
+//! It follows the patterns from `websocket_builder`'s API guide with index-based routing.
 
 use crate::state::{ConnectionMetadata, NostrConnectionState};
 use flume::Sender;
@@ -17,6 +17,7 @@ pub struct MessageSender {
 }
 
 impl MessageSender {
+    #[must_use]
     pub fn new(
         sender: Sender<(RelayMessage<'static>, usize, Option<String>)>,
         position: usize,
@@ -25,6 +26,9 @@ impl MessageSender {
     }
 
     /// Send a message that goes through this middleware's outbound processing
+    ///
+    /// # Errors
+    /// Returns an error if the channel is full or disconnected
     pub fn send(&self, message: RelayMessage<'static>) -> Result<(), anyhow::Error> {
         // Tag message with our position so outbound processing knows where it came from
         self.sender
@@ -43,6 +47,9 @@ impl MessageSender {
 
     /// Send a message bypassing this middleware's outbound processing
     /// Useful when you've already processed the message (e.g., filtered it)
+    ///
+    /// # Errors
+    /// Returns an error if the channel is full or disconnected
     pub fn send_bypass(&self, message: RelayMessage<'static>) -> Result<(), anyhow::Error> {
         // Use position-1 to skip our own outbound processing
         let bypass_position = if self.position > 0 {
@@ -64,8 +71,11 @@ impl MessageSender {
             })
     }
 
-    /// Send a message with pre-serialized JSON for RelayMessage::Event
+    /// Send a message with pre-serialized JSON for `RelayMessage::Event`
     /// This avoids re-serialization when distributing events to multiple connections
+    ///
+    /// # Errors
+    /// Returns an error if the channel is full or disconnected
     pub fn send_with_json(
         &self,
         message: RelayMessage<'static>,
@@ -88,11 +98,13 @@ impl MessageSender {
     }
 
     /// Get the raw sender (for advanced use cases)
+    #[must_use]
     pub fn raw_sender(&self) -> &Sender<(RelayMessage<'static>, usize, Option<String>)> {
         &self.sender
     }
 
     /// Get this middleware's position
+    #[must_use]
     pub fn position(&self) -> usize {
         self.position
     }
@@ -105,7 +117,7 @@ pub struct InboundContext<'a, T, Next> {
     /// The incoming message (mutable reference for consumption)
     pub message: &'a mut Option<ClientMessage<'static>>,
     /// Connection state (mutable fields)
-    pub state: &'a Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+    pub state: &'a Arc<tokio::sync::RwLock<NostrConnectionState<T>>>,
     /// Connection metadata (immutable fields)
     pub metadata: &'a Arc<ConnectionMetadata>,
     /// Message sender for sending responses with index tracking
@@ -114,11 +126,15 @@ pub struct InboundContext<'a, T, Next> {
     pub(crate) next: &'a Next,
 }
 
-impl<'a, T, Next> InboundContext<'a, T, Next>
+impl<T, Next> InboundContext<'_, T, Next>
 where
     Next: InboundProcessor<T>,
 {
     /// Continue to the next middleware in the chain
+    ///
+    /// # Errors
+    ///
+    /// Returns error if next middleware in chain fails.
     pub async fn next(self) -> Result<(), anyhow::Error> {
         self.next
             .process_inbound_chain(self.connection_id, self.message, self.state, self.metadata)
@@ -127,18 +143,30 @@ where
 }
 
 // Helper methods for all InboundContext variants
-impl<'a, T, Next> InboundContext<'a, T, Next> {
+impl<T, Next> InboundContext<'_, T, Next> {
     /// Send a message to the client
+    ///
+    /// # Errors
+    ///
+    /// Returns error if message sending fails.
     pub fn send_message(&self, msg: RelayMessage<'static>) -> Result<(), anyhow::Error> {
         self.sender.send(msg)
     }
 
     /// Send a notice to the client
+    ///
+    /// # Errors
+    ///
+    /// Returns error if message sending fails.
     pub fn send_notice(&self, message: String) -> Result<(), anyhow::Error> {
         self.send_message(RelayMessage::notice(message))
     }
 
     /// Send an OK response
+    ///
+    /// # Errors
+    ///
+    /// Returns error if message sending fails.
     pub fn send_ok(
         &self,
         event_id: EventId,
@@ -156,7 +184,7 @@ pub struct OutboundContext<'a, T> {
     /// The outgoing message (mutable reference for modification)
     pub message: &'a mut Option<RelayMessage<'static>>,
     /// Connection state (mutable fields)
-    pub state: &'a Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+    pub state: &'a Arc<tokio::sync::RwLock<NostrConnectionState<T>>>,
     /// Connection metadata (immutable fields)
     pub metadata: &'a Arc<ConnectionMetadata>,
     /// Message sender with position tracking
@@ -172,7 +200,7 @@ where
     /// Connection ID (remote address)
     pub connection_id: &'a str,
     /// Connection state (mutable fields)
-    pub state: &'a Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+    pub state: &'a Arc<tokio::sync::RwLock<NostrConnectionState<T>>>,
     /// Connection metadata (immutable fields)
     pub metadata: &'a Arc<ConnectionMetadata>,
 }
@@ -186,7 +214,7 @@ where
     /// Connection ID (remote address)
     pub connection_id: &'a str,
     /// Connection state (mutable fields)
-    pub state: &'a Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+    pub state: &'a Arc<tokio::sync::RwLock<NostrConnectionState<T>>>,
     /// Connection metadata (immutable fields)
     pub metadata: &'a Arc<ConnectionMetadata>,
     /// Message sender for sending responses with index tracking
@@ -194,21 +222,33 @@ where
 }
 
 // Helper methods for all ConnectionContext variants
-impl<'a, T> ConnectionContext<'a, T>
+impl<T> ConnectionContext<'_, T>
 where
     T: Clone,
 {
     /// Send a message to the client
+    ///
+    /// # Errors
+    ///
+    /// Returns error if message sending fails.
     pub fn send_message(&self, msg: RelayMessage<'static>) -> Result<(), anyhow::Error> {
         self.sender.send(msg)
     }
 
     /// Send a notice to the client
+    ///
+    /// # Errors
+    ///
+    /// Returns error if message sending fails.
     pub fn send_notice(&self, message: String) -> Result<(), anyhow::Error> {
         self.send_message(RelayMessage::notice(message))
     }
 
     /// Send an OK response
+    ///
+    /// # Errors
+    ///
+    /// Returns error if message sending fails.
     pub fn send_ok(
         &self,
         event_id: EventId,
@@ -225,14 +265,14 @@ pub trait InboundProcessor<T>: Send + Sync {
         &self,
         connection_id: &str,
         message: &mut Option<ClientMessage<'static>>,
-        state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        state: &Arc<tokio::sync::RwLock<NostrConnectionState<T>>>,
         metadata: &Arc<ConnectionMetadata>,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send;
 
     fn on_connect_chain(
         &self,
         connection_id: &str,
-        state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        state: &Arc<tokio::sync::RwLock<NostrConnectionState<T>>>,
         metadata: &Arc<ConnectionMetadata>,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send;
 }
@@ -243,7 +283,7 @@ pub trait OutboundProcessor<T>: Send + Sync {
         &self,
         connection_id: &str,
         message: &mut Option<RelayMessage<'static>>,
-        state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        state: &Arc<tokio::sync::RwLock<NostrConnectionState<T>>>,
         metadata: &Arc<ConnectionMetadata>,
         from_position: usize,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send;
@@ -251,7 +291,7 @@ pub trait OutboundProcessor<T>: Send + Sync {
     fn on_disconnect_chain(
         &self,
         connection_id: &str,
-        state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        state: &Arc<tokio::sync::RwLock<NostrConnectionState<T>>>,
         metadata: &Arc<ConnectionMetadata>,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send;
 }

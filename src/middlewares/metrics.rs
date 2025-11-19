@@ -60,6 +60,7 @@ impl<T> Default for MetricsMiddleware<T> {
 
 impl<T> MetricsMiddleware<T> {
     /// Create a new metrics middleware without a handler (no-op)
+    #[must_use]
     pub fn new() -> Self {
         Self {
             handler: None,
@@ -69,6 +70,7 @@ impl<T> MetricsMiddleware<T> {
     }
 
     /// Create a new metrics middleware with a handler
+    #[must_use]
     pub fn with_handler(handler: Box<dyn MetricsHandler>) -> Self {
         Self {
             handler: Some(Arc::from(handler)),
@@ -147,7 +149,8 @@ where
                     let mut timing_map = self.event_timing.lock().unwrap();
                     if let Some(timing_state) = timing_map.remove(event_id) {
                         let latency_ms = timing_state.start_time.elapsed().as_secs_f64() * 1000.0;
-                        handler.record_event_latency(timing_state.event_kind as u32, latency_ms);
+                        handler
+                            .record_event_latency(u32::from(timing_state.event_kind), latency_ms);
                     }
                 }
             }

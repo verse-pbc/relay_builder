@@ -28,26 +28,29 @@ pub enum ScopeConfig {
 
 impl ScopeConfig {
     /// Create a subdomain-based scope configuration
+    #[must_use]
     pub fn subdomain(base_domain_parts: usize) -> Self {
         Self::Subdomain { base_domain_parts }
     }
 
     /// Create a fixed scope configuration
+    #[must_use]
     pub fn fixed(scope: Scope) -> Self {
         Self::Fixed { scope }
     }
 
     /// Resolve a scope from a host string
+    #[must_use]
     pub fn resolve_scope(&self, host: Option<&str>) -> Scope {
         match self {
             Self::Disabled => Scope::Default,
             Self::Subdomain { base_domain_parts } => host
                 .and_then(|h| crate::subdomain::extract_subdomain(h, *base_domain_parts))
                 .and_then(|s| {
-                    if !s.is_empty() {
-                        Scope::named(&s).ok()
-                    } else {
+                    if s.is_empty() {
                         None
+                    } else {
+                        Scope::named(&s).ok()
                     }
                 })
                 .unwrap_or(Scope::Default),
@@ -147,6 +150,10 @@ impl RelayConfig {
     }
 
     /// Create database instance from configuration with provided keys
+    ///
+    /// # Errors
+    ///
+    /// Returns error if database configuration is missing or creation fails.
     pub fn create_database(
         &self,
         keys: Arc<Keys>,
@@ -156,7 +163,11 @@ impl RelayConfig {
         Ok((database, crypto_helper))
     }
 
-    /// Create database instance from configuration with optional TaskTracker
+    /// Create database instance from configuration with optional `TaskTracker`
+    ///
+    /// # Errors
+    ///
+    /// Returns error if database configuration is missing or creation fails.
     pub fn create_database_with_tracker(
         &self,
         task_tracker: Option<tokio_util::task::TaskTracker>,
@@ -178,7 +189,11 @@ impl RelayConfig {
         }
     }
 
-    /// Create database instance from a database config with optional TaskTracker
+    /// Create database instance from a database config with optional `TaskTracker`
+    ///
+    /// # Errors
+    ///
+    /// Returns error if database initialization or CPU affinity setup fails.
     pub fn create_database_from_config(
         database_config: DatabaseConfig,
         _websocket_config: &WebSocketConfig,
@@ -210,23 +225,26 @@ impl RelayConfig {
     }
 
     /// Set the scope configuration
+    #[must_use = "builder pattern methods are meant to be chained"]
     pub fn with_scope_config(mut self, scope_config: ScopeConfig) -> Self {
         self.scope_config = scope_config;
         self
     }
 
     /// Enable subdomain-based scopes
+    #[must_use = "builder pattern methods are meant to be chained"]
     pub fn with_subdomains(mut self, base_domain_parts: usize) -> Self {
         self.scope_config = ScopeConfig::subdomain(base_domain_parts);
         self
     }
 
     /// Enable subdomain-based scopes, automatically determining base domain parts from URL
+    #[must_use = "builder pattern methods are meant to be chained"]
     pub fn with_subdomains_from_url(mut self, relay_url: &str) -> Self {
         // Extract host from URL
         let host = url::Url::parse(relay_url)
             .ok()
-            .and_then(|u| u.host_str().map(|s| s.to_string()))
+            .and_then(|u| u.host_str().map(std::string::ToString::to_string))
             .unwrap_or_default();
 
         // Count the number of parts in the base domain
@@ -249,48 +267,56 @@ impl RelayConfig {
     // }
 
     /// Configure WebSocket server settings
+    #[must_use = "builder pattern methods are meant to be chained"]
     pub fn with_websocket_config(mut self, config: WebSocketConfig) -> Self {
         self.websocket_config = config;
         self
     }
 
     /// Set the maximum number of concurrent connections
+    #[must_use = "builder pattern methods are meant to be chained"]
     pub fn with_max_connections(mut self, max: usize) -> Self {
         self.websocket_config.max_connections = Some(max);
         self
     }
 
     /// Set the maximum connection duration in seconds
+    #[must_use = "builder pattern methods are meant to be chained"]
     pub fn with_max_connection_duration(mut self, seconds: u64) -> Self {
         self.websocket_config.max_connection_duration = Some(seconds);
         self
     }
 
     /// Set the idle timeout in seconds
+    #[must_use = "builder pattern methods are meant to be chained"]
     pub fn with_idle_timeout(mut self, seconds: u64) -> Self {
         self.websocket_config.idle_timeout = Some(seconds);
         self
     }
 
     /// Set the CPU affinity for the database ingester thread
+    #[must_use = "builder pattern methods are meant to be chained"]
     pub fn with_ingester_cpu_affinity(mut self, cpu: usize) -> Self {
         self.ingester_cpu_affinity = Some(cpu);
         self
     }
 
     /// Set the maximum number of active subscriptions per connection
+    #[must_use = "builder pattern methods are meant to be chained"]
     pub fn with_max_subscriptions(mut self, max_subscriptions: usize) -> Self {
         self.max_subscriptions = max_subscriptions;
         self
     }
 
     /// Set the maximum limit value allowed in subscription filters
+    #[must_use = "builder pattern methods are meant to be chained"]
     pub fn with_max_limit(mut self, max_limit: usize) -> Self {
         self.max_limit = max_limit;
         self
     }
 
-    /// Set max_subscriptions and max_limit
+    /// Set `max_subscriptions` and `max_limit`
+    #[must_use = "builder pattern methods are meant to be chained"]
     pub fn with_subscription_limits(mut self, max_subscriptions: usize, max_limit: usize) -> Self {
         self.max_subscriptions = max_subscriptions;
         self.max_limit = max_limit;
@@ -298,19 +324,21 @@ impl RelayConfig {
     }
 
     /// Set the maximum number of LMDB readers
+    #[must_use = "builder pattern methods are meant to be chained"]
     pub fn with_max_readers(mut self, max_readers: u32) -> Self {
         self.max_readers = Some(max_readers);
         self
     }
 
     /// Enable diagnostic logging (health checks every 30 minutes)
+    #[must_use = "builder pattern methods are meant to be chained"]
     pub fn with_diagnostics(mut self) -> Self {
         self.enable_diagnostics = true;
         self
     }
 
     /// Calculate the WebSocket channel size based on configuration
-    /// This is used for per-connection MessageSender channels
+    /// This is used for per-connection `MessageSender` channels
     pub fn calculate_channel_size(&self) -> usize {
         // We need to handle the worst case: a single subscription requesting max_limit events
         // Plus overhead for control messages (EOSE, notices, etc.)

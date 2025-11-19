@@ -30,7 +30,7 @@ fn bench_event_ingestion(c: &mut Criterion) {
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 rt.block_on(async {
                     for event_str in &events {
-                        let result = ingester.process_message(event_str.clone()).await;
+                        let result = ingester.process_message(event_str.clone());
                         let _ = black_box(result);
                     }
                 });
@@ -80,7 +80,7 @@ fn bench_parallel_ingestion(c: &mut Criterion) {
 
                         let handle = tokio::spawn(async move {
                             for event_str in events {
-                                let result = ingester_clone.process_message(event_str).await;
+                                let result = ingester_clone.process_message(event_str);
                                 let _ = black_box(result);
                             }
                         });

@@ -101,37 +101,34 @@ pub async fn handle_socket<H: WebSocketHandler>(
 
         // Wait for next message with timeout if configured
         let msg = if let Some(timeout_duration) = next_timeout {
-            match timeout(timeout_duration, ws_stream.next()).await {
-                Ok(msg) => msg,
-                Err(_) => {
-                    // Timeout occurred
-                    match timeout_reason {
-                        Some("idle") => {
-                            debug!("Connection idle timeout");
-                            handler
-                                .on_disconnect(DisconnectReason::Timeout(
-                                    "Idle timeout".to_string(),
-                                ))
-                                .await;
-                        }
-                        Some("max_duration") => {
-                            debug!("Connection max duration timeout");
-                            handler
-                                .on_disconnect(DisconnectReason::Timeout(
-                                    "Maximum connection duration exceeded".to_string(),
-                                ))
-                                .await;
-                        }
-                        _ => {
-                            handler
-                                .on_disconnect(DisconnectReason::Timeout(
-                                    "Connection timeout".to_string(),
-                                ))
-                                .await;
-                        }
+            if let Ok(msg) = timeout(timeout_duration, ws_stream.next()).await {
+                msg
+            } else {
+                // Timeout occurred
+                match timeout_reason {
+                    Some("idle") => {
+                        debug!("Connection idle timeout");
+                        handler
+                            .on_disconnect(DisconnectReason::Timeout("Idle timeout".to_string()))
+                            .await;
                     }
-                    break;
+                    Some("max_duration") => {
+                        debug!("Connection max duration timeout");
+                        handler
+                            .on_disconnect(DisconnectReason::Timeout(
+                                "Maximum connection duration exceeded".to_string(),
+                            ))
+                            .await;
+                    }
+                    _ => {
+                        handler
+                            .on_disconnect(DisconnectReason::Timeout(
+                                "Connection timeout".to_string(),
+                            ))
+                            .await;
+                    }
                 }
+                break;
             }
         } else {
             ws_stream.next().await

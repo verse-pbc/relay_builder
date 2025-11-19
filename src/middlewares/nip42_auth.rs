@@ -37,6 +37,7 @@ pub struct Nip42Middleware<T = ()> {
 }
 
 impl<T> Nip42Middleware<T> {
+    #[must_use]
     pub fn new(config: AuthConfig) -> Self {
         Self {
             config,
@@ -45,6 +46,7 @@ impl<T> Nip42Middleware<T> {
     }
 
     /// Create middleware with just relay URL, using defaults for other settings
+    #[must_use]
     pub fn with_url(relay_url: String) -> Self {
         Self::new(AuthConfig {
             relay_url,
@@ -55,7 +57,7 @@ impl<T> Nip42Middleware<T> {
     // Extract the host from a URL
     fn extract_host_from_url(&self, url_str: &str) -> Option<String> {
         match url::Url::parse(url_str) {
-            Ok(url) => url.host_str().map(|s| s.to_string()),
+            Ok(url) => url.host_str().map(std::string::ToString::to_string),
             Err(_) => None,
         }
     }
@@ -78,20 +80,14 @@ impl<T> Nip42Middleware<T> {
         }
 
         // Extract hosts from URLs
-        let client_host = match self.extract_host_from_url(client_relay_url) {
-            Some(host) => host,
-            None => {
-                debug!(target: "auth", "Failed to extract host from client URL: {}", client_relay_url);
-                return false;
-            }
+        let Some(client_host) = self.extract_host_from_url(client_relay_url) else {
+            debug!(target: "auth", "Failed to extract host from client URL: {}", client_relay_url);
+            return false;
         };
 
-        let relay_host = match self.extract_host_from_url(&self.config.relay_url) {
-            Some(host) => host,
-            None => {
-                debug!(target: "auth", "Failed to extract host from relay URL: {}", self.config.relay_url);
-                return false;
-            }
+        let Some(relay_host) = self.extract_host_from_url(&self.config.relay_url) else {
+            debug!(target: "auth", "Failed to extract host from relay URL: {}", self.config.relay_url);
+            return false;
         };
 
         debug!(target: "auth", "Extracted hosts - client: {}, relay: {}", client_host, relay_host);
@@ -166,7 +162,7 @@ where
                 ctx.connection_id
             );
             let challenge_event = {
-                let mut state_write = ctx.state.write();
+                let mut state_write = ctx.state.write().await;
                 state_write.get_challenge_event()
             };
             debug!(
@@ -181,6 +177,7 @@ where
             Ok(())
         }
     }
+    #[allow(clippy::too_many_lines)] // NIP-42 auth logic is complex
     fn process_inbound<Next>(
         &self,
         ctx: InboundContext<'_, T, Next>,
@@ -203,8 +200,8 @@ where
                     );
 
                     let expected_challenge = {
-                        let state_guard = ctx.state.read();
-                        state_guard.challenge.as_ref().cloned()
+                        let state_guard = ctx.state.read().await;
+                        state_guard.challenge.clone()
                     };
                     let connection_subdomain = Arc::clone(&ctx.metadata.subdomain);
 
@@ -261,37 +258,34 @@ where
                             }
                         });
 
-                    match found_challenge_in_tag {
-                        Some(tag_challenge_str) => {
-                            if tag_challenge_str != expected_challenge {
-                                let conn_id_err = ctx.connection_id;
-                                error!(
-                                    target: "auth",
-                                    "[{}] Challenge mismatch for AUTH. Expected '{}', got '{}'. Event ID: {}.",
-                                    conn_id_err, expected_challenge, tag_challenge_str, auth_event_id
-                                );
-                                ctx.sender.send(RelayMessage::ok(
-                                    auth_event_id,
-                                    false,
-                                    "auth-required: challenge mismatch",
-                                ))?;
-                                return Err(Error::auth_required("Challenge mismatch").into());
-                            }
-                        }
-                        None => {
+                    if let Some(tag_challenge_str) = found_challenge_in_tag {
+                        if tag_challenge_str != expected_challenge {
                             let conn_id_err = ctx.connection_id;
                             error!(
                                 target: "auth",
-                                "[{}] No challenge tag found in AUTH message. Event ID: {}.",
-                                conn_id_err, auth_event_id
+                                "[{}] Challenge mismatch for AUTH. Expected '{}', got '{}'. Event ID: {}.",
+                                conn_id_err, expected_challenge, tag_challenge_str, auth_event_id
                             );
                             ctx.sender.send(RelayMessage::ok(
                                 auth_event_id,
                                 false,
-                                "auth-required: missing challenge tag",
+                                "auth-required: challenge mismatch",
                             ))?;
-                            return Err(Error::auth_required("No challenge tag found").into());
+                            return Err(Error::auth_required("Challenge mismatch").into());
                         }
+                    } else {
+                        let conn_id_err = ctx.connection_id;
+                        error!(
+                            target: "auth",
+                            "[{}] No challenge tag found in AUTH message. Event ID: {}.",
+                            conn_id_err, auth_event_id
+                        );
+                        ctx.sender.send(RelayMessage::ok(
+                            auth_event_id,
+                            false,
+                            "auth-required: missing challenge tag",
+                        ))?;
+                        return Err(Error::auth_required("No challenge tag found").into());
                     }
 
                     let found_relay_in_tag: Option<RelayUrl> =
@@ -302,48 +296,45 @@ where
                             }
                         });
 
-                    match found_relay_in_tag {
-                        Some(tag_relay_url) => {
-                            let client_relay_url = tag_relay_url.as_str_without_trailing_slash();
+                    if let Some(tag_relay_url) = found_relay_in_tag {
+                        let client_relay_url = tag_relay_url.as_str_without_trailing_slash();
 
-                            // Validate the relay URL against the current connection
-                            if !self.validate_relay_url(client_relay_url, &connection_subdomain) {
-                                let conn_id_err = ctx.connection_id;
-                                let subdomain_msg = match &*connection_subdomain {
-                                    Scope::Named { name, .. } => {
-                                        format!(" with subdomain '{name}'")
-                                    }
-                                    Scope::Default => String::new(),
-                                };
-
-                                error!(
-                                    target: "auth",
-                                    "[{}] Relay URL mismatch for AUTH. Expected domain matching '{}'{}. Got '{}'. Event ID: {}.",
-                                    conn_id_err, self.config.relay_url, subdomain_msg, client_relay_url, auth_event_id
-                                );
-
-                                ctx.sender.send(RelayMessage::ok(
-                                    auth_event_id,
-                                    false,
-                                    "auth-required: relay mismatch",
-                                ))?;
-                                return Err(Error::auth_required("Relay mismatch").into());
-                            }
-                        }
-                        None => {
+                        // Validate the relay URL against the current connection
+                        if !self.validate_relay_url(client_relay_url, &connection_subdomain) {
                             let conn_id_err = ctx.connection_id;
+                            let subdomain_msg = match &*connection_subdomain {
+                                Scope::Named { name, .. } => {
+                                    format!(" with subdomain '{name}'")
+                                }
+                                Scope::Default => String::new(),
+                            };
+
                             error!(
                                 target: "auth",
-                                "[{}] No relay tag found in AUTH message. Event ID: {}.",
-                                conn_id_err, auth_event_id
+                                "[{}] Relay URL mismatch for AUTH. Expected domain matching '{}'{}. Got '{}'. Event ID: {}.",
+                                conn_id_err, self.config.relay_url, subdomain_msg, client_relay_url, auth_event_id
                             );
+
                             ctx.sender.send(RelayMessage::ok(
                                 auth_event_id,
                                 false,
-                                "auth-required: missing relay tag",
+                                "auth-required: relay mismatch",
                             ))?;
-                            return Err(Error::auth_required("No relay tag found").into());
+                            return Err(Error::auth_required("Relay mismatch").into());
                         }
+                    } else {
+                        let conn_id_err = ctx.connection_id;
+                        error!(
+                            target: "auth",
+                            "[{}] No relay tag found in AUTH message. Event ID: {}.",
+                            conn_id_err, auth_event_id
+                        );
+                        ctx.sender.send(RelayMessage::ok(
+                            auth_event_id,
+                            false,
+                            "auth-required: missing relay tag",
+                        ))?;
+                        return Err(Error::auth_required("No relay tag found").into());
                     }
 
                     let now = SystemTime::now()
@@ -367,7 +358,7 @@ where
 
                     // Authentication successful
                     {
-                        let mut state_write = ctx.state.write();
+                        let mut state_write = ctx.state.write().await;
                         state_write.set_authenticated(auth_event_pubkey, ctx.metadata);
                     }
                     debug!(
@@ -469,7 +460,10 @@ mod tests {
                 .await
                 .is_ok()
         );
-        assert_eq!(test_ctx.state.read().authed_pubkey, Some(keys.public_key()));
+        assert_eq!(
+            test_ctx.state.read().await.authed_pubkey,
+            Some(keys.public_key())
+        );
     }
 
     #[tokio::test]
@@ -499,7 +493,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert_eq!(test_ctx.state.read().authed_pubkey, None);
+        assert_eq!(test_ctx.state.read().await.authed_pubkey, None);
     }
 
     #[tokio::test]
@@ -534,7 +528,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert_eq!(test_ctx.state.read().authed_pubkey, None);
+        assert_eq!(test_ctx.state.read().await.authed_pubkey, None);
     }
 
     #[tokio::test]
@@ -567,7 +561,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert_eq!(test_ctx.state.read().authed_pubkey, None);
+        assert_eq!(test_ctx.state.read().await.authed_pubkey, None);
     }
 
     #[tokio::test]
@@ -601,7 +595,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert_eq!(test_ctx.state.read().authed_pubkey, None);
+        assert_eq!(test_ctx.state.read().await.authed_pubkey, None);
     }
 
     #[tokio::test]
@@ -641,7 +635,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert_eq!(test_ctx.state.read().authed_pubkey, None);
+        assert_eq!(test_ctx.state.read().await.authed_pubkey, None);
     }
 
     // TODO: Re-implement this test once on_connect functionality is moved to a proper location
@@ -663,7 +657,7 @@ mod tests {
 
     //     let ctx = test_ctx.as_context();
     //     assert!(middleware.on_connect(ctx).await.is_ok());
-    //     assert!(test_ctx.state.read().challenge.is_some());
+    //     assert!(test_ctx.state.read().await.challenge.is_some());
     // }
 
     #[tokio::test]
@@ -717,7 +711,10 @@ mod tests {
         }
 
         assert!(result.is_ok());
-        assert_eq!(test_ctx.state.read().authed_pubkey, Some(keys.public_key()));
+        assert_eq!(
+            test_ctx.state.read().await.authed_pubkey,
+            Some(keys.public_key())
+        );
     }
 
     #[tokio::test]
@@ -754,7 +751,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert_eq!(test_ctx.state.read().authed_pubkey, None);
+        assert_eq!(test_ctx.state.read().await.authed_pubkey, None);
     }
 
     #[tokio::test]
@@ -791,6 +788,6 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert_eq!(test_ctx.state.read().authed_pubkey, None);
+        assert_eq!(test_ctx.state.read().await.authed_pubkey, None);
     }
 }

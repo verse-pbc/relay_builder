@@ -20,6 +20,7 @@ pub struct RateLimitMiddleware<T = ()> {
 
 impl<T> RateLimitMiddleware<T> {
     /// Create a new rate limiter with per-connection limits
+    #[must_use]
     pub fn new(per_connection_quota: Quota) -> Self {
         Self {
             per_connection_limiter: Arc::new(RateLimiter::keyed(per_connection_quota)),
@@ -29,6 +30,7 @@ impl<T> RateLimitMiddleware<T> {
     }
 
     /// Create a new rate limiter with both per-connection and global limits
+    #[must_use]
     pub fn with_global_limit(per_connection_quota: Quota, global_quota: Quota) -> Self {
         Self {
             per_connection_limiter: Arc::new(RateLimiter::keyed(per_connection_quota)),

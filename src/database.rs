@@ -7,7 +7,7 @@ use nostr_sdk::prelude::*;
 use std::sync::Arc;
 use tracing::{debug, error, info};
 
-/// A Nostr relay database that wraps NostrLMDB with async operations
+/// A Nostr relay database that wraps `NostrLMDB` with async operations
 #[derive(Debug, Clone)]
 pub struct RelayDatabase {
     lmdb: Arc<NostrLMDB>,
@@ -18,15 +18,23 @@ impl RelayDatabase {
     ///
     /// # Arguments
     /// * `db_path_param` - Path where the database should be stored
+    ///
+    /// # Errors
+    ///
+    /// Returns error if database initialization fails.
     pub fn new(db_path_param: impl AsRef<std::path::Path>) -> Result<Self, Error> {
         Self::with_config(db_path_param, None, None)
     }
 
-    /// Create a new relay database with specified max_readers
+    /// Create a new relay database with specified `max_readers`
     ///
     /// # Arguments
     /// * `db_path_param` - Path where the database should be stored
     /// * `max_readers` - Maximum number of LMDB readers (None uses default of 126)
+    ///
+    /// # Errors
+    ///
+    /// Returns error if database initialization fails.
     pub fn with_max_readers(
         db_path_param: impl AsRef<std::path::Path>,
         max_readers: Option<u32>,
@@ -40,6 +48,10 @@ impl RelayDatabase {
     /// * `db_path_param` - Path where the database should be stored
     /// * `max_readers` - Maximum number of LMDB readers (None uses default of 126)
     /// * `ingester_thread_config` - Optional configuration to run on the ingester thread (e.g., CPU pinning)
+    ///
+    /// # Errors
+    ///
+    /// Returns error if directory creation or database initialization fails.
     pub fn with_config(
         db_path_param: impl AsRef<std::path::Path>,
         max_readers: Option<u32>,
@@ -52,7 +64,8 @@ impl RelayDatabase {
             if !parent.exists() {
                 std::fs::create_dir_all(parent).map_err(|e| {
                     Error::database(format!(
-                        "Failed to create database directory parent '{parent:?}': {e}"
+                        "Failed to create database directory parent '{}': {e}",
+                        parent.display()
                     ))
                 })?;
             }
@@ -60,7 +73,8 @@ impl RelayDatabase {
         if !db_path.exists() {
             std::fs::create_dir_all(&db_path).map_err(|e| {
                 Error::database(format!(
-                    "Failed to create database directory '{db_path:?}': {e}"
+                    "Failed to create database directory '{}': {e}",
+                    db_path.display()
                 ))
             })?;
         }
@@ -80,7 +94,8 @@ impl RelayDatabase {
 
         let lmdb_instance = builder.build().map_err(|e| {
             Error::database(format!(
-                "Failed to open NostrLMDB at path '{db_path:?}': {e}"
+                "Failed to open NostrLMDB at path '{}': {e}",
+                db_path.display()
             ))
         })?;
         let lmdb = Arc::new(lmdb_instance);
@@ -89,6 +104,10 @@ impl RelayDatabase {
     }
 
     /// Save an event directly (borrows the event)
+    ///
+    /// # Errors
+    ///
+    /// Returns error if database scope access or save operation fails.
     pub async fn save_event(&self, event: &Event, scope: &Scope) -> Result<()> {
         debug!(
             "Saving event {} to scope: {:?} (scope_name: {:?})",
@@ -118,6 +137,10 @@ impl RelayDatabase {
     }
 
     /// Save an event directly (takes ownership to avoid cloning)
+    ///
+    /// # Errors
+    ///
+    /// Returns error if database scope access or save operation fails.
     pub async fn save_event_owned(&self, event: Event, scope: &Scope) -> Result<()> {
         debug!(
             "Saving event {} to scope: {:?} (scope_name: {:?})",
@@ -142,6 +165,10 @@ impl RelayDatabase {
     }
 
     /// Delete events matching a filter
+    ///
+    /// # Errors
+    ///
+    /// Returns error if database scope access or delete operation fails.
     pub async fn delete(&self, filter: Filter, scope: &Scope) -> Result<()> {
         let lmdb = Arc::clone(&self.lmdb);
         let scoped_view = lmdb.scoped(scope).map_err(|e| {
@@ -159,6 +186,10 @@ impl RelayDatabase {
     }
 
     /// Query events from the database
+    ///
+    /// # Errors
+    ///
+    /// Returns error if database scope access or query operation fails.
     pub async fn query(&self, filters: Vec<Filter>, scope: &Scope) -> Result<Events, Error> {
         let lmdb = Arc::clone(&self.lmdb);
         let scoped_view = lmdb.scoped(scope).map_err(|e| {
@@ -209,6 +240,10 @@ impl RelayDatabase {
     }
 
     /// Get count of events matching filters
+    ///
+    /// # Errors
+    ///
+    /// Returns error if database scope access or count operation fails.
     pub async fn count(&self, filters: Vec<Filter>, scope: &Scope) -> Result<usize, Error> {
         let lmdb = Arc::clone(&self.lmdb);
         let scoped_view = lmdb.scoped(scope).map_err(|e| {
@@ -247,7 +282,11 @@ impl RelayDatabase {
         Ok(total_count)
     }
 
-    /// Get negentropy items (EventId, Timestamp) for efficient set reconciliation
+    /// Get negentropy items (`EventId`, Timestamp) for efficient set reconciliation
+    ///
+    /// # Errors
+    ///
+    /// Returns error if database scope access or negentropy retrieval fails.
     pub async fn negentropy_items(
         &self,
         filter: Filter,
@@ -288,6 +327,10 @@ impl RelayDatabase {
     }
 
     /// List all scopes available in the database
+    ///
+    /// # Errors
+    ///
+    /// Returns error if scope listing operation fails.
     pub async fn list_scopes(&self) -> Result<Vec<Scope>, Error> {
         let env = Arc::clone(&self.lmdb);
 

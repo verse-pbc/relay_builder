@@ -14,7 +14,7 @@ use std::sync::Arc;
 /// Minimal context for event visibility checks
 ///
 /// Contains only the essential data needed for most visibility decisions.
-/// Now uses owned data for lock-free access via ArcSwap.
+/// Now uses owned data for lock-free access via `ArcSwap`.
 #[derive(Debug, Clone)]
 pub struct EventContext {
     /// Authenticated public key of the connection (if any)
@@ -34,7 +34,7 @@ pub struct EventContext {
 ///
 /// 1. **Zero-allocation hot paths**: Methods like `can_see_event` receive only references
 /// 2. **Direct state access**: Custom state is passed by reference, avoiding cloning
-/// 3. **Minimal context**: EventContext is stack-allocated with only essential data
+/// 3. **Minimal context**: `EventContext` is stack-allocated with only essential data
 /// 4. **Type safety**: Generic parameter ensures compile-time type checking
 ///
 /// ## Example
@@ -115,6 +115,10 @@ where
     /// * `Ok(true)` - Event is visible to this connection
     /// * `Ok(false)` - Event should be filtered out
     /// * `Err(Error)` - Processing error (will be logged)
+    ///
+    /// # Errors
+    ///
+    /// Returns error if visibility check fails.
     fn can_see_event(
         &self,
         event: &Event,
@@ -138,6 +142,10 @@ where
     /// # Returns
     /// * `Ok(())` - Filters are allowed
     /// * `Err(Error)` - Filter validation failed (will be converted to NOTICE)
+    ///
+    /// # Errors
+    ///
+    /// Returns error if filter validation fails.
     fn verify_filters(
         &self,
         filters: &[Filter],

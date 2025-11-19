@@ -11,6 +11,9 @@ static SUBSCRIPTION_METRICS_HANDLER: OnceCell<Arc<dyn SubscriptionMetricsHandler
     OnceCell::new();
 
 /// Set the global subscription metrics handler
+///
+/// # Panics
+/// Panics if the handler has already been set
 pub fn set_subscription_metrics_handler(handler: Arc<dyn SubscriptionMetricsHandler>) {
     SUBSCRIPTION_METRICS_HANDLER
         .set(handler)

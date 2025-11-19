@@ -1,7 +1,7 @@
-//! RelayMiddleware for processing Nostr messages with optimized performance
+//! `RelayMiddleware` for processing Nostr messages with optimized performance
 //!
 //! This module provides middleware that processes Nostr protocol messages while
-//! delegating business logic to EventProcessor implementations. The implementation
+//! delegating business logic to `EventProcessor` implementations. The implementation
 //! is optimized for zero-allocation in hot paths like subscription processing.
 
 use crate::database::RelayDatabase;
@@ -20,7 +20,7 @@ use tracing::{debug, error};
 /// Relay middleware that processes messages with zero-allocation performance.
 ///
 /// This middleware provides protocol handling (EVENT, REQ, CLOSE, AUTH) while
-/// delegating business logic to EventProcessor implementations. The design
+/// delegating business logic to `EventProcessor` implementations. The design
 /// minimizes allocations in hot paths for maximum performance.
 ///
 /// ## Key Features
@@ -77,6 +77,7 @@ where
         }
     }
 
+    #[must_use]
     pub fn processor(&self) -> &Arc<P> {
         &self.processor
     }
@@ -85,13 +86,13 @@ where
     async fn handle_event(
         &self,
         event: Event,
-        state: Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        state: Arc<tokio::sync::RwLock<NostrConnectionState<T>>>,
         metadata: &crate::state::ConnectionMetadata,
         message_sender: Option<crate::nostr_middleware::MessageSender>,
     ) -> Result<(), Error> {
         // Extract custom state and load current context
         let custom_state = {
-            let connection_state = state.read();
+            let connection_state = state.read().await;
             Arc::clone(&connection_state.custom_state)
         };
 
@@ -103,7 +104,7 @@ where
             .await?;
 
         let subscription_coordinator = {
-            let state_guard = state.read();
+            let state_guard = state.read().await;
             state_guard
                 .subscription_coordinator()
                 .ok_or_else(|| Error::internal("No subscription coordinator available"))?
@@ -154,7 +155,7 @@ where
     /// Handle subscription with optimized event filtering
     async fn handle_subscription(
         &self,
-        state: Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        state: Arc<tokio::sync::RwLock<NostrConnectionState<T>>>,
         metadata: &crate::state::ConnectionMetadata,
         subscription_id: String,
         filters: Vec<Filter>,
@@ -163,7 +164,7 @@ where
 
         // Read phase - extract custom state and load context
         let custom_state = {
-            let connection_state = state.read();
+            let connection_state = state.read().await;
             Arc::clone(&connection_state.custom_state)
         };
 
@@ -175,7 +176,7 @@ where
 
         // Write phase - minimal critical section for quota only
         {
-            let mut connection_state = state.write();
+            let mut connection_state = state.write().await;
             connection_state.reserve_quota_slot(&subscription_id_obj)?;
         }
 
@@ -199,7 +200,7 @@ where
 
         // Get subscription coordinator and process
         let subscription_coordinator = {
-            let connection_state = state.read();
+            let connection_state = state.read().await;
             connection_state
                 .subscription_coordinator()
                 .ok_or_else(|| Error::internal("No subscription coordinator available"))?
@@ -223,7 +224,7 @@ where
     /// Handle NEG-OPEN message for negentropy synchronization
     async fn handle_neg_open(
         &self,
-        state: Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        state: Arc<tokio::sync::RwLock<NostrConnectionState<T>>>,
         metadata: &crate::state::ConnectionMetadata,
         subscription_id: String,
         filter: Filter,
@@ -291,7 +292,7 @@ where
 
         // Store negentropy instance in connection state
         {
-            let mut connection_state = state.write();
+            let mut connection_state = state.write().await;
             connection_state
                 .add_negentropy_subscription(SubscriptionId::new(subscription_id), negentropy);
         }
@@ -302,7 +303,7 @@ where
     /// Handle NEG-MSG message for negentropy synchronization
     async fn handle_neg_msg(
         &self,
-        state: Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        state: Arc<tokio::sync::RwLock<NostrConnectionState<T>>>,
         subscription_id: String,
         message: String,
         sender: Option<crate::nostr_middleware::MessageSender>,
@@ -313,7 +314,7 @@ where
 
         // Get negentropy instance from connection state
         let response_bytes = {
-            let mut connection_state = state.write();
+            let mut connection_state = state.write().await;
             match connection_state.get_negentropy_subscription_mut(&subscription_id_obj) {
                 Some(negentropy) => {
                     // Decode incoming message and reconcile
@@ -348,7 +349,7 @@ where
     /// Handle NEG-CLOSE message for negentropy synchronization
     async fn handle_neg_close(
         &self,
-        state: Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        state: Arc<tokio::sync::RwLock<NostrConnectionState<T>>>,
         subscription_id: String,
     ) -> Result<(), Error> {
         let subscription_id_obj = SubscriptionId::new(subscription_id.clone());
@@ -357,7 +358,7 @@ where
 
         // Remove negentropy subscription from connection state
         {
-            let mut connection_state = state.write();
+            let mut connection_state = state.write().await;
             connection_state.remove_negentropy_subscription(&subscription_id_obj);
         }
 
@@ -379,14 +380,14 @@ where
 
             // Initialize state fields
             {
-                let mut state_guard = ctx.state.write();
+                let mut state_guard = ctx.state.write().await;
                 state_guard.registry = Some(self.registry.clone());
                 state_guard.max_subscriptions = self.max_subscriptions;
             }
 
             // Initialize the subscription service for this connection
             {
-                let mut state_guard = ctx.state.write();
+                let mut state_guard = ctx.state.write().await;
                 state_guard
                     .setup_connection(
                         self.database.clone(),
@@ -405,6 +406,7 @@ where
         }
     }
 
+    #[allow(clippy::too_many_lines)] // Core relay message processing logic
     fn process_inbound<Next>(
         &self,
         ctx: InboundContext<'_, T, Next>,
@@ -497,7 +499,7 @@ where
                     // Handle CLOSE message
                     let subscription_id_owned = subscription_id.into_owned();
                     let coordinator = {
-                        let mut state = ctx.state.write();
+                        let mut state = ctx.state.write().await;
 
                         // Release quota slot for this subscription
                         state.release_quota_slot(&subscription_id_owned);
@@ -595,16 +597,15 @@ where
                 }
 
                 // All other messages are not handled by default
-                _ => match &message {
-                    ClientMessage::Auth(_) => {
+                _ => {
+                    if let ClientMessage::Auth(_) = &message {
                         // if it was enabled, we would have handled it in the
                         // nip42 middleware and this point would not be reached
                         debug!(
-                            "AUTH message received but authentication is not enabled on this relay, ignoring"
-                        );
+                        "AUTH message received but authentication is not enabled on this relay, ignoring"
+                    );
                         ctx.next().await
-                    }
-                    _ => {
+                    } else {
                         let msg = format!(
                             "Message type not supported: {}",
                             match &message {
@@ -615,7 +616,7 @@ where
                         debug!("{msg}");
                         Err(Error::notice(msg).into())
                     }
-                },
+                }
             }
         }
     }
@@ -633,7 +634,7 @@ where
             if let RelayMessage::Event { event, .. } = &message {
                 let should_filter = {
                     let custom_state = {
-                        let state = ctx.state.read();
+                        let state = ctx.state.read().await;
                         Arc::clone(&state.custom_state)
                     };
 

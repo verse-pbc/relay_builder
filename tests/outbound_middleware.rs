@@ -4,7 +4,6 @@
 //! after fixing the broken implementation.
 
 use nostr_sdk::prelude::*;
-use parking_lot::RwLock;
 use relay_builder::{
     middleware_chain::{chain, BuildConnected},
     middlewares::*,
@@ -18,6 +17,7 @@ use std::{
     },
     time::Duration,
 };
+use tokio::sync::RwLock;
 
 /// Test middleware that tracks when process_outbound is called
 #[derive(Clone)]

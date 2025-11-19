@@ -1,25 +1,28 @@
 //! CPU affinity helpers with Linux implementation and no-op fallbacks elsewhere.
 //!
 //! Usage:
-//!   affinity::pin_current_thread_to(core_index)?;
-//!   affinity::allow_all_but_current_thread(&[excluded_core])?;
+//!   `affinity::pin_current_thread_to(core_index)`?;
+//!   `affinity::allow_all_but_current_thread`(&[`excluded_core`])?;
 //!
 //! Notes:
 //! - Affinity is set per-thread. New threads inherit the creator's mask at creation time.
-//! - For very large CPU counts beyond CPU_SETSIZE, consider cpuset cgroups or CPU_ALLOC APIs.
+//! - For very large CPU counts beyond `CPU_SETSIZE`, consider cpuset cgroups or `CPU_ALLOC` APIs.
 
 use std::io;
 #[cfg(target_os = "linux")]
 use std::mem;
 
 /// Pin the current thread to a specific CPU
+///
+/// # Errors
+/// Returns an error if the system call to set CPU affinity fails
 #[cfg(target_os = "linux")]
 pub fn pin_current_thread_to(cpu: usize) -> io::Result<()> {
     unsafe {
         let mut set: libc::cpu_set_t = mem::zeroed();
         libc::CPU_ZERO(&mut set);
         libc::CPU_SET(cpu, &mut set);
-        if libc::sched_setaffinity(0, mem::size_of::<libc::cpu_set_t>(), &set) != 0 {
+        if libc::sched_setaffinity(0, mem::size_of::<libc::cpu_set_t>(), &raw const set) != 0 {
             return Err(io::Error::last_os_error());
         }
     }
@@ -39,6 +42,9 @@ pub fn pin_current_thread_to(cpu: usize) -> io::Result<()> {
 }
 
 /// Allow the current thread to run on all CPUs except the excluded ones
+///
+/// # Errors
+/// Returns an error if the system call to set CPU affinity fails
 #[cfg(target_os = "linux")]
 pub fn allow_all_but_current_thread(excluded: &[usize]) -> io::Result<()> {
     let cpu_count = num_cpus::get();
@@ -50,7 +56,7 @@ pub fn allow_all_but_current_thread(excluded: &[usize]) -> io::Result<()> {
                 libc::CPU_SET(cpu, &mut set);
             }
         }
-        if libc::sched_setaffinity(0, mem::size_of::<libc::cpu_set_t>(), &set) != 0 {
+        if libc::sched_setaffinity(0, mem::size_of::<libc::cpu_set_t>(), &raw const set) != 0 {
             return Err(io::Error::last_os_error());
         }
     }

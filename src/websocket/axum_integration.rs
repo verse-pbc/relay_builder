@@ -75,16 +75,17 @@ where
     ws.on_upgrade(move |socket| async move {
         // Try to acquire a connection permit
         let _permit = match &connection_limiter {
-            Some(limiter) => match limiter.try_acquire() {
-                Ok(permit) => Some(permit),
-                Err(_) => {
+            Some(limiter) => {
+                if let Ok(permit) = limiter.try_acquire() {
+                    Some(permit)
+                } else {
                     warn!(
                         "Connection limit reached, rejecting connection from {}",
                         addr
                     );
                     return;
                 }
-            },
+            }
             None => None,
         };
 

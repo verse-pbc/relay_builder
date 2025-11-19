@@ -37,6 +37,7 @@ impl std::fmt::Debug for CryptoHelper {
 }
 
 /// Statistics tracker for batch processing
+#[allow(clippy::struct_field_names)] // batch_ prefix is intentional and clear
 struct BatchStats {
     batch_count: AtomicUsize,
     batch_size_sum: AtomicUsize,
@@ -131,6 +132,9 @@ impl CryptoHelper {
         receiver: &flume::Receiver<VerifyRequest>,
         verified_count: &Arc<AtomicUsize>,
     ) {
+        use once_cell::sync::Lazy;
+        static STATS: Lazy<BatchStats> = Lazy::new(BatchStats::new);
+
         info!("Crypto verification processor started");
 
         // Initialize rayon thread pool for CPU-bound work
@@ -142,12 +146,9 @@ impl CryptoHelper {
 
         loop {
             // Wait for at least one verification request
-            let first_request = match receiver.recv() {
-                Ok(req) => req,
-                Err(_) => {
-                    info!("Crypto verification processor shutting down - channel closed");
-                    break;
-                }
+            let Ok(first_request) = receiver.recv() else {
+                info!("Crypto verification processor shutting down - channel closed");
+                break;
             };
 
             // Collect a batch using the eager consumption pattern
@@ -178,8 +179,6 @@ impl CryptoHelper {
             verified_count.fetch_add(batch_size, Ordering::Relaxed);
 
             // Log batch statistics
-            use once_cell::sync::Lazy;
-            static STATS: Lazy<BatchStats> = Lazy::new(BatchStats::new);
             STATS.record_batch(
                 batch_size,
                 verified_count.load(Ordering::Relaxed),
@@ -196,6 +195,9 @@ impl CryptoHelper {
         keys: &Arc<Keys>,
         signed_count: &Arc<AtomicUsize>,
     ) {
+        use once_cell::sync::Lazy;
+        static STATS: Lazy<BatchStats> = Lazy::new(BatchStats::new);
+
         info!("Crypto signing processor started");
 
         // Initialize rayon thread pool for CPU-bound work
@@ -213,12 +215,9 @@ impl CryptoHelper {
 
         loop {
             // Wait for at least one signing request
-            let first_command = match receiver.recv() {
-                Ok(cmd) => cmd,
-                Err(_) => {
-                    info!("Crypto signing processor shutting down - channel closed");
-                    break;
-                }
+            let Ok(first_command) = receiver.recv() else {
+                info!("Crypto signing processor shutting down - channel closed");
+                break;
             };
 
             // Collect a batch using the eager consumption pattern
@@ -264,8 +263,6 @@ impl CryptoHelper {
             signed_count.fetch_add(batch_size, Ordering::Relaxed);
 
             // Log batch statistics
-            use once_cell::sync::Lazy;
-            static STATS: Lazy<BatchStats> = Lazy::new(BatchStats::new);
             STATS.record_batch(batch_size, signed_count.load(Ordering::Relaxed), "signing");
         }
 
@@ -273,6 +270,10 @@ impl CryptoHelper {
     }
 
     /// Sign an unsigned event with the configured keys
+    ///
+    /// # Errors
+    ///
+    /// Returns error if event signing fails.
     pub async fn sign_event(&self, event: UnsignedEvent) -> Result<Event> {
         self.keys.sign_event(event).await.map_err(|e| {
             error!("Failed to sign event: {:?}", e);
@@ -281,6 +282,10 @@ impl CryptoHelper {
     }
 
     /// Verify an event's signature
+    ///
+    /// # Errors
+    ///
+    /// Returns error if signature is invalid or verification fails.
     pub async fn verify_event(&self, event: Event) -> Result<()> {
         // Create oneshot channel for response
         let (tx, rx) = oneshot::channel();
@@ -300,29 +305,32 @@ impl CryptoHelper {
     }
 
     /// Get the number of events verified
+    #[must_use]
     pub fn verified_count(&self) -> usize {
         self.verified_count.load(Ordering::Relaxed)
     }
 
-    /// Sign a store command (converts SaveUnsignedEvent to SaveSignedEvent)
+    /// Sign a store command (converts `SaveUnsignedEvent` to `SaveSignedEvent`)
+    ///
+    /// # Errors
+    ///
+    /// Returns error if command is not `SaveUnsignedEvent` or signing fails.
     pub async fn sign_store_command(&self, command: StoreCommand) -> Result<()> {
-        match command {
-            StoreCommand::SaveUnsignedEvent(..) => {
-                // Send to the signing processor for batched processing
-                self.sign_sender
-                    .send_async(command)
-                    .await
-                    .map_err(|_| Error::internal("Signing processor unavailable"))?;
-                Ok(())
-            }
-            _ => {
-                error!("sign_store_command called with non-SaveUnsignedEvent command");
-                Err(Error::internal("Expected SaveUnsignedEvent command"))
-            }
+        if let StoreCommand::SaveUnsignedEvent(..) = command {
+            // Send to the signing processor for batched processing
+            self.sign_sender
+                .send_async(command)
+                .await
+                .map_err(|_| Error::internal("Signing processor unavailable"))?;
+            Ok(())
+        } else {
+            error!("sign_store_command called with non-SaveUnsignedEvent command");
+            Err(Error::internal("Expected SaveUnsignedEvent command"))
         }
     }
 
     /// Get the number of events signed
+    #[must_use]
     pub fn signed_count(&self) -> usize {
         self.signed_count.load(Ordering::Relaxed)
     }

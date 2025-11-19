@@ -6,10 +6,10 @@ use crate::subscription_registry::SubscriptionRegistry;
 use flume::{self};
 use nostr_sdk::prelude::*;
 use nostr_sdk::Keys;
-use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::Instant;
 use tempfile::TempDir;
+use tokio::sync::RwLock;
 
 pub async fn setup_test() -> (TempDir, Arc<RelayDatabase>, Keys) {
     let tmp_dir = TempDir::new().unwrap();
@@ -214,7 +214,7 @@ where
         &self,
         _connection_id: &str,
         _message: &mut Option<ClientMessage<'static>>,
-        _state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        _state: &Arc<tokio::sync::RwLock<NostrConnectionState<T>>>,
         _metadata: &Arc<crate::state::ConnectionMetadata>,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
         async move { Ok(()) }
@@ -223,7 +223,7 @@ where
     fn on_connect_chain(
         &self,
         _connection_id: &str,
-        _state: &Arc<parking_lot::RwLock<NostrConnectionState<T>>>,
+        _state: &Arc<tokio::sync::RwLock<NostrConnectionState<T>>>,
         _metadata: &Arc<crate::state::ConnectionMetadata>,
     ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
         async move { Ok(()) }

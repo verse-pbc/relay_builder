@@ -20,6 +20,7 @@ pub enum ClientMessageId {
 pub struct ErrorHandlingMiddleware;
 
 impl ErrorHandlingMiddleware {
+    #[must_use]
     pub fn new() -> Self {
         Self
     }
@@ -45,25 +46,23 @@ where
         // Extract message ID before it potentially gets consumed by other middleware
         let client_message_id = match &ctx.message {
             Some(ClientMessage::Event(event)) => Some(ClientMessageId::Event(event.id)),
-            Some(ClientMessage::Req {
-                subscription_id, ..
-            }) => Some(ClientMessageId::Subscription(subscription_id.to_string())),
-            Some(ClientMessage::ReqMultiFilter {
-                subscription_id, ..
-            }) => Some(ClientMessageId::Subscription(subscription_id.to_string())),
-            Some(ClientMessage::Close(subscription_id)) => {
-                Some(ClientMessageId::Subscription(subscription_id.to_string()))
-            }
+            Some(
+                ClientMessage::Req {
+                    subscription_id, ..
+                }
+                | ClientMessage::ReqMultiFilter {
+                    subscription_id, ..
+                }
+                | ClientMessage::Close(subscription_id)
+                | ClientMessage::NegOpen {
+                    subscription_id, ..
+                }
+                | ClientMessage::NegMsg {
+                    subscription_id, ..
+                }
+                | ClientMessage::NegClose { subscription_id },
+            ) => Some(ClientMessageId::Subscription(subscription_id.to_string())),
             Some(ClientMessage::Auth(auth)) => Some(ClientMessageId::Event(auth.id)),
-            Some(ClientMessage::NegOpen {
-                subscription_id, ..
-            }) => Some(ClientMessageId::Subscription(subscription_id.to_string())),
-            Some(ClientMessage::NegMsg {
-                subscription_id, ..
-            }) => Some(ClientMessageId::Subscription(subscription_id.to_string())),
-            Some(ClientMessage::NegClose { subscription_id }) => {
-                Some(ClientMessageId::Subscription(subscription_id.to_string()))
-            }
             _ => None,
         };
 
@@ -76,7 +75,7 @@ where
                 if let Some(err) = e.downcast_ref::<Error>() {
                     // Only handle the error if we have a message ID to respond to
                     if let Some(message_id) = client_message_id {
-                        if let Err(err) = handle_inbound_error(err, &sender, message_id).await {
+                        if let Err(err) = handle_inbound_error(err, &sender, message_id) {
                             error!("Failed to handle inbound error: {}", err);
                         }
                     } else {
@@ -96,12 +95,12 @@ where
 }
 
 /// Handle inbound errors by sending appropriate relay messages
-async fn handle_inbound_error(
+fn handle_inbound_error(
     error: &Error,
     sender: &crate::nostr_middleware::MessageSender,
     client_message_id: ClientMessageId,
 ) -> Result<()> {
-    use Error::*;
+    use Error::{AuthRequired, Duplicate, EventError, Notice, Restricted, SubscriptionError};
 
     let message = match error {
         Notice { message, .. } => RelayMessage::notice(message.clone()),

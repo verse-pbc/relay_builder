@@ -31,10 +31,16 @@ pub struct ConnectionMetadata {
 }
 
 impl ConnectionMetadata {
+    /// This method is deprecated and will always panic
+    ///
+    /// # Panics
+    /// Always panics - use `new_with_context` instead
+    #[must_use]
     pub fn new(_relay_url: RelayUrl, _subdomain: Arc<Scope>) -> Self {
         panic!("ConnectionMetadata::new needs relay_pubkey - use new_with_context instead")
     }
 
+    #[must_use]
     pub fn new_with_context(
         relay_url: RelayUrl,
         subdomain: Arc<Scope>,
@@ -55,7 +61,7 @@ impl ConnectionMetadata {
     }
 }
 
-/// Type alias for the default NostrConnectionState without custom state
+/// Type alias for the default `NostrConnectionState` without custom state
 pub type DefaultNostrConnectionState = NostrConnectionState<()>;
 
 /// Connection state for a WebSocket client (mutable fields only)
@@ -101,6 +107,11 @@ impl<T> NostrConnectionState<T>
 where
     T: Default,
 {
+    /// Create a new connection state with default custom state.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if state initialization fails.
     pub fn new() -> Result<Self> {
         Ok(Self {
             challenge: None,
@@ -134,6 +145,11 @@ where
 }
 
 impl<T> NostrConnectionState<T> {
+    /// Create connection state with custom initial state.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if state initialization fails.
     pub fn with_custom(custom_state: T) -> Result<Self, Error> {
         Ok(Self {
             challenge: None,
@@ -161,11 +177,16 @@ impl<T> NostrConnectionState<T> {
         metadata.event_context.store(Arc::new(new_context));
     }
 
+    #[must_use]
     pub fn is_authenticated(&self) -> bool {
         self.authed_pubkey.is_some()
     }
 
     /// Setup the connection with database and registry
+    ///
+    /// # Errors
+    ///
+    /// Returns error if subscription coordinator initialization fails.
     #[allow(clippy::too_many_arguments)]
     pub fn setup_connection(
         &mut self,
@@ -200,6 +221,11 @@ impl<T> NostrConnectionState<T> {
         Ok(())
     }
 
+    /// Save multiple events using store commands.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if coordinator is unavailable or save operation fails.
     pub async fn save_events(&mut self, store_commands: Vec<StoreCommand>) -> Result<(), Error> {
         let Some(coordinator) = &self.subscription_coordinator else {
             return Err(Error::internal("No subscription coordinator available"));
@@ -216,6 +242,10 @@ impl<T> NostrConnectionState<T> {
     }
 
     /// Save and broadcast a single store command
+    ///
+    /// # Errors
+    ///
+    /// Returns error if coordinator is unavailable or operation fails.
     pub async fn save_and_broadcast(&self, command: StoreCommand) -> Result<(), Error> {
         let Some(coordinator) = &self.subscription_coordinator else {
             return Err(Error::internal("No subscription coordinator available"));
@@ -225,6 +255,10 @@ impl<T> NostrConnectionState<T> {
     }
 
     /// Remove a subscription
+    ///
+    /// # Errors
+    ///
+    /// Returns error if coordinator is unavailable.
     pub async fn remove_subscription(&self, subscription_id: &SubscriptionId) -> Result<(), Error> {
         let Some(coordinator) = &self.subscription_coordinator else {
             return Err(Error::internal("No subscription coordinator available"));
@@ -246,13 +280,12 @@ impl<T> NostrConnectionState<T> {
 
     /// Get or create a challenge for NIP-42 authentication
     pub fn get_challenge_event(&mut self) -> RelayMessage<'static> {
-        let challenge = match self.challenge.as_ref() {
-            Some(challenge) => challenge.clone(),
-            None => {
-                let challenge = format!("{}", rand::random::<u64>());
-                self.challenge = Some(challenge.clone());
-                challenge
-            }
+        let challenge = if let Some(challenge) = self.challenge.as_ref() {
+            challenge.clone()
+        } else {
+            let challenge = format!("{}", rand::random::<u64>());
+            self.challenge = Some(challenge.clone());
+            challenge
         };
         RelayMessage::auth(challenge)
     }
@@ -270,6 +303,7 @@ impl<T> NostrConnectionState<T> {
     }
 
     /// Check if we can accept more subscriptions
+    #[must_use]
     pub fn can_accept_subscription(&self) -> bool {
         if let Some(max) = self.max_subscriptions {
             self.subscription_quota_usage.len() < max
@@ -279,17 +313,23 @@ impl<T> NostrConnectionState<T> {
     }
 
     /// Get count of tracked subscriptions for quota purposes
+    #[must_use]
     pub fn subscription_count(&self) -> usize {
         self.subscription_quota_usage.len()
     }
 
     /// Get remaining subscription capacity
+    #[must_use]
     pub fn remaining_subscription_capacity(&self) -> Option<usize> {
         self.max_subscriptions
             .map(|max| max.saturating_sub(self.subscription_quota_usage.len()))
     }
 
     /// Reserve a quota slot for a subscription (handles replacements gracefully)
+    ///
+    /// # Errors
+    ///
+    /// Returns error if subscription quota is exceeded.
     pub fn reserve_quota_slot(&mut self, subscription_id: &SubscriptionId) -> Result<(), Error> {
         // Check if this is a replacement (subscription ID already exists)
         if self.subscription_quota_usage.contains(subscription_id) {
@@ -320,7 +360,7 @@ impl<T> NostrConnectionState<T> {
         Ok(())
     }
 
-    /// Track a new subscription (DEPRECATED - use reserve_quota_slot instead)
+    /// Track a new subscription (DEPRECATED - use `reserve_quota_slot` instead)
     #[deprecated(note = "Use reserve_quota_slot() instead")]
     pub fn add_subscription(&mut self, subscription_id: SubscriptionId) {
         self.subscription_quota_usage.insert(subscription_id);
@@ -331,7 +371,7 @@ impl<T> NostrConnectionState<T> {
         self.subscription_quota_usage.remove(subscription_id)
     }
 
-    /// Remove a subscription (DEPRECATED - use release_quota_slot instead)
+    /// Remove a subscription (DEPRECATED - use `release_quota_slot` instead)
     #[deprecated(note = "Use release_quota_slot() instead")]
     pub fn remove_tracked_subscription(&mut self, subscription_id: &SubscriptionId) -> bool {
         self.release_quota_slot(subscription_id)
@@ -368,6 +408,7 @@ impl<T> NostrConnectionState<T> {
     }
 
     /// Get count of active negentropy subscriptions
+    #[must_use]
     pub fn negentropy_subscription_count(&self) -> usize {
         self.negentropy_subscriptions.len()
     }

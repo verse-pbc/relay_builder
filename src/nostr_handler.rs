@@ -1,7 +1,7 @@
 //! WebSocket handler implementation for Nostr relays
 //!
-//! This module provides the bridge between websocket_builder's simple text-based
-//! WebSocket API and relay_builder's Nostr-specific middleware system.
+//! This module provides the bridge between `websocket_builder`'s simple text-based
+//! WebSocket API and `relay_builder`'s Nostr-specific middleware system.
 
 use crate::config::ScopeConfig;
 use crate::event_ingester::{EventIngester, IngesterError};
@@ -113,7 +113,7 @@ where
     /// The subdomain scope for this connection
     subdomain: Arc<Scope>,
     /// Connection state (mutable fields)
-    state: Option<Arc<parking_lot::RwLock<NostrConnectionState<T>>>>,
+    state: Option<Arc<tokio::sync::RwLock<NostrConnectionState<T>>>>,
     /// Connection metadata (immutable fields)
     metadata: Option<Arc<ConnectionMetadata>>,
     /// Relay public key (needed to create metadata)
@@ -140,6 +140,7 @@ where
     Chain: crate::middleware_chain::BuildConnected + Clone + Send + Sync + 'static,
     Chain::Output: InboundProcessor<T> + OutboundProcessor<T> + Clone + Send + Sync + 'static,
 {
+    #[allow(clippy::too_many_lines)] // WebSocket connection setup is complex
     async fn on_connect(
         &mut self,
         addr: SocketAddr,
@@ -172,7 +173,7 @@ where
         self.metadata = Some(metadata.clone());
 
         // Create connection state (mutable)
-        let state = Arc::new(parking_lot::RwLock::new(
+        let state = Arc::new(tokio::sync::RwLock::new(
             NostrConnectionState::<T>::new().expect("Valid state"),
         ));
         self.state = Some(state.clone());
@@ -257,12 +258,12 @@ where
                                     if let (Some(original_id), RelayMessage::Event { event, .. }) =
                                         (original_event_id, &msg)
                                     {
-                                        if original_id != event.id {
-                                            // Event was modified, invalidate pre-serialized JSON
-                                            None
-                                        } else {
+                                        if original_id == event.id {
                                             // Event unchanged, can use pre-serialized JSON
                                             pre_json
+                                        } else {
+                                            // Event was modified, invalidate pre-serialized JSON
+                                            None
                                         }
                                     } else {
                                         // Not an event message or no original event, use pre-json as-is
@@ -291,7 +292,7 @@ where
                             }
                         }
                     }
-                    _ = cancellation.cancelled() => {
+                    () = cancellation.cancelled() => {
                         tracing::debug!("Shutdown signal received, closing sink for {}", debug_addr);
                         if let Err(e) = sink.close().await {
                             tracing::error!("Failed to close sink during shutdown: {}", e);
@@ -339,7 +340,7 @@ where
 
         // EventIngester handles JSON parsing + signature verification
         // Utf8Bytes already contains validated UTF-8 text, just convert to String
-        let message = match self.event_ingester.process_message(text.to_string()).await {
+        let message = match self.event_ingester.process_message(text.to_string()) {
             Ok(msg) => msg,
             Err(e) => {
                 match e {
@@ -381,7 +382,7 @@ where
             .process_inbound_chain(&addr.to_string(), &mut message_opt, state, metadata)
             .await
         {
-            Ok(_) => Ok(()),
+            Ok(()) => Ok(()),
             Err(e) => {
                 // Log error but don't disconnect
                 tracing::error!("Inbound processing error: {}", e);
@@ -428,7 +429,7 @@ where
     }
 }
 
-/// Extension trait for NostrChainBuilder to create a handler factory
+/// Extension trait for `NostrChainBuilder` to create a handler factory
 pub trait IntoHandlerFactory<T, Chain> {
     /// Convert the chain into a handler factory with an event ingester
     fn into_handler_factory(

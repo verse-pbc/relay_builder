@@ -33,6 +33,7 @@ impl Default for Nip40ExpirationMiddleware {
 }
 
 impl Nip40ExpirationMiddleware {
+    #[must_use]
     pub fn new() -> Self {
         Self
     }
@@ -68,7 +69,7 @@ where
                         );
 
                         let coordinator = {
-                            let state = ctx.state.read();
+                            let state = ctx.state.read().await;
                             state.subscription_coordinator().cloned()
                         };
 

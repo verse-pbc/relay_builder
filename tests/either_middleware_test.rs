@@ -87,8 +87,8 @@ where
     }
 }
 
-fn create_test_state() -> Arc<parking_lot::RwLock<NostrConnectionState<()>>> {
-    Arc::new(parking_lot::RwLock::new(
+fn create_test_state() -> Arc<tokio::sync::RwLock<NostrConnectionState<()>>> {
+    Arc::new(tokio::sync::RwLock::new(
         NostrConnectionState::<()>::new().unwrap(),
     ))
 }
