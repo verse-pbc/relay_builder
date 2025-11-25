@@ -58,7 +58,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use indicatif::{ProgressBar, ProgressStyle};
-use nostr_lmdb::{NostrLMDB, Scope};
+use nostr_lmdb::{NostrLmdb, Scope};
 use nostr_sdk::prelude::*;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -128,13 +128,13 @@ struct SyncStats {
 }
 
 struct NegentropySync {
-    local_db: Arc<NostrLMDB>,
+    local_db: Arc<NostrLmdb>,
     scope: Scope,
     filter: Filter,
 }
 
 impl NegentropySync {
-    fn new(local_db: Arc<NostrLMDB>, scope: Scope, filter: Filter) -> Self {
+    fn new(local_db: Arc<NostrLmdb>, scope: Scope, filter: Filter) -> Self {
         Self {
             local_db,
             scope,
@@ -261,7 +261,8 @@ async fn run_sync(args: &Args) -> Result<()> {
     // Open local database
     info!("Opening local database at {:?}", args.db);
     let local_db = Arc::new(
-        NostrLMDB::open(&args.db)
+        NostrLmdb::open(&args.db)
+            .await
             .with_context(|| format!("Failed to open database at {:?}", args.db))?,
     );
 

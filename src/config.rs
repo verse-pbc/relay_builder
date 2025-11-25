@@ -154,12 +154,12 @@ impl RelayConfig {
     /// # Errors
     ///
     /// Returns error if database configuration is missing or creation fails.
-    pub fn create_database(
+    pub async fn create_database(
         &self,
         keys: Arc<Keys>,
     ) -> Result<(Arc<RelayDatabase>, CryptoHelper), Error> {
         let crypto_helper = CryptoHelper::new(keys);
-        let database = self.create_database_with_tracker(None, None)?;
+        let database = self.create_database_with_tracker(None, None).await?;
         Ok((database, crypto_helper))
     }
 
@@ -168,21 +168,24 @@ impl RelayConfig {
     /// # Errors
     ///
     /// Returns error if database configuration is missing or creation fails.
-    pub fn create_database_with_tracker(
+    pub async fn create_database_with_tracker(
         &self,
         task_tracker: Option<tokio_util::task::TaskTracker>,
         cancellation_token: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<Arc<RelayDatabase>, Error> {
         match &self.database {
-            Some(database_config) => Self::create_database_from_config(
-                database_config.clone(),
-                &self.websocket_config,
-                self.max_subscriptions,
-                task_tracker,
-                cancellation_token,
-                self.max_readers,
-                self.ingester_cpu_affinity,
-            ),
+            Some(database_config) => {
+                Self::create_database_from_config(
+                    database_config.clone(),
+                    &self.websocket_config,
+                    self.max_subscriptions,
+                    task_tracker,
+                    cancellation_token,
+                    self.max_readers,
+                    self.ingester_cpu_affinity,
+                )
+                .await
+            }
             None => Err(Error::internal(
                 "Database configuration is required".to_string(),
             )),
@@ -194,7 +197,7 @@ impl RelayConfig {
     /// # Errors
     ///
     /// Returns error if database initialization or CPU affinity setup fails.
-    pub fn create_database_from_config(
+    pub async fn create_database_from_config(
         database_config: DatabaseConfig,
         _websocket_config: &WebSocketConfig,
         _max_subscriptions: usize,
@@ -214,7 +217,8 @@ impl RelayConfig {
                     }) as Box<dyn FnOnce() + Send>
                 });
 
-                let database = RelayDatabase::with_config(&path, max_readers, thread_config)?;
+                let database =
+                    RelayDatabase::with_config(&path, max_readers, thread_config).await?;
                 Ok(Arc::new(database))
             }
             DatabaseConfig::Instance(db) => {

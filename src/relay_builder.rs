@@ -464,7 +464,8 @@ where
                     self.cancellation_token.clone(),
                     self.config.max_readers,
                     self.config.ingester_cpu_affinity,
-                )?;
+                )
+                .await?;
                 (database, crypto_helper, event_ingester)
             }
             None => {

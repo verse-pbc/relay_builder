@@ -845,7 +845,7 @@ mod tests {
 
         // Create 10 events alternating between public and private groups
         for i in 0..10 {
-            let timestamp = Timestamp::from(base_timestamp.as_u64() + i * 10);
+            let timestamp = Timestamp::from(base_timestamp.as_secs() + i * 10);
             let group = if i % 2 == 0 { "public" } else { "private" };
             let event = create_test_event(&keys, timestamp, group, &format!("Event {i}")).await;
             database.save_event(&event, &Scope::Default).await.unwrap();
@@ -949,7 +949,7 @@ mod tests {
 
         // Create 10 events across 100 seconds
         for i in 0..10 {
-            let timestamp = Timestamp::from(base_timestamp.as_u64() + i * 10);
+            let timestamp = Timestamp::from(base_timestamp.as_secs() + i * 10);
             let group = if i % 2 == 0 { "public" } else { "private" };
             let event = create_test_event(&keys, timestamp, group, &format!("Event {i}")).await;
             database.save_event(&event, &Scope::Default).await.unwrap();
@@ -960,7 +960,7 @@ mod tests {
         // Request with until=80 (position 8) and limit 5
         let filter = Filter::new()
             .kinds(vec![Kind::from(9)])
-            .until(Timestamp::from(base_timestamp.as_u64() + 80))
+            .until(Timestamp::from(base_timestamp.as_secs() + 80))
             .limit(5);
 
         let sub_id = SubscriptionId::new("test_sub");
@@ -1035,7 +1035,7 @@ mod tests {
 
         // Create 10 events
         for i in 0..10 {
-            let timestamp = Timestamp::from(base_timestamp.as_u64() + i * 10);
+            let timestamp = Timestamp::from(base_timestamp.as_secs() + i * 10);
             let group = if i % 2 == 0 { "public" } else { "private" };
             let event = create_test_event(&keys, timestamp, group, &format!("Event {i}")).await;
             database.save_event(&event, &Scope::Default).await.unwrap();
@@ -1046,7 +1046,7 @@ mod tests {
         // Request with since=20 and limit 5
         let filter = Filter::new()
             .kinds(vec![Kind::from(9)])
-            .since(Timestamp::from(base_timestamp.as_u64() + 20))
+            .since(Timestamp::from(base_timestamp.as_secs() + 20))
             .limit(5);
 
         let sub_id = SubscriptionId::new("test_sub");
@@ -1099,7 +1099,7 @@ mod tests {
         // Verify all events have timestamp >= 20
         for event in &received_events {
             assert!(
-                event.created_at.as_u64() >= base_timestamp.as_u64() + 20,
+                event.created_at.as_secs() >= base_timestamp.as_secs() + 20,
                 "All events should have timestamp >= since filter"
             );
         }
@@ -1143,7 +1143,7 @@ mod tests {
 
         // Create 5 newer non-accessible events
         for i in 0..5 {
-            let timestamp = Timestamp::from(base_timestamp.as_u64() + 100 + i * 10);
+            let timestamp = Timestamp::from(base_timestamp.as_secs() + 100 + i * 10);
             let event =
                 create_test_event(&keys, timestamp, "private", &format!("Private {i}")).await;
             database.save_event(&event, &Scope::Default).await.unwrap();
@@ -1237,7 +1237,7 @@ mod tests {
 
         // Create 20 events: 10 public, 10 private, interleaved
         for i in 0..20 {
-            let timestamp = Timestamp::from(base_timestamp.as_u64() + i * 5);
+            let timestamp = Timestamp::from(base_timestamp.as_secs() + i * 5);
             let group = if i % 2 == 0 { "public" } else { "private" };
             let event = create_test_event(&keys, timestamp, group, &format!("Event {i}")).await;
             database.save_event(&event, &Scope::Default).await.unwrap();
@@ -1253,8 +1253,8 @@ mod tests {
         // Public events (even indices): 6, 8, 10, 12, 14 (5 public events)
         let filter = Filter::new()
             .kinds(vec![Kind::from(9)])
-            .since(Timestamp::from(base_timestamp.as_u64() + 25))
-            .until(Timestamp::from(base_timestamp.as_u64() + 75))
+            .since(Timestamp::from(base_timestamp.as_secs() + 25))
+            .until(Timestamp::from(base_timestamp.as_secs() + 75))
             .limit(5);
 
         let sub_id = SubscriptionId::new("test_sub");
@@ -1310,9 +1310,9 @@ mod tests {
                 "All events should be from public group"
             );
 
-            let ts = event.created_at.as_u64();
+            let ts = event.created_at.as_secs();
             assert!(
-                ts >= base_timestamp.as_u64() + 25 && ts <= base_timestamp.as_u64() + 75,
+                ts >= base_timestamp.as_secs() + 25 && ts <= base_timestamp.as_secs() + 75,
                 "Event timestamp should be within the requested window"
             );
         }

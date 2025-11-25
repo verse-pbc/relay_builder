@@ -50,9 +50,6 @@ where
                 ClientMessage::Req {
                     subscription_id, ..
                 }
-                | ClientMessage::ReqMultiFilter {
-                    subscription_id, ..
-                }
                 | ClientMessage::Close(subscription_id)
                 | ClientMessage::NegOpen {
                     subscription_id, ..

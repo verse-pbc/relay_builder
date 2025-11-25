@@ -257,7 +257,7 @@ where
         for (id, timestamp) in items {
             let id_bytes = id.to_bytes();
             storage
-                .insert(timestamp.as_u64(), Id::from_byte_array(id_bytes))
+                .insert(timestamp.as_secs(), Id::from_byte_array(id_bytes))
                 .map_err(|e| Error::internal(format!("Failed to add item to storage: {e}")))?;
         }
 
@@ -443,42 +443,18 @@ where
 
                 ClientMessage::Req {
                     subscription_id,
-                    filter,
-                } => {
-                    // Use generic subscription handling directly
-                    match self
-                        .handle_subscription(
-                            ctx.state.clone(),
-                            ctx.metadata,
-                            subscription_id.to_string(),
-                            vec![filter.into_owned()],
-                        )
-                        .await
-                    {
-                        Ok(()) => {}
-                        Err(e) => {
-                            // Don't log Restricted errors here since they're already logged in state.rs
-                            if !matches!(e, Error::Restricted { .. }) {
-                                error!("Subscription error: {}", e);
-                            }
-                            // Propagate the error up the chain so ErrorHandlingMiddleware can format it properly
-                            return Err(e.into());
-                        }
-                    }
-                    ctx.next().await
-                }
-
-                ClientMessage::ReqMultiFilter {
-                    subscription_id,
                     filters,
                 } => {
+                    // Convert Vec<Cow<Filter>> to Vec<Filter>
+                    let owned_filters: Vec<Filter> =
+                        filters.into_iter().map(|f| f.into_owned()).collect();
                     // Use generic subscription handling directly
                     match self
                         .handle_subscription(
                             ctx.state.clone(),
                             ctx.metadata,
                             subscription_id.to_string(),
-                            filters,
+                            owned_filters,
                         )
                         .await
                     {

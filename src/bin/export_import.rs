@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
-use nostr_lmdb::{NostrLMDB, Scope};
+use nostr_lmdb::{NostrLmdb, Scope};
 use nostr_sdk::prelude::*;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -133,7 +133,7 @@ fn parse_scope_from_filename(filename: &str) -> Option<Scope> {
 }
 
 async fn export_scope(
-    db: &Arc<NostrLMDB>,
+    db: &Arc<NostrLmdb>,
     scope: &Scope,
     output_path: &Path,
     include_count: bool,
@@ -179,7 +179,7 @@ async fn export_scope(
 }
 
 async fn export_database(
-    db: Arc<NostrLMDB>,
+    db: Arc<NostrLmdb>,
     output_dir: PathBuf,
     force: bool,
     include_count: bool,
@@ -235,7 +235,7 @@ async fn export_database(
 }
 
 async fn import_scope_with_progress(
-    db: &Arc<NostrLMDB>,
+    db: &Arc<NostrLmdb>,
     scope: &Scope,
     file_path: &Path,
     skip_errors: bool,
@@ -323,7 +323,7 @@ async fn import_scope_with_progress(
     Ok((imported, errors))
 }
 
-async fn save_events_batch(db: &Arc<NostrLMDB>, scope: &Scope, events: &[Event]) -> Result<u64> {
+async fn save_events_batch(db: &Arc<NostrLmdb>, scope: &Scope, events: &[Event]) -> Result<u64> {
     // Get scoped view of the database
     let scoped_db = db
         .scoped(scope)
@@ -363,7 +363,7 @@ async fn count_events_in_file(file_path: &Path) -> Result<u64> {
 }
 
 async fn import_database(
-    db: Arc<NostrLMDB>,
+    db: Arc<NostrLmdb>,
     input_dir: PathBuf,
     skip_confirmation: bool,
     skip_errors: bool,
@@ -501,7 +501,8 @@ async fn main() -> Result<()> {
         } => {
             info!("Opening database at {:?}", db);
             let database = Arc::new(
-                NostrLMDB::open(&db)
+                NostrLmdb::open(&db)
+                    .await
                     .with_context(|| format!("Failed to open database at {db:?}"))?,
             );
 
@@ -515,7 +516,8 @@ async fn main() -> Result<()> {
         } => {
             info!("Opening database at {:?}", db);
             let database = Arc::new(
-                NostrLMDB::open(&db)
+                NostrLmdb::open(&db)
+                    .await
                     .with_context(|| format!("Failed to open database at {db:?}"))?,
             );
 

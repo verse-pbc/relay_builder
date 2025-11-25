@@ -341,12 +341,12 @@ where
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_else(|_| Duration::from_secs(0))
                         .as_secs();
-                    if auth_event.created_at.as_u64() < now.saturating_sub(600) {
+                    if auth_event.created_at.as_secs() < now.saturating_sub(600) {
                         let conn_id_err = ctx.connection_id;
                         error!(
                             target: "auth",
                             "[{}] Expired AUTH message (event ID {}). Created at: {}, Now: {}",
-                            conn_id_err, auth_event_id, auth_event.created_at.as_u64(), now
+                            conn_id_err, auth_event_id, auth_event.created_at.as_secs(), now
                         );
                         ctx.sender.send(RelayMessage::ok(
                             auth_event_id,

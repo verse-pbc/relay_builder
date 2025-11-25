@@ -104,10 +104,10 @@ impl EventIngester {
             ClientMessage::Event(event) => ClientMessage::Event(Cow::Owned(event.into_owned())),
             ClientMessage::Req {
                 subscription_id,
-                filter,
+                filters,
             } => ClientMessage::Req {
                 subscription_id: Cow::Owned(subscription_id.into_owned()),
-                filter,
+                filters,
             },
             ClientMessage::Close(sub_id) => ClientMessage::Close(Cow::Owned(sub_id.into_owned())),
             ClientMessage::Auth(event) => ClientMessage::Auth(Cow::Owned(event.into_owned())),
@@ -137,13 +137,6 @@ impl EventIngester {
             },
             ClientMessage::NegClose { subscription_id } => ClientMessage::NegClose {
                 subscription_id: Cow::Owned(subscription_id.into_owned()),
-            },
-            ClientMessage::ReqMultiFilter {
-                subscription_id,
-                filters,
-            } => ClientMessage::ReqMultiFilter {
-                subscription_id: Cow::Owned(subscription_id.into_owned()),
-                filters,
             },
         };
 
@@ -218,10 +211,12 @@ mod tests {
 
         if let Ok(ClientMessage::Req {
             subscription_id,
-            filter,
+            filters,
         }) = result
         {
             assert_eq!(subscription_id.as_str(), "sub1");
+            assert_eq!(filters.len(), 1);
+            let filter = &filters[0];
             assert!(filter.kinds.as_ref().unwrap().contains(&Kind::TextNote));
             assert_eq!(filter.limit, Some(10));
         } else {

@@ -48,7 +48,7 @@ impl EventProcessor for ProtocolProcessor {
             .and_then(|tag| tag.content())
         {
             if let Ok(expiration) = expiration_tag.parse::<u64>() {
-                let now = Timestamp::now().as_u64();
+                let now = Timestamp::now().as_secs();
                 if expiration < now {
                     tracing::info!(
                         "Rejected expired event {} (expired at {})",

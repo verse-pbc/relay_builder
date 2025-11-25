@@ -2,15 +2,19 @@
 
 use crate::error::Error;
 use nostr_database::Events;
-use nostr_lmdb::{NostrLMDB, Scope};
+use nostr_lmdb::{NostrLmdb, Scope};
 use nostr_sdk::prelude::*;
 use std::sync::Arc;
 use tracing::{debug, error, info};
 
-/// A Nostr relay database that wraps `NostrLMDB` with async operations
+#[allow(deprecated)]
+/// Type alias for backward compatibility
+pub type NostrLMDB = NostrLmdb;
+
+/// A Nostr relay database that wraps `NostrLmdb` with async operations
 #[derive(Debug, Clone)]
 pub struct RelayDatabase {
-    lmdb: Arc<NostrLMDB>,
+    lmdb: Arc<NostrLmdb>,
 }
 
 impl RelayDatabase {
@@ -22,8 +26,8 @@ impl RelayDatabase {
     /// # Errors
     ///
     /// Returns error if database initialization fails.
-    pub fn new(db_path_param: impl AsRef<std::path::Path>) -> Result<Self, Error> {
-        Self::with_config(db_path_param, None, None)
+    pub async fn new(db_path_param: impl AsRef<std::path::Path>) -> Result<Self, Error> {
+        Self::with_config(db_path_param, None, None).await
     }
 
     /// Create a new relay database with specified `max_readers`
@@ -35,11 +39,11 @@ impl RelayDatabase {
     /// # Errors
     ///
     /// Returns error if database initialization fails.
-    pub fn with_max_readers(
+    pub async fn with_max_readers(
         db_path_param: impl AsRef<std::path::Path>,
         max_readers: Option<u32>,
     ) -> Result<Self, Error> {
-        Self::with_config(db_path_param, max_readers, None)
+        Self::with_config(db_path_param, max_readers, None).await
     }
 
     /// Create a new relay database with full configuration
@@ -52,10 +56,10 @@ impl RelayDatabase {
     /// # Errors
     ///
     /// Returns error if directory creation or database initialization fails.
-    pub fn with_config(
+    pub async fn with_config(
         db_path_param: impl AsRef<std::path::Path>,
         max_readers: Option<u32>,
-        _ingester_thread_config: Option<Box<dyn FnOnce() + Send>>,
+        ingester_thread_config: Option<Box<dyn FnOnce() + Send>>,
     ) -> Result<Self, Error> {
         let db_path = db_path_param.as_ref().to_path_buf();
 
@@ -85,16 +89,17 @@ impl RelayDatabase {
             info!("LMDB mode: {}", mode);
         }
 
-        let mut builder = NostrLMDB::builder(&db_path);
+        let mut builder = NostrLmdb::builder(&db_path);
         if let Some(readers) = max_readers {
             builder = builder.max_readers(readers);
         }
-        // Note: ingester_thread_config is no longer supported in nostr-lmdb
-        // but we keep the parameter for API compatibility
+        if let Some(config) = ingester_thread_config {
+            builder = builder.with_ingester_thread_config(config);
+        }
 
-        let lmdb_instance = builder.build().map_err(|e| {
+        let lmdb_instance = builder.build().await.map_err(|e| {
             Error::database(format!(
-                "Failed to open NostrLMDB at path '{}': {e}",
+                "Failed to open NostrLmdb at path '{}': {e}",
                 db_path.display()
             ))
         })?;
@@ -363,7 +368,9 @@ mod tests {
         let event_count = 10;
 
         // Create and populate database
-        let database = RelayDatabase::new(&db_path).expect("Failed to create database");
+        let database = RelayDatabase::new(&db_path)
+            .await
+            .expect("Failed to create database");
         let database = Arc::new(database);
 
         // Save events
@@ -395,7 +402,9 @@ mod tests {
         let tmp_dir = TempDir::new().unwrap();
         let db_path = tmp_dir.path().join("test_delete.db");
 
-        let database = RelayDatabase::new(&db_path).expect("Failed to create database");
+        let database = RelayDatabase::new(&db_path)
+            .await
+            .expect("Failed to create database");
         let database = Arc::new(database);
 
         // Save some events
@@ -442,7 +451,9 @@ mod tests {
         let tmp_dir = TempDir::new().unwrap();
         let db_path = tmp_dir.path().join("test_scoped.db");
 
-        let database = RelayDatabase::new(&db_path).expect("Failed to create database");
+        let database = RelayDatabase::new(&db_path)
+            .await
+            .expect("Failed to create database");
         let database = Arc::new(database);
 
         // Create events in different scopes

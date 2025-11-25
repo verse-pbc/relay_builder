@@ -73,22 +73,11 @@ where
                 }
                 Some(ClientMessage::Req {
                     subscription_id,
-                    filter,
-                }) => {
-                    let sub_id_clone = subscription_id.clone();
-                    let filter_json_clone = filter.as_json();
-
-                    debug!("> REQ {}: {}", sub_id_clone, filter_json_clone);
-                }
-                Some(ClientMessage::ReqMultiFilter {
-                    subscription_id,
                     filters,
                 }) => {
                     let sub_id_clone = subscription_id.clone();
-                    let filters_json_clone = filters
-                        .iter()
-                        .map(nostr_sdk::JsonUtil::as_json)
-                        .collect::<Vec<String>>();
+                    let filters_json_clone: Vec<String> =
+                        filters.iter().map(|f| f.as_ref().as_json()).collect();
                     debug!("> REQ {}: {:?}", sub_id_clone, filters_json_clone);
                 }
                 Some(ClientMessage::Close(subscription_id)) => {

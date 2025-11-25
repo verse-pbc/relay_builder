@@ -15,7 +15,7 @@ pub async fn setup_test() -> (TempDir, Arc<RelayDatabase>, Keys) {
     let tmp_dir = TempDir::new().unwrap();
     let db_path = tmp_dir.path().join("test.db");
     let keys = Keys::generate();
-    let database = RelayDatabase::new(db_path.to_str().unwrap()).unwrap();
+    let database = RelayDatabase::new(db_path.to_str().unwrap()).await.unwrap();
     (tmp_dir, Arc::new(database), keys)
 }
 
@@ -23,7 +23,7 @@ pub async fn setup_test_with_database() -> (TempDir, Arc<RelayDatabase>, Keys) {
     let tmp_dir = TempDir::new().unwrap();
     let db_path = tmp_dir.path().join("test.db");
     let keys = Keys::generate();
-    let database = RelayDatabase::new(db_path.to_str().unwrap()).unwrap();
+    let database = RelayDatabase::new(db_path.to_str().unwrap()).await.unwrap();
     (tmp_dir, Arc::new(database), keys)
 }
 
