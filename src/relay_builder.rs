@@ -81,7 +81,7 @@ impl std::fmt::Debug for HtmlOption {
 /// #     fn handle_event(
 /// #         &self,
 /// #         event: nostr_sdk::Event,
-/// #         custom_state: std::sync::Arc<parking_lot::RwLock<MyState>>,
+/// #         custom_state: std::sync::Arc<tokio::sync::RwLock<MyState>>,
 /// #         context: &EventContext,
 /// #     ) -> impl std::future::Future<Output = Result<Vec<relay_builder::StoreCommand>, relay_builder::Error>> + Send {
 /// #         async move { Ok(vec![]) }
