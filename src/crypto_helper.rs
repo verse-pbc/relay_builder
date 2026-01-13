@@ -2,11 +2,12 @@
 
 use crate::error::{Error, Result};
 use crate::subscription_coordinator::StoreCommand;
+use futures_util::future::join_all;
 use nostr_sdk::prelude::*;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info};
 
 /// Handle for cryptographic operations on Nostr events
@@ -15,9 +16,9 @@ pub struct CryptoHelper {
     /// Keys for signing events
     keys: Arc<Keys>,
     /// Verification request sender
-    verify_sender: flume::Sender<VerifyRequest>,
+    verify_sender: mpsc::Sender<VerifyRequest>,
     /// Signing request sender
-    sign_sender: flume::Sender<StoreCommand>,
+    sign_sender: mpsc::Sender<StoreCommand>,
     /// Stats counter for verified events
     verified_count: Arc<AtomicUsize>,
     /// Stats counter for signed events
@@ -98,25 +99,28 @@ impl CryptoHelper {
     /// Create a new crypto helper with the given keys
     pub fn new(keys: Arc<Keys>) -> Self {
         // Create verification channel with reasonable capacity
-        let (verify_sender, verify_receiver) = flume::bounded::<VerifyRequest>(10000);
+        let (verify_sender, verify_receiver) = mpsc::channel::<VerifyRequest>(10000);
         let verified_count = Arc::new(AtomicUsize::new(0));
 
         // Create signing channel with reasonable capacity
-        let (sign_sender, sign_receiver) = flume::bounded::<StoreCommand>(10000);
+        let (sign_sender, sign_receiver) = mpsc::channel::<StoreCommand>(10000);
         let signed_count = Arc::new(AtomicUsize::new(0));
 
-        // Spawn the verification processor
+        // Spawn the verification processor as a tokio task
         let verified_count_clone = Arc::clone(&verified_count);
-        std::thread::spawn(move || {
-            Self::run_verify_processor(&verify_receiver, &verified_count_clone);
-        });
+        tokio::spawn(Self::run_verify_processor(
+            verify_receiver,
+            verified_count_clone,
+        ));
 
-        // Spawn the signing processor
+        // Spawn the signing processor as a tokio task
         let signed_count_clone = Arc::clone(&signed_count);
         let keys_clone = Arc::clone(&keys);
-        std::thread::spawn(move || {
-            Self::run_sign_processor(&sign_receiver, &keys_clone, &signed_count_clone);
-        });
+        tokio::spawn(Self::run_sign_processor(
+            sign_receiver,
+            keys_clone,
+            signed_count_clone,
+        ));
 
         Self {
             keys,
@@ -128,52 +132,63 @@ impl CryptoHelper {
     }
 
     /// Run the verification processor that batches and parallelizes verification
-    fn run_verify_processor(
-        receiver: &flume::Receiver<VerifyRequest>,
-        verified_count: &Arc<AtomicUsize>,
+    async fn run_verify_processor(
+        mut receiver: mpsc::Receiver<VerifyRequest>,
+        verified_count: Arc<AtomicUsize>,
     ) {
         use once_cell::sync::Lazy;
         static STATS: Lazy<BatchStats> = Lazy::new(BatchStats::new);
 
         info!("Crypto verification processor started");
 
-        // Initialize rayon thread pool for CPU-bound work
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(num_cpus::get())
-            .thread_name(|idx| format!("crypto-verify-{idx}"))
-            .build()
-            .expect("Failed to create rayon thread pool");
+        // Reusable batch buffer to avoid allocations
+        let mut batch: Vec<VerifyRequest> = Vec::with_capacity(1000);
 
         loop {
+            batch.clear();
+
             // Wait for at least one verification request
-            let Ok(first_request) = receiver.recv() else {
+            let Some(first_request) = receiver.recv().await else {
                 info!("Crypto verification processor shutting down - channel closed");
                 break;
             };
+            batch.push(first_request);
 
-            // Collect a batch using the eager consumption pattern
-            let batch: Vec<VerifyRequest> = std::iter::once(first_request)
-                .chain(receiver.drain())
-                .collect();
+            // Eagerly drain any additional pending requests
+            while let Ok(request) = receiver.try_recv() {
+                batch.push(request);
+            }
 
             let batch_size = batch.len();
             debug!("Processing verification batch of {} events", batch_size);
 
-            // Process the batch in parallel using rayon
-            pool.install(|| {
-                batch.into_par_iter().for_each(|request| {
-                    let VerifyRequest { event, response } = request;
+            // Extract events and senders for processing
+            let requests = std::mem::take(&mut batch);
 
-                    // Perform the actual verification
-                    let result = event.verify().map_err(|e| {
-                        debug!("Event verification failed: {:?}", e);
-                        Error::protocol(format!("Invalid event signature: {e}"))
-                    });
+            // Process verification in spawn_blocking with rayon, return results
+            let results = tokio::task::spawn_blocking(move || {
+                requests
+                    .into_par_iter()
+                    .map(|request| {
+                        let VerifyRequest { event, response } = request;
 
-                    // Send the result back (ignore send errors if receiver dropped)
-                    let _ = response.send(result);
-                });
-            });
+                        // Perform the actual verification
+                        let result = event.verify().map_err(|e| {
+                            debug!("Event verification failed: {:?}", e);
+                            Error::protocol(format!("Invalid event signature: {e}"))
+                        });
+
+                        (response, result)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .await
+            .expect("spawn_blocking panicked");
+
+            // Send responses from tokio context (SAFE - no cross-thread wake)
+            for (response, result) in results {
+                let _ = response.send(result);
+            }
 
             // Update stats
             verified_count.fetch_add(batch_size, Ordering::Relaxed);
@@ -190,58 +205,50 @@ impl CryptoHelper {
     }
 
     /// Run the signing processor that batches and parallelizes signing
-    fn run_sign_processor(
-        receiver: &flume::Receiver<StoreCommand>,
-        keys: &Arc<Keys>,
-        signed_count: &Arc<AtomicUsize>,
+    async fn run_sign_processor(
+        mut receiver: mpsc::Receiver<StoreCommand>,
+        keys: Arc<Keys>,
+        signed_count: Arc<AtomicUsize>,
     ) {
         use once_cell::sync::Lazy;
         static STATS: Lazy<BatchStats> = Lazy::new(BatchStats::new);
 
         info!("Crypto signing processor started");
 
-        // Initialize rayon thread pool for CPU-bound work
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(num_cpus::get())
-            .thread_name(|idx| format!("crypto-sign-{idx}"))
-            .build()
-            .expect("Failed to create rayon thread pool");
-
-        // Use tokio runtime for async signing operations
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("Failed to create tokio runtime");
+        // Reusable batch buffer to avoid allocations
+        let mut batch: Vec<StoreCommand> = Vec::with_capacity(1000);
 
         loop {
+            batch.clear();
+
             // Wait for at least one signing request
-            let Ok(first_command) = receiver.recv() else {
+            let Some(first_command) = receiver.recv().await else {
                 info!("Crypto signing processor shutting down - channel closed");
                 break;
             };
+            batch.push(first_command);
 
-            // Collect a batch using the eager consumption pattern
-            let batch: Vec<StoreCommand> = std::iter::once(first_command)
-                .chain(receiver.drain())
-                .collect();
+            // Eagerly drain any additional pending requests
+            while let Ok(command) = receiver.try_recv() {
+                batch.push(command);
+            }
 
             let batch_size = batch.len();
             debug!("Processing signing batch of {} events", batch_size);
 
-            // Process the batch in parallel using rayon
-            pool.install(|| {
-                batch.into_par_iter().for_each(|command| {
+            // Create futures for all signing operations
+            let sign_futures: Vec<_> = batch
+                .drain(..)
+                .filter_map(|command| {
                     if let StoreCommand::SaveUnsignedEvent(event, scope, response_handler) = command
                     {
-                        // Sign the event using block_in_place to run async code
-                        let signed_result = runtime.block_on(async {
-                            keys.sign_event(event)
+                        let keys = Arc::clone(&keys);
+                        Some(async move {
+                            let signed_result = keys
+                                .sign_event(event)
                                 .await
-                                .map_err(|e| Error::internal(format!("Failed to sign event: {e}")))
-                        });
+                                .map_err(|e| Error::internal(format!("Failed to sign event: {e}")));
 
-                        // Send the result back via the oneshot
-                        if let Some(sender) = response_handler {
                             let response = match signed_result {
                                 Ok(signed_event) => Ok(Some(StoreCommand::SaveSignedEvent(
                                     Box::new(signed_event),
@@ -250,14 +257,25 @@ impl CryptoHelper {
                                 ))),
                                 Err(e) => Err(e),
                             };
-                            // Ignore send errors if receiver dropped
-                            let _ = sender.send(response);
-                        }
+
+                            (response_handler, response)
+                        })
                     } else {
                         error!("Non-SaveUnsignedEvent command received in signing processor");
+                        None
                     }
-                });
-            });
+                })
+                .collect();
+
+            // Execute all signing operations concurrently
+            let results = join_all(sign_futures).await;
+
+            // Send responses from tokio context (SAFE - no cross-thread wake)
+            for (response_handler, response) in results {
+                if let Some(sender) = response_handler {
+                    let _ = sender.send(response);
+                }
+            }
 
             // Update stats
             signed_count.fetch_add(batch_size, Ordering::Relaxed);
@@ -292,7 +310,7 @@ impl CryptoHelper {
 
         // Send verification request
         self.verify_sender
-            .send_async(VerifyRequest {
+            .send(VerifyRequest {
                 event,
                 response: tx,
             })
@@ -319,7 +337,7 @@ impl CryptoHelper {
         if let StoreCommand::SaveUnsignedEvent(..) = command {
             // Send to the signing processor for batched processing
             self.sign_sender
-                .send_async(command)
+                .send(command)
                 .await
                 .map_err(|_| Error::internal("Signing processor unavailable"))?;
             Ok(())
