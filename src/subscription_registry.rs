@@ -168,10 +168,13 @@ impl SubscriptionRegistry {
         subscription_id: &SubscriptionId,
         filters: Vec<Filter>,
     ) -> Result<(), Error> {
+        // Clone the Arc immediately to release DashMap ref before any .await
+        // This prevents deadlocks when DashMap shard locks are held across await points
         let connection = self
             .connections
             .get(connection_id)
-            .ok_or_else(|| Error::internal("Connection not found"))?;
+            .ok_or_else(|| Error::internal("Connection not found"))?
+            .clone();
 
         // Add to connection's local subscriptions
         let mut subscriptions = connection.subscriptions.write().await;
@@ -216,10 +219,13 @@ impl SubscriptionRegistry {
         connection_id: &str,
         subscription_id: &SubscriptionId,
     ) -> Result<(), Error> {
+        // Clone the Arc immediately to release DashMap ref before any .await
+        // This prevents deadlocks when DashMap shard locks are held across await points
         let connection = self
             .connections
             .get(connection_id)
-            .ok_or_else(|| Error::internal("Connection not found"))?;
+            .ok_or_else(|| Error::internal("Connection not found"))?
+            .clone();
 
         let scope = connection.subdomain.as_ref().clone();
         let mut subscriptions = connection.subscriptions.write().await;
@@ -267,24 +273,27 @@ impl SubscriptionRegistry {
         debug!("Cleaning up connection {}", connection_id);
 
         // Get subscription IDs and scope before removing the connection
-        let cleanup_info = if let Some(connection) = self.connections.get(connection_id) {
-            let scope = connection.subdomain.as_ref().clone();
-            let subscriptions = connection.subscriptions.read().await;
-            let ids: Vec<SubscriptionId> = subscriptions.keys().cloned().collect();
-            let count = ids.len();
-            drop(subscriptions);
-            debug!(
-                "Connection {} has {} subscriptions to clean up",
-                connection_id, count
-            );
-            Some((ids, count, scope))
-        } else {
-            warn!(
-                "Connection {} not found in registry during cleanup",
-                connection_id
-            );
-            None
-        };
+        // Clone the Arc immediately to release DashMap ref before any .await
+        // This prevents deadlocks when DashMap shard locks are held across await points
+        let cleanup_info =
+            if let Some(connection) = self.connections.get(connection_id).map(|r| r.clone()) {
+                let scope = connection.subdomain.as_ref().clone();
+                let subscriptions = connection.subscriptions.read().await;
+                let ids: Vec<SubscriptionId> = subscriptions.keys().cloned().collect();
+                let count = ids.len();
+                drop(subscriptions);
+                debug!(
+                    "Connection {} has {} subscriptions to clean up",
+                    connection_id, count
+                );
+                Some((ids, count, scope))
+            } else {
+                warn!(
+                    "Connection {} not found in registry during cleanup",
+                    connection_id
+                );
+                None
+            };
 
         // Remove the connection
         self.connections.remove(connection_id);
@@ -316,23 +325,40 @@ impl SubscriptionRegistry {
     pub async fn get_diagnostics(&self) -> RegistryDiagnostics {
         let mut scope_diagnostics = Vec::new();
 
-        // Collect per-scope information
-        for index_entry in self.indexes.iter() {
-            let scope = index_entry.key().clone();
-            let index = index_entry.value();
+        // Collect scopes and indexes first, cloning to release DashMap refs
+        // This prevents deadlocks when DashMap shard locks are held across await points
+        let scopes_and_indexes: Vec<(Scope, Arc<SubscriptionIndex>)> = self
+            .indexes
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect();
+
+        // Collect connections with their scopes, cloning to release DashMap refs
+        let connections_by_scope: Vec<(Scope, Arc<ConnectionSubscriptions>)> = self
+            .connections
+            .iter()
+            .map(|entry| {
+                (
+                    entry.value().subdomain.as_ref().clone(),
+                    entry.value().clone(),
+                )
+            })
+            .collect();
+
+        // Now process each scope without holding DashMap refs across awaits
+        for (scope, index) in &scopes_and_indexes {
             let index_stats = index.stats().await;
 
             // Count connections for this scope
-            let connection_count = self
-                .connections
+            let connection_count = connections_by_scope
                 .iter()
-                .filter(|conn| conn.subdomain.as_ref() == &scope)
+                .filter(|(s, _)| s == scope)
                 .count();
 
             // Count total subscriptions for this scope
             let mut subscription_count = 0;
-            for conn in self.connections.iter() {
-                if conn.subdomain.as_ref() == &scope {
+            for (s, conn) in &connections_by_scope {
+                if s == scope {
                     subscription_count += conn.subscriptions.read().await.len();
                 }
             }
@@ -351,17 +377,10 @@ impl SubscriptionRegistry {
         }
 
         // Check for empty scopes (has index but no connections)
-        let empty_scopes: Vec<Scope> = self
-            .indexes
+        let empty_scopes: Vec<Scope> = scopes_and_indexes
             .iter()
-            .filter(|entry| {
-                let scope = entry.key();
-                !self
-                    .connections
-                    .iter()
-                    .any(|conn| conn.subdomain.as_ref() == scope)
-            })
-            .map(|entry| entry.key().clone())
+            .filter(|(scope, _)| !connections_by_scope.iter().any(|(s, _)| s == scope))
+            .map(|(scope, _)| scope.clone())
             .collect();
 
         RegistryDiagnostics {
