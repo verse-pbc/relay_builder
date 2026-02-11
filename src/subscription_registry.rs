@@ -230,10 +230,11 @@ impl SubscriptionRegistry {
         let scope = connection.subdomain.as_ref().clone();
         let mut subscriptions = connection.subscriptions.write().await;
         if subscriptions.remove(subscription_id).is_some() {
-            // Remove from the appropriate scope index
-            if let Some(index_entry) = self.indexes.get(&scope) {
-                index_entry
-                    .value()
+            // Clone Arc to release DashMap ref before any await points
+            // This prevents deadlock when DashMap shard locks are held across await
+            let index = self.indexes.get(&scope).map(|r| r.clone());
+            if let Some(index) = index {
+                index
                     .remove_subscription(connection_id, subscription_id)
                     .await;
             }
@@ -300,8 +301,10 @@ impl SubscriptionRegistry {
 
         // Clean up from index and decrement metrics
         if let Some((ids, count, scope)) = cleanup_info {
-            if let Some(index_entry) = self.indexes.get(&scope) {
-                let index = index_entry.value();
+            // Clone Arc to release DashMap ref before any await points
+            // This prevents deadlock when DashMap shard locks are held across await
+            let index = self.indexes.get(&scope).map(|r| r.clone());
+            if let Some(index) = index {
                 for sub_id in ids {
                     index.remove_subscription(connection_id, &sub_id).await;
                 }

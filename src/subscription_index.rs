@@ -290,14 +290,14 @@ impl SubscriptionIndex {
             }
 
             // Check group-level deduplication
-            if let Some(filter_group_ref) = self.filter_groups.get(&group_key) {
-                let filter_group = filter_group_ref.value();
-
+            // Clone Arc to release DashMap ref before any await points
+            // This prevents deadlock when DashMap shard locks are held across await
+            let filter_group = self.filter_groups.get(&group_key).map(|r| r.clone());
+            if let Some(filter_group) = filter_group {
                 // Check if group has seen event (acquire then immediately release lock)
                 let has_seen = {
                     let guard = filter_group.read().await;
-                    guard.has_seen_event(&event.id) // Synchronous call - no await
-                                                    // Guard dropped here
+                    guard.has_seen_event(&event.id)
                 };
 
                 if has_seen {
@@ -312,8 +312,7 @@ impl SubscriptionIndex {
                 // Mark event as seen by this group (acquire then immediately release lock)
                 {
                     let guard = filter_group.write().await;
-                    guard.mark_event_seen(event.id); // Synchronous call - no await
-                                                     // Guard dropped here
+                    guard.mark_event_seen(event.id);
                 }
 
                 matching_subscriptions.push(group_key);
