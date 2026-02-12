@@ -3,8 +3,11 @@ FROM rust:1.86-bookworm AS builder
 
 WORKDIR /app
 
-# Copy source
-COPY . .
+# Copy only files needed for the build
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY src/ src/
+COPY examples/ examples/
+COPY benches/ benches/
 
 # Build the relay binary
 RUN cargo build --release --bin relay
