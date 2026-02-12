@@ -84,8 +84,8 @@ fn scope_to_filename(scope: &Scope, include_count: bool, count: Option<u64>) -> 
         Scope::Named { name, .. } => format!("scope_{}", sanitize_filename(name)),
     };
 
-    if include_count && count.is_some() {
-        format!("{}_{}.jsonl", base, count.unwrap())
+    if let (true, Some(n)) = (include_count, count) {
+        format!("{base}_{n}.jsonl")
     } else {
         format!("{base}.jsonl")
     }
