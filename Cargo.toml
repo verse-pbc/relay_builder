@@ -90,6 +90,10 @@ name = "07_rate_limiting"
 
 
 [[bin]]
+name = "relay"
+path = "src/bin/relay.rs"
+
+[[bin]]
 name = "export_import"
 path = "src/bin/export_import.rs"
 

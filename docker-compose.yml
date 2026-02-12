@@ -3,13 +3,27 @@ version: '3.8'
 services:
   relay:
     build:
-      context: ../
-      dockerfile: relay_builder/Dockerfile
+      context: .
+      dockerfile: Dockerfile
     ports:
       - "8080:8080"
     volumes:
       - ./data:/data
     environment:
       - RELAY_DATA_DIR=/data
+      - RELAY_PORT=8080
+      - RELAY_BIND=0.0.0.0
+      - RELAY_URL=ws://localhost:8080
+      - RELAY_NAME=Nostr Relay
+      - RELAY_DESCRIPTION=A relay built with relay_builder
+      - RELAY_CONTACT=
+      - RELAY_ICON=
+      - MAX_CONNECTIONS=1000
+      - MAX_SUBSCRIPTIONS=100
+      - MAX_SUBSCRIPTION_LIMIT=5000
+      - MAX_CONNECTION_DURATION=3600
+      - IDLE_TIMEOUT=300
+      - RATE_LIMIT_PER_SECOND=10
+      - RATE_LIMIT_GLOBAL=0
       - RUST_LOG=info
     restart: unless-stopped
