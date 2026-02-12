@@ -45,6 +45,9 @@ fn main() -> Result<()> {
 
     info!("Opening database at: {:?}", args.db_path);
 
+    // SAFETY: We open the database read-only (no concurrent writers in this process)
+    // and the db_path is user-provided via CLI args. LMDB requires unsafe for open
+    // because the caller must ensure no other process has the file locked incompatibly.
     let env = unsafe {
         EnvOpenOptions::new()
             .map_size(1024 * 1024 * 1024) // 1GB

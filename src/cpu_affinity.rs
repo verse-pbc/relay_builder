@@ -18,6 +18,9 @@ use std::mem;
 /// Returns an error if the system call to set CPU affinity fails
 #[cfg(target_os = "linux")]
 pub fn pin_current_thread_to(cpu: usize) -> io::Result<()> {
+    // SAFETY: cpu_set_t is a plain-data type safe to zero-init. CPU_ZERO/CPU_SET
+    // only write within the set, and sched_setaffinity with pid=0 targets the
+    // current thread. We check the return value for errors.
     unsafe {
         let mut set: libc::cpu_set_t = mem::zeroed();
         libc::CPU_ZERO(&mut set);
@@ -48,6 +51,9 @@ pub fn pin_current_thread_to(cpu: usize) -> io::Result<()> {
 #[cfg(target_os = "linux")]
 pub fn allow_all_but_current_thread(excluded: &[usize]) -> io::Result<()> {
     let cpu_count = num_cpus::get();
+    // SAFETY: Same invariants as pin_current_thread_to - cpu_set_t is safe to
+    // zero-init, CPU_SET only writes within bounds, and sched_setaffinity with
+    // pid=0 targets the current thread.
     unsafe {
         let mut set: libc::cpu_set_t = mem::zeroed();
         libc::CPU_ZERO(&mut set);

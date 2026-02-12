@@ -133,7 +133,10 @@ where
         // If we found a SaveSignedEvent command, remove it and process it with message_sender
         if let Some(idx) = event_command_idx {
             let mut event_command = commands.swap_remove(idx);
-            event_command.set_message_sender(message_sender.unwrap())?;
+            // message_sender is always Some when called from process_inbound (EVENT path)
+            let sender = message_sender
+                .ok_or_else(|| Error::internal("message_sender missing for EVENT".to_string()))?;
+            event_command.set_message_sender(sender)?;
             subscription_coordinator
                 .save_and_broadcast(event_command)
                 .await
